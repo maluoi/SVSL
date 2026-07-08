@@ -514,6 +514,20 @@ static const compute_cfg_t compute_cfgs[] = {
 	  .buffers = { { "result", 64 * 14 } } },
 	{ .file = "check_atomics", .passes = { { .dispatch = { 1, 1, 1 } } },
 	  .buffers = { { "result", 16 } } },
+	{ .file    = "check_bool_store", // bool struct members: uint 0/1 in memory
+	  .passes  = { { .dispatch = { 1, 1, 1 } } },
+	  .buffers = { { "results", 8, fill_zero } },
+	  // rec_t is 4 words per element: pair.x, pair.y, flag, v.
+	  // pair = (i>1, i>5), flag = !(i>3), v = i*0.5 — one thread per element, exact.
+	  .expect  = { {  0, .value = 0, .eps = 0.1f }, // [0] pair.x: 0>1 = 0
+	               {  2, 1 },                       // [0] flag: !(0>3) = 1
+	               {  8, 1 },                       // [2] pair.x: 2>1
+	               { 11, 0x3F800000 },              // [2] v = 1.0f
+	               { 16, 1 },                       // [4] pair.x: 4>1
+	               { 17, .value = 0, .eps = 0.1f }, // [4] pair.y: 4>5 = 0
+	               { 18, .value = 0, .eps = 0.1f }, // [4] flag: !(4>3) = 0
+	               { 29, 1 },                       // [7] pair.y: 7>5
+	               { 31, 0x40600000 } } },          // [7] v = 3.5f
 	// SVSL-native checks (enums, bit fields, atomic orders): golden words.
 	// check_atomic_order only pins buf[0] — the other slots are racy by design.
 	{ .file    = "check_atomic_order",

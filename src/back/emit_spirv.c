@@ -135,6 +135,17 @@ static uint32_t spv_float_const(emit_t *e, float v) {
 	memcpy(&bits, &v, 4);
 	return svsl_spv_const(&e->spv, f32, bits, false, false);
 }
+// uint constant splatted to a bool value's shape, for the bool<->uint buffer lowering
+static uint32_t spv_uint_shape_const(emit_t *e, const svsl_type_t *shape, uint32_t v) {
+	uint32_t scalar = spv_uint_const(e, v);
+	if (shape->kind != svsl_type_vector) return scalar;
+	uint32_t vec_t = svsl_spv_type(&e->spv, SpvOpTypeVector,
+	                               (uint32_t[]){ spv_scalar_type(e, svsl_scalar_uint32), shape->count }, 2);
+	uint32_t id = svsl_spv_id(&e->spv);
+	uint32_t words[6] = { vec_t, id, scalar, scalar, scalar, scalar };
+	svsl_spv_inst(&e->spv, &e->spv.types, SpvOpConstantComposite, words, 2 + (uint32_t)shape->count);
+	return id;
+}
 
 // A storage image's format: the explicit template/attribute format if named
 static SpvDim spv_dim(svsl_texdim_ dim) {
@@ -302,6 +313,16 @@ static uint32_t matrix_stride_for(emit_t *e, const svsl_type_t *m, svsl_layout_ 
 
 static uint32_t spv_type_laid(emit_t *e, svsl_type_id_t type, svsl_layout_ layout) {
 	const svsl_type_t *t = svsl_type_get(&e->prog->types, type);
+	// OpTypeBool has no external layout: buffer members store uint 0/1 instead,
+	// converting at load/store (matches glslang; see convert_composite)
+	if (t->scalar == svsl_scalar_bool &&
+	    (t->kind == svsl_type_scalar || t->kind == svsl_type_vector)) {
+		svsl_types_t  *types = (svsl_types_t *)&e->prog->types;
+		svsl_type_id_t as_u  = t->kind == svsl_type_vector
+			? svsl_type_vector_id(types, svsl_scalar_uint32, t->count)
+			: svsl_type_scalar_id(types, svsl_scalar_uint32);
+		return spv_type_for(e, as_u);
+	}
 	if (t->kind != svsl_type_array && t->kind != svsl_type_struct)
 		return spv_type_for(e, type);
 	if (e->laid_ids[layout][type]) return e->laid_ids[layout][type];

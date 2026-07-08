@@ -67,7 +67,7 @@ true, false
 
 | Type | Meaning |
 |---|---|
-| `bool` | boolean (32-bit in memory interfaces) |
+| `bool` | boolean (stored as a 32-bit uint 0/1 in buffers; see below) |
 | `int8` `int16` `int32` `int64` | signed integers, exact width |
 | `uint8` `uint16` `uint32` `uint64` | unsigned integers, exact width |
 | `float16` | **exactly** 16-bit float (§3.2) |
@@ -77,6 +77,11 @@ true, false
 
 Non-32-bit widths add SPIR-V capabilities automatically (`Int8`, `Int16`, `Int64`,
 `Float16`, `Float64`, plus 8/16-bit storage capabilities when used in buffers).
+
+`OpTypeBool` is not allowed in externally visible memory, so `bool` members of
+cbuffers, storage buffers, and push constants are stored as `uint` 0/1 and convert
+on access (`!= 0` on load, select 1/0 on store), matching glslang. Reflection
+reports them as uint-typed. Specialization-constant bools stay real booleans.
 
 ### 3.2 `half` vs `float16`
 
@@ -308,9 +313,34 @@ Allowed: `uniform` = pack16 only (default); `storagebuffer`/`pushconstant` = any
 Without a keyword, storage buffers and push constants use **std430**, which validates
 on every Vulkan device with no extra feature. `pack1` is the opt-in for exact C-struct
 mirroring (it needs the `scalarBlockLayout` device feature); std430 has no keyword —
-it exists only as the safe default. Violations are compile errors. `[offset(N)]` on a
-member (native spelling of `[[vk::offset]]`) sets an explicit byte offset; it may only
-increase offsets.
+it exists only as the safe default. The object forms `StructuredBuffer<T>` /
+`RWStructuredBuffer<T>` take no layout keyword and always use std430. Violations are
+compile errors. `[offset(N)]` on a member (native spelling of `[[vk::offset]]`) sets
+an explicit byte offset; it may only increase offsets.
+
+How the same struct lands under each mode:
+
+```c
+struct particle_t {
+	uint   id;    // C: offset 0
+	float2 pos;   // C: offset 4
+	float  scale; // C: offset 12, sizeof 16
+};
+```
+
+| Mode | `id` | `pos` | `scale` | array stride |
+|---|---|---|---|---|
+| `pack1` | 0 | 4 | 12 | 16 |
+| `pack8` | 0 | 8 | 16 | 24 |
+| `pack16` (std140) | 0 | 8 | 16 | 32 |
+| *(none)* (std430) | 0 | 8 | 16 | 24 |
+
+Only `pack1` is byte-identical to the natural C layout — under the other modes a
+matching C struct needs explicit padding members. `pack8` happens to match std430
+here because `float2` already aligns to 8; the two differ on `float3`/`float4`
+members, which std430 aligns to 16 and `pack8` to 8. When a buffer is shared with
+CPU code, either declare it `pack1` or order members so no padding is needed under
+the mode in use (`float4`-sized groups first, scalars packed in `float3` tails).
 
 ### 4.3 Access and variable storage
 

@@ -75,7 +75,7 @@ static uint16_t var_type_of(const svsl_types_t *types, svsl_type_id_t id, uint16
 	*out_count = (uint16_t)(components * elems);
 	if (t->kind == svsl_type_struct) return var_none; // struct members: type_name carries the info
 	switch (t->scalar) {
-	case svsl_scalar_bool:                             return var_int; // VkBool32
+	case svsl_scalar_bool:                             return var_uint; // stored as uint 0/1
 	case svsl_scalar_int8: case svsl_scalar_int16:
 	case svsl_scalar_int32: case svsl_scalar_int64:    return var_int;
 	case svsl_scalar_uint8:                            return var_uint8;
@@ -488,7 +488,12 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 			wstr(&w, sc->name, 32);
 			wu32(&w, sc->id);
 			wu32(&w, sc->default_bits);
-			wu16(&w, var_type_of(&prog->types, sc->type, &type_count));
+			// spec-const bools stay OpTypeBool in SPIR-V; sksc reflects those as
+			// int (VkBool32), unlike buffer members which are stored as uint
+			uint16_t sc_type = var_type_of(&prog->types, sc->type, &type_count);
+			if (svsl_type_get(&prog->types, sc->type)->scalar == svsl_scalar_bool)
+				sc_type = var_int;
+			wu16(&w, sc_type);
 			wu8(&w, usage.spec_stages[i]);
 		}
 	}

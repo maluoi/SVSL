@@ -49,15 +49,23 @@ typedef struct sks_res_t {
 	uint8_t  image_format; // SpvImageFormat of storage images
 } sks_res_t;
 
+typedef struct sks_spec_t {
+	char     name[32];
+	uint32_t id, default_bits;
+	uint16_t type;
+	uint8_t  stage_bits;
+} sks_spec_t;
+
 typedef struct sks_file_t {
-	uint16_t  version;
-	uint64_t  features;
-	uint32_t  stage_count, buffer_count, resource_count, spec_count, wave_size;
-	int32_t   vertex_input_count;
-	char      name[256];
-	sks_buf_t bufs[8];
-	sks_res_t res[16];
-	uint8_t   vins[16][10]; // format(4) count(1) semantic(4) slot(1)
+	uint16_t   version;
+	uint64_t   features;
+	uint32_t   stage_count, buffer_count, resource_count, spec_count, wave_size;
+	int32_t    vertex_input_count;
+	char       name[256];
+	sks_buf_t  bufs[8];
+	sks_res_t  res[16];
+	sks_spec_t specs[8];
+	uint8_t    vins[16][10]; // format(4) count(1) semantic(4) slot(1)
 } sks_file_t;
 
 static bool sks_read(const uint8_t *data, int32_t size, sks_file_t *out) {
@@ -107,6 +115,12 @@ static bool sks_read(const uint8_t *data, int32_t size, sks_file_t *out) {
 		TAKE(&res->element_size, 4);
 		TAKE(&res->shape, 1); TAKE(&res->image_format, 1);
 		p += 2; // reserved
+	}
+	for (uint32_t s = 0; s < out->spec_count && s < 8; s++) {
+		sks_spec_t *spec = &out->specs[s];
+		TAKE(spec->name, 32);
+		TAKE(&spec->id, 4); TAKE(&spec->default_bits, 4);
+		TAKE(&spec->type, 2); TAKE(&spec->stage_bits, 1);
 	}
 	#undef TAKE
 	return true;
@@ -291,6 +305,44 @@ static void test_sks_structure(void) {
 	svsl_arena_free(&arena);
 }
 
+// bool buffer members are stored as uint 0/1 and reflect as var_uint — the type
+// material_set_bool passes. Spec-const bools stay OpTypeBool and reflect as
+// var_int, matching sksc's reflection of both.
+static void test_sks_bool_params(void) {
+	svsl_arena_t arena = {0};
+
+	svsl_sks_blob_t blob = {0};
+	TEST_CHECK(compile_sks(&arena, "checks/check_bool_param.hlsl", &blob));
+	sks_file_t f = {0};
+	TEST_CHECK(sks_read(blob.bytes, blob.size, &f));
+	TEST_CHECK(f.buffer_count == 1 && strcmp(f.bufs[0].name, "$Global") == 0);
+	TEST_CHECK(f.bufs[0].var_count == 3);
+	TEST_CHECK(strcmp(f.bufs[0].vars[0].name, "on_off") == 0);
+	TEST_CHECK(f.bufs[0].vars[0].type == 2 && f.bufs[0].vars[0].type_count == 1); // var_uint
+	TEST_CHECK(strcmp(f.bufs[0].vars[0].type_name, "bool") == 0); // source truth kept
+	TEST_CHECK(f.bufs[0].vars[1].type == 2 && f.bufs[0].vars[1].type_count == 2); // bool2
+	TEST_CHECK(f.bufs[0].vars[2].type == 0); // struct member: var_none, named by type_name
+	uint32_t def = 0; // `= true` bakes a uint 1 default
+	TEST_CHECK(f.bufs[0].defaults_size >= 4);
+	if (f.bufs[0].defaults_size >= 4) memcpy(&def, f.bufs[0].defaults, 4);
+	TEST_CHECK(def == 1);
+
+	svsl_sks_blob_t sa = {0};
+	TEST_CHECK(compile_sks(&arena, "ported/78_spec_atomics.hlsl", &sa));
+	sks_file_t fa = {0};
+	TEST_CHECK(sks_read(sa.bytes, sa.size, &fa));
+	bool found_half_rate = false;
+	for (uint32_t s = 0; s < fa.spec_count && s < 8; s++)
+		if (strcmp(fa.specs[s].name, "HALF_RATE") == 0) {
+			found_half_rate = true;
+			TEST_CHECK(fa.specs[s].type == 1); // var_int (VkBool32)
+			TEST_CHECK(fa.specs[s].default_bits == 0);
+		}
+	TEST_CHECK(found_half_rate);
+
+	svsl_arena_free(&arena);
+}
+
 // --- reference comparison (runs when skshaderc is available) -----------------------------
 
 static bool compare_with_reference(svsl_arena_t *arena, const char *shader) {
@@ -371,5 +423,6 @@ static void test_sks_reference(void) {
 
 void test_sks(void) {
 	test_sks_structure();
+	test_sks_bool_params();
 	test_sks_reference();
 }

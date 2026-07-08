@@ -124,6 +124,15 @@ static uint32_t convert_composite(emit_t *e, uint32_t value, svsl_type_id_t type
 			                                (uint32_t[]){ value, (uint32_t)m }, 2);
 			parts[m] = convert_composite(e, part, t->elem, layout, to_value);
 		}
+	} else if (t->scalar == svsl_scalar_bool) {
+		// bools live in buffers as uint 0/1 (spv_type_laid): != 0 on the way to a
+		// value, select 1/0 on the way back
+		if (to_value)
+			return emit_value_inst(e, &e->spv.funcs, SpvOpINotEqual, value_t,
+			                       (uint32_t[]){ value, spv_uint_shape_const(e, t, 0) }, 2);
+		return emit_value_inst(e, &e->spv.funcs, SpvOpSelect, laid_t,
+		                       (uint32_t[]){ value, spv_uint_shape_const(e, t, 1),
+		                                     spv_uint_shape_const(e, t, 0) }, 3);
 	} else {
 		return value;
 	}
@@ -841,14 +850,16 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 		SpvStorageClass pc = (SpvStorageClass)e->value_class[inst->args[0]];
 		bool in_buffer = pc == SpvStorageClassUniform || pc == SpvStorageClassStorageBuffer ||
 		                 pc == SpvStorageClassPushConstant;
-		const svsl_type_t *lt = svsl_type_get(&e->prog->types, inst->type);
-		if (in_buffer && (lt->kind == svsl_type_struct || lt->kind == svsl_type_array)) {
-			// whole-composite copy from a laid-out buffer: load laid, rebuild value-typed
+		if (in_buffer) {
+			// buffer memory uses laid types (offset-decorated composites, bool as
+			// uint): when they differ, load the laid value and rebuild the value type
 			uint32_t laid_t = spv_type_laid(e, inst->type, (svsl_layout_)e->value_layout[inst->args[0]]);
-			uint32_t laid_v = emit_value_inst(e, fs, SpvOpLoad, laid_t, (uint32_t[]){ ptr }, 1);
-			result = convert_composite(e, laid_v, inst->type,
-			                           (svsl_layout_)e->value_layout[inst->args[0]], true);
-			break;
+			if (laid_t != type_id) {
+				uint32_t laid_v = emit_value_inst(e, fs, SpvOpLoad, laid_t, (uint32_t[]){ ptr }, 1);
+				result = convert_composite(e, laid_v, inst->type,
+				                           (svsl_layout_)e->value_layout[inst->args[0]], true);
+				break;
+			}
 		}
 		result = emit_value_inst(e, fs, SpvOpLoad, type_id, (uint32_t[]){ ptr }, 1);
 		break;
@@ -859,9 +870,8 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 		bool in_buffer = pc == SpvStorageClassUniform || pc == SpvStorageClassStorageBuffer ||
 		                 pc == SpvStorageClassPushConstant;
 		svsl_type_id_t vt2 = e->fn->insts.items[inst->args[1]].type;
-		const svsl_type_t *lt = svsl_type_get(&e->prog->types, vt2);
 		uint32_t value = e->value_ids[inst->args[1]];
-		if (in_buffer && (lt->kind == svsl_type_struct || lt->kind == svsl_type_array))
+		if (in_buffer) // laid <- value conversion; no-op when the types are shared
 			value = convert_composite(e, value, vt2,
 			                          (svsl_layout_)e->value_layout[inst->args[0]], false);
 		svsl_spv_inst2(spv, fs, SpvOpStore, ptr, value);
