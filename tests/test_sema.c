@@ -289,6 +289,40 @@ static void test_sema_multisample_and_tile(void) {
 	svsl_arena_free(&arena);
 }
 
+static void test_sema_texture_index(void) {
+	svsl_arena_t arena = {0};
+
+	// sampled tex[coord] is a mip-0 texel fetch (HLSL operator[]), for 1D/2D/3D
+	sema_run_t r = run_sema(&arena,
+		"Texture2D<float4> tex2 : register(t0);\n"
+		"Texture3D<float4> tex3 : register(t1);\n"
+		"RWTexture3D<float4> out_tex : register(u0);\n"
+		"[numthreads(1,1,1)]\n"
+		"void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	out_tex[id] = tex2[id.xy] + tex3[id];\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+
+	// cube and multisampled textures have no [] form
+	r = run_sema_ex(&arena,
+		"TextureCube<float4> cube : register(t0);\n"
+		"float4 ps(int3 c : C) : SV_Target { return cube[c]; }\n", true);
+	TEST_CHECK(!r.ok);
+	r = run_sema_ex(&arena,
+		"Texture2DMS<float4, 4> msaa : register(t0);\n"
+		"float4 ps(int2 c : C) : SV_Target { return msaa[c]; }\n", true);
+	TEST_CHECK(!r.ok);
+
+	// a sampled texture texel is read-only: it is not a writable lvalue
+	r = run_sema_ex(&arena,
+		"Texture2D<float4> tex : register(t0);\n"
+		"[numthreads(1,1,1)]\n"
+		"void cs(uint3 id : SV_DispatchThreadID) { tex[id.xy] = 1; }\n", true);
+	TEST_CHECK(!r.ok);
+
+	svsl_arena_free(&arena);
+}
+
 
 // --- body typechecking ---------------------------------------------------------
 
@@ -794,6 +828,7 @@ void test_sema(void) {
 	test_sema_half_strict16();
 	test_sema_attributes();
 	test_sema_multisample_and_tile();
+	test_sema_texture_index();
 	test_sema_porting_hints();
 	test_sema_errors();
 }

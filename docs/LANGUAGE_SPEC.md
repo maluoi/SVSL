@@ -609,6 +609,7 @@ float  s = tex.SampleCmp          (cmpSmp, uv, ref);
 float  s = tex.SampleCmpLevelZero (cmpSmp, uv, ref);
 float4 g = tex.Gather / GatherRed / GatherGreen / GatherBlue / GatherAlpha / GatherCmp (...);
 float4 t = tex.Load(int3(x, y, mip));      // unfiltered fetch, no sampler
+float4 f = tex[int2(x, y)];                // fetch shorthand: Load at mip 0 (not Cube/MS)
 float4 s = texMS.Load(int2(x, y), sample); // Texture2DMS: fetch one sample
 float  l = tex.CalculateLevelOfDetail(smp, uv);            // clamped LOD query
 float  u = tex.CalculateLevelOfDetailUnclamped(smp, uv);

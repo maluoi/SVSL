@@ -1010,7 +1010,12 @@ static svsl_type_id_t check_expr(check_t *c, svsl_ast_expr_t *e) {
 		svsl_type_id_t idx = check_expr(c, e->index.index);
 		if (obj == SVSL_TYPE_NONE || idx == SVSL_TYPE_NONE) break;
 		const svsl_type_t *t = svsl_type_get(types, obj);
-		if (t->kind == svsl_type_image) { // img[coord] load/store
+		if (t->kind == svsl_type_image || t->kind == svsl_type_texture) { // img/tex[coord] texel access
+			// sampled tex[coord] is a mip-0 fetch, like Load; cube/MS have no such form
+			if (t->kind == svsl_type_texture && (t->multisampled || t->dim == svsl_texdim_cube)) {
+				cerr(c, e->loc, "this texture cannot be indexed with []; use Load or Sample%.*s", (svsl_str_t){0});
+				break;
+			}
 			convert_to(c, e->index.index, make_shape(types, svsl_scalar_int32, texdim_coord_count(t)));
 			result = t->elem;
 			break;

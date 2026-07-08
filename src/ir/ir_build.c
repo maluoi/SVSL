@@ -1251,6 +1251,22 @@ static uint32_t lower_expr(build_t *b, const svsl_ast_expr_t *e) {
 			return finish(b, e, emit_op(b, svsl_ir_image_load, e->sema_type,
 			                            (uint32_t)res, coord, 0, e->loc));
 		}
+		if (obj->kind == svsl_type_texture) {
+			// tex[coord] == tex.Load(int(dim+1)(coord, 0)): build the mip-0 fetch
+			// coordinate and reuse the Load path (svsl_ir_tex).
+			int32_t  res   = resolve_resource(b, e->index.object);
+			uint32_t coord = lower_expr(b, e->index.index);
+			int32_t  n     = obj->dim == svsl_texdim_1d ? 1 : obj->dim == svsl_texdim_3d ? 3 : 2;
+			n += obj->arrayed ? 1 : 0;
+			uint32_t parts[2] = { coord, emit_const_int(b, svsl_scalar_int32, 0, e->loc) };
+			uint32_t full     = emit(b, (svsl_ir_inst_t){ .op = svsl_ir_construct,
+			                          .type = svsl_type_vector_id(&b->prog->types, svsl_scalar_int32, n + 1),
+			                          .args = { 0, 0, 0, SVSL_IR_NONE },
+			                          .aux = aux_push(b, parts, 2), .aux_count = 2, .loc = e->loc });
+			return finish(b, e, emit(b, (svsl_ir_inst_t){ .op = svsl_ir_tex, .type = e->sema_type,
+			                          .args = { (uint32_t)res, SVSL_IR_NONE, (uint32_t)svsl_method_load, SVSL_IR_NONE },
+			                          .aux = aux_push(b, &full, 1), .aux_count = 1, .loc = e->loc }));
+		}
 		uint32_t ptr = lower_lvalue(b, e);
 		if (ptr != SVSL_IR_NONE)
 			return finish(b, e, emit_op(b, svsl_ir_load,
