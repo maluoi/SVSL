@@ -227,6 +227,39 @@ static void test_sema_storagebuffer_block(void) {
 	svsl_arena_free(&arena);
 }
 
+static void test_sema_unsized_arrays(void) {
+	svsl_arena_t arena = {0};
+
+	// the outermost dimension takes its count from the initializer list —
+	// const globals, locals, and multi-dim arrays alike
+	sema_run_t r = run_sema(&arena,
+		"static const float3 grad[] = { float3(0,0,0), float3(1,1,1), float3(2,2,2) };\n"
+		"static const float  pair[][2] = { {1,2}, {3,4} };\n"
+		"float4 ps() : SV_TARGET {\n"
+		"	float local[] = { 0.25, 0.5, 0.75 };\n"
+		"	return float4(grad[1] * pair[1][0], local[2]);\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	for (int32_t i = 0; i < r.prog.const_globals.count; i++) {
+		const svsl_global_t *g = &r.prog.const_globals.items[i];
+		const svsl_type_t   *t = svsl_type_get(&r.prog.types, g->type);
+		if (svsl_str_eq_cstr(g->name, "grad"))
+			TEST_CHECK(t->kind == svsl_type_array && t->array_count == 3);
+		if (svsl_str_eq_cstr(g->name, "pair"))
+			TEST_CHECK(t->kind == svsl_type_array && t->array_count == 2);
+	}
+
+	// nothing to size from, and inner dimensions must be explicit
+	r = run_sema_ex(&arena, "static const float bad[];\nvoid ps() { }\n", true);
+	TEST_CHECK(!r.ok);
+	r = run_sema_ex(&arena, "static const float bad[2][] = { {1,2}, {3,4} };\nvoid ps() { }\n", true);
+	TEST_CHECK(!r.ok);
+	r = run_sema_ex(&arena, "float4 ps() : SV_TARGET { float v[]; return v[0]; }\n", true);
+	TEST_CHECK(!r.ok);
+
+	svsl_arena_free(&arena);
+}
+
 static void test_sema_errors(void) {
 	svsl_arena_t arena = {0};
 
@@ -830,5 +863,6 @@ void test_sema(void) {
 	test_sema_multisample_and_tile();
 	test_sema_texture_index();
 	test_sema_porting_hints();
+	test_sema_unsized_arrays();
 	test_sema_errors();
 }

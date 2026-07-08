@@ -112,12 +112,17 @@ float4   positions[64];
 float4x4 bones[MAX_BONES];     // any constant expression, incl. specialization constants
 float    data[];               // runtime-sized; last member of a storagebuffer only
 
+static const float3 grad[] = { float3(0,0,0), float3(1,1,1) }; // size inferred: float3[2]
+
 struct Vertex {
 	float3 position;
 	float3 normal;
 	float2 uv;
 };
 ```
+
+An unsized array declared with an initializer list (const global or local) takes its
+count from the list. Only the outermost dimension may be unsized this way.
 
 ### 3.4.1 Packed bit fields
 

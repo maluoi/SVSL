@@ -301,6 +301,31 @@ static svsl_type_id_t resolve_type(sema_t *s, const svsl_ast_type_t *ref) {
 	return id;
 }
 
+// Unsized arrays take their length from the initializer: float3 x[] = {...}.
+// Only the outermost dimension may be unsized, and only with an init list —
+// used for const globals and locals; runtime-sized buffer members keep their
+// count-0 spelling and never come through here.
+static svsl_type_id_t infer_array_size(sema_t *s, svsl_type_id_t type, const svsl_ast_var_t *var) {
+	const svsl_type_t *t = svsl_type_get(&s->prog->types, type);
+	if (t->kind != svsl_type_array) return type;
+
+	svsl_type_id_t elem = t->elem;
+	if (t->array_count == 0) {
+		if (!var->init || var->init->kind != svsl_expr_init_list || var->init->init_list.count == 0) {
+			err(s, var->loc, "unsized array '%.*s' needs an initializer list to infer its size", var->name);
+			return type;
+		}
+		type = svsl_type_array_id(&s->prog->types, elem, var->init->init_list.count);
+	}
+	for (const svsl_type_t *in = svsl_type_get(&s->prog->types, elem);
+	     in->kind == svsl_type_array; in = svsl_type_get(&s->prog->types, in->elem))
+		if (in->array_count == 0) {
+			err(s, var->loc, "only the outermost array dimension of '%.*s' may be unsized", var->name);
+			break;
+		}
+	return type;
+}
+
 // --- structs -----------------------------------------------------------------------
 
 // DFS over the containment graph; state: 0 = unvisited, 1 = visiting, 2 = done.
@@ -1095,7 +1120,7 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 		}
 		if (var->flags & (svsl_var_flag_static | svsl_var_flag_const)) {
 			// fill in the type on the pre-pass entry, or add a non-integer constant
-			svsl_type_id_t type  = resolve_type(&s, var->type);
+			svsl_type_id_t type  = infer_array_size(&s, resolve_type(&s, var->type), var);
 			bool           found = false;
 			for (int32_t k = 0; k < s.prog->const_globals.count; k++) {
 				if (svsl_str_eq(s.prog->const_globals.items[k].name, var->name)) {
@@ -1412,6 +1437,14 @@ svsl_type_id_t svsl_sema_resolve_type(svsl_arena_t *arena, svsl_program_t *prog,
                                       svsl_diag_list_t *diags, const svsl_ast_type_t *ref) {
 	sema_t s = { .arena = arena, .prog = prog, .diags = diags, .ast = prog->ast };
 	return resolve_type(&s, ref);
+}
+
+// array-size inference for local declarations: float3 x[] = {...}
+svsl_type_id_t svsl_sema_infer_array_size(svsl_arena_t *arena, svsl_program_t *prog,
+                                          svsl_diag_list_t *diags, svsl_type_id_t type,
+                                          const svsl_ast_var_t *var) {
+	sema_t s = { .arena = arena, .prog = prog, .diags = diags, .ast = prog->ast };
+	return infer_array_size(&s, type, var);
 }
 
 // Folds a constant integer expression (literals, arithmetic, and named constants:

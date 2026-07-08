@@ -1215,6 +1215,9 @@ static svsl_type_id_t check_expr(check_t *c, svsl_ast_expr_t *e) {
 // exposed by sema.c for local declarations and cast/ctor targets
 extern svsl_type_id_t svsl_sema_resolve_type(svsl_arena_t *arena, svsl_program_t *prog,
                                              svsl_diag_list_t *diags, const svsl_ast_type_t *ref);
+extern svsl_type_id_t svsl_sema_infer_array_size(svsl_arena_t *arena, svsl_program_t *prog,
+                                                 svsl_diag_list_t *diags, svsl_type_id_t type,
+                                                 const svsl_ast_var_t *var);
 
 static void check_stmt(check_t *c, svsl_ast_stmt_t *s);
 
@@ -1232,6 +1235,7 @@ static void check_var_decl(check_t *c, svsl_ast_stmt_t *s) {
 		svsl_ast_var_t *var  = s->var_decl.vars[i];
 		svsl_type_id_t  type = svsl_sema_resolve_type(c->arena, c->prog, c->diags, var->type);
 		if (type == SVSL_TYPE_NONE) continue;
+		type = svsl_sema_infer_array_size(c->arena, c->prog, c->diags, type, var);
 		const svsl_type_t *t = svsl_type_get(&c->prog->types, type);
 		if (svsl_type_is_resource(t)) {
 			cerr(c, var->loc, "resources cannot be declared locally ('%.*s')", var->name);
