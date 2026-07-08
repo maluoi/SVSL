@@ -719,6 +719,11 @@ static svsl_ast_var_t *parse_declarator(parse_t *p, const svsl_ast_type_t *base_
 	var->dir    = mods->dir;
 	var->attrs  = attrs;
 
+	for (int32_t a = 0; a < attrs.count; a++)
+		if (svsl_str_eq_cstr(attrs.items[a].name, "specialization") ||
+		    svsl_str_eq_cstr(attrs.items[a].name, "vk::constant_id"))
+			var->flags |= svsl_var_flag_specialization;
+
 	parse_array_dims(p, var->type);
 	var->bit_width  = -1;
 	var->bit_format = svsl_bitfmt_raw;

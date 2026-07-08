@@ -1094,11 +1094,6 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 		if (ast->decls[i]->kind != svsl_decl_var) continue;
 		if (ast->decls[i]->var.flags & svsl_var_flag_specialization)
 			add_spec_const(&s, &ast->decls[i]->var);
-		for (int32_t a = 0; a < ast->decls[i]->var.attrs.count; a++)
-			if ((svsl_str_eq_cstr(ast->decls[i]->var.attrs.items[a].name, "specialization") ||
-			     svsl_str_eq_cstr(ast->decls[i]->var.attrs.items[a].name, "vk::constant_id")) &&
-			    !(ast->decls[i]->var.flags & svsl_var_flag_specialization))
-				add_spec_const(&s, &ast->decls[i]->var);
 	}
 
 	// buffer blocks
@@ -1134,12 +1129,6 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 					.name = var->name, .type = type, .var = var });
 			continue;
 		}
-		bool is_spec_attr = false;
-		for (int32_t a = 0; a < var->attrs.count; a++)
-			if (svsl_str_eq_cstr(var->attrs.items[a].name, "specialization") ||
-			    svsl_str_eq_cstr(var->attrs.items[a].name, "vk::constant_id")) is_spec_attr = true;
-		if (is_spec_attr) continue;
-
 		svsl_type_id_t type = resolve_type(&s, var->type);
 		if (type == SVSL_TYPE_NONE) continue;
 		const svsl_type_t *t = svsl_type_get(&s.prog->types, type);
