@@ -1,0 +1,45 @@
+// Vector operations and swizzling
+cbuffer VecParams : register(b0) {
+	float4 vec4Param;
+	float3 vec3Param;
+	float2 vec2Param;
+};
+
+[fragment]
+float4 main() : SV_Target {
+	// Vector construction
+	float2 v2 = float2(1.0, 2.0);
+	float3 v3 = float3(1.0, 2.0, 3.0);
+	float4 v4 = float4(1.0, 2.0, 3.0, 4.0);
+
+	// Swizzle read
+	float  s1 = vec4Param.x;
+	float2 s2 = vec4Param.xy;
+	float3 s3 = vec4Param.xyz;
+	float4 s4 = vec4Param.xyzw;
+
+	// Swizzle with reorder
+	float4 swizzled = vec4Param.wzyx;
+
+	// Swizzle with repeat
+	float4 repeated = vec4Param.xxxx;
+
+	// RGBA swizzle
+	float4 rgba = vec4Param.rgba;
+	float3 rgb = vec4Param.rgb;
+
+	// Vector arithmetic
+	float4 sum = vec4Param + float4(1.0, 1.0, 1.0, 1.0);
+	float4 prod = vec4Param * 2.0;
+
+	// Dot product
+	float d = dot(vec3Param, float3(1.0, 0.0, 0.0));
+
+	// Cross product
+	float3 cr = cross(vec3Param, float3(0.0, 1.0, 0.0));
+
+	// Normalize
+	float3 n = normalize(vec3Param);
+
+	return float4(n, d);
+}

@@ -1,0 +1,71 @@
+// Break and continue test
+struct PSInput {
+	float4 position : SV_Position;
+	float2 texcoord : TEXCOORD0;
+};
+
+cbuffer Params : register(b0) {
+	int maxSteps;
+	float threshold;
+};
+
+[fragment]
+float4 main(PSInput input) : SV_Target {
+	float4 color = float4(0.0, 0.0, 0.0, 1.0);
+	float sum = 0.0;
+
+	// Test break in for loop
+	for (int i = 0; i < 100; i++) {
+		sum = sum + 0.01;
+		if (sum > threshold) {
+			break;  // Early exit
+		}
+	}
+	color.r = sum;
+
+	// Test continue in for loop
+	int count = 0;
+	for (int j = 0; j < 20; j++) {
+		if (j % 2 == 0) {
+			continue; // Skip even numbers
+		}
+		count = count + 1;
+	}
+	color.g = float(count) / 10.0;
+
+	// Test break in while loop
+	float value = 1.0;
+	int steps = 0;
+	while (steps < maxSteps) {
+		value = value * 0.9;
+		steps = steps + 1;
+		if (value < 0.1) {
+			break;
+		}
+	}
+	color.b = value;
+
+	// Test continue in while loop
+	int k = 0;
+	int validCount = 0;
+	while (k < 10) {
+		k = k + 1;
+		if (k == 5) {
+			continue; // Skip 5
+		}
+		validCount = validCount + 1;
+	}
+	color.a = float(validCount) / 9.0;
+
+	// Nested loops with break
+	for (int outer = 0; outer < 5; outer++) {
+		for (int inner = 0; inner < 5; inner++) {
+			if (inner == 3) {
+				break; // Only breaks inner loop
+			}
+			sum = sum + 0.01;
+		}
+	}
+
+	return color;
+}

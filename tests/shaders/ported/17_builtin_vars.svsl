@@ -1,0 +1,32 @@
+// Built-in system value semantics
+struct VSOutput {
+	float4 position : SV_Position;
+	uint   vertexId : SV_VertexID;
+};
+
+struct PSOutput {
+	float4 color : SV_Target0;
+	float  depth : SV_Depth;
+};
+
+[vertex]
+VSOutput VSMain(float3 pos : POSITION, uint vid : SV_VertexID, uint iid : SV_InstanceID) {
+	VSOutput output;
+	output.position = float4(pos + float3(float(iid) * 2.0, 0.0, 0.0), 1.0);
+	output.vertexId = vid;
+	return output;
+}
+
+[fragment]
+PSOutput PSMain(VSOutput input, bool frontFace : SV_IsFrontFace) {
+	PSOutput output;
+
+	if (frontFace) {
+		output.color = float4(0.0, 1.0, 0.0, 1.0);
+	} else {
+		output.color = float4(1.0, 0.0, 0.0, 1.0);
+	}
+
+	output.depth = 0.5;
+	return output;
+}

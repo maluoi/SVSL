@@ -1,0 +1,57 @@
+// Various texture type test - 1D, 3D, Cube, Arrays
+Texture1D<float4>      tex1D      : register(t0);
+Texture3D<float4>      tex3D      : register(t1);
+TextureCube<float4>    texCube    : register(t2);
+Texture2DArray<float4> tex2DArray : register(t3);
+
+Sampler linearSampler : register(s0);
+
+struct PSInput {
+	float4 position : SV_Position;
+	float3 texcoord : TEXCOORD0;
+	float3 normal   : NORMAL;
+};
+
+cbuffer Params : register(b0) {
+	float time;
+	float arraySlice;
+	float3 cameraPos;
+};
+
+[fragment]
+float4 main(PSInput input) : SV_Target {
+	float4 color = float4(0.0, 0.0, 0.0, 1.0);
+
+	// 1D texture sample
+	float4 color1D = tex1D.Sample(linearSampler, input.texcoord.x);
+
+	// 3D texture sample (for volume rendering, noise, etc.)
+	float3 uvw = input.texcoord;
+	uvw.z = frac(uvw.z + time * 0.1);  // Animate through volume
+	float4 color3D = tex3D.Sample(linearSampler, uvw);
+
+	// Cube map sample (for environment mapping)
+	float3 viewDir = normalize(input.position.xyz - cameraPos);
+	float3 reflectDir = reflect(viewDir, normalize(input.normal));
+	float4 colorCube = texCube.Sample(linearSampler, reflectDir);
+
+	// 2D array sample
+	float3 arrayCoord = float3(input.texcoord.xy, arraySlice);
+	float4 colorArray = tex2DArray.Sample(linearSampler, arrayCoord);
+
+	// GetDimensions: SVSL value form across dimensionalities, plus out-param forms
+	uint  w1   = tex1D.GetDimensions();        // 1D → scalar
+	uint3 s3   = tex3D.GetDimensions();        // 3D → uint3
+	uint2 sc   = texCube.GetDimensions();      // cube → face size
+	uint3 sa   = tex2DArray.GetDimensions();   // array → w, h, layers
+	uint aw, ah, layers;
+	tex2DArray.GetDimensions(aw, ah, layers);  // out-param form
+	float dw, dh_, dd;
+	tex3D.GetDimensions(dw, dh_, dd);          // float out-params convert
+	float dim_mix = (float)(w1 + s3.z + sc.x + sa.z + aw + layers) + dw + dd;
+
+	// Combine results
+	color = color1D * 0.25 + color3D * 0.25 + colorCube * 0.25 + colorArray * 0.25;
+
+	return color * saturate(dim_mix * 0.0001 + 0.9);
+}

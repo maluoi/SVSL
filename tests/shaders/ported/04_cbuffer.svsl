@@ -1,0 +1,17 @@
+// Constant buffer usage
+struct VSOutput {
+	float4 position : SV_Position;
+};
+
+cbuffer Transforms : register(b0) {
+	float4x4 worldViewProj;
+	float4x4 world;
+	float4   cameraPos;
+};
+
+[vertex]
+VSOutput main(float3 pos : POSITION) {
+	VSOutput output;
+	output.position = mul(worldViewProj, float4(pos, 1.0));
+	return output;
+}

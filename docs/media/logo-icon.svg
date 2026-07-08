@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-15 -11 120 128" width="120" height="128">
+	<title>SVSL</title>
+	<defs>
+	<clipPath id="iclip"><path d="M 4.14,10.85 A 8.00,8.00 0 0,1 11.61,0.00 L 77.59,0.00 A 8.00,8.00 0 0,1 85.06,10.85 L 52.07,97.35 A 8.00,8.00 0 0,1 37.13,97.35 L 4.14,10.85 Z"/></clipPath>
+	<radialGradient id="ig" cx="89" cy="2" r="82" gradientUnits="userSpaceOnUse">
+		<stop offset="0" stop-color="#3EDD84"/><stop offset="0.5" stop-color="#3EDD84" stop-opacity="0.55"/><stop offset="1" stop-color="#3EDD84" stop-opacity="0"/>
+	</radialGradient>
+	<radialGradient id="ib" cx="45" cy="100" r="82" gradientUnits="userSpaceOnUse">
+		<stop offset="0" stop-color="#3B82F6"/><stop offset="0.5" stop-color="#3B82F6" stop-opacity="0.55"/><stop offset="1" stop-color="#3B82F6" stop-opacity="0"/>
+	</radialGradient></defs>
+	
+	<g transform="translate(0.00,0)" clip-path="url(#iclip)">
+		<path d="M 4.14,10.85 A 8.00,8.00 0 0,1 11.61,0.00 L 77.59,0.00 A 8.00,8.00 0 0,1 85.06,10.85 L 52.07,97.35 A 8.00,8.00 0 0,1 37.13,97.35 L 4.14,10.85 Z" fill="#FF5964"/>
+		<path d="M 4.14,10.85 A 8.00,8.00 0 0,1 11.61,0.00 L 77.59,0.00 A 8.00,8.00 0 0,1 85.06,10.85 L 52.07,97.35 A 8.00,8.00 0 0,1 37.13,97.35 L 4.14,10.85 Z" fill="url(#ig)"/>
+		<path d="M 4.14,10.85 A 8.00,8.00 0 0,1 11.61,0.00 L 77.59,0.00 A 8.00,8.00 0 0,1 85.06,10.85 L 52.07,97.35 A 8.00,8.00 0 0,1 37.13,97.35 L 4.14,10.85 Z" fill="url(#ib)"/>
+	</g>
+</svg>

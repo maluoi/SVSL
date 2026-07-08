@@ -1,0 +1,36 @@
+// Test various scalar types
+// Note: bool cannot be used in cbuffers in SPIR-V, use uint (0/1) instead
+cbuffer TypeTests : register(b0) {
+	int    intVal;
+	uint   uintVal;
+	float  floatVal;
+	uint   boolVal;   // SPIR-V requires uint for bool in uniform buffers
+};
+
+[fragment]
+float4 main() : SV_Target {
+	float4 result = float4(0.0, 0.0, 0.0, 1.0);
+
+	// Integer arithmetic
+	int a = intVal + 10;
+	int b = a * 2;
+	int c = b - 5;
+	result.r = float(c) / 100.0;
+
+	// Unsigned arithmetic
+	uint ua = uintVal + 10;
+	uint ub = ua * 2;
+	result.g = float(ub) / 100.0;
+
+	// Float arithmetic
+	float fa = floatVal + 0.5;
+	float fb = fa * 2.0;
+	result.b = fb;
+
+	// Boolean logic (convert uint to bool)
+	if (boolVal != 0) {
+		result.a = 0.5;
+	}
+
+	return result;
+}

@@ -1,0 +1,35 @@
+// Push constant test
+struct VSOutput {
+	float4 position : SV_Position;
+	float4 color    : COLOR0;
+};
+
+// Push constant block - small data for frequent updates
+pushconstant PushData {
+	float4x4 mvp;
+	float4   tint;
+	float    time;
+	uint     flags;
+};
+
+[vertex]
+VSOutput main(float3 inPos : POSITION, float4 inColor : COLOR) {
+	VSOutput output;
+
+	// Transform vertex position using push constant matrix
+	float4 pos = float4(inPos, 1.0);
+	output.position = mul(mvp, pos);
+
+	// Apply tint from push constants
+	output.color = inColor * tint;
+
+	// Animate based on time
+	output.color.a = sin(time) * 0.5 + 0.5;
+
+	// Apply flags
+	if ((flags & 1u) != 0u) {
+		output.color.rgb = float3(1.0, 1.0, 1.0) - output.color.rgb;
+	}
+
+	return output;
+}

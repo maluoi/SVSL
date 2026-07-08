@@ -1,0 +1,32 @@
+// Array usage
+cbuffer LightData : register(b0) {
+	float4 lightPositions[4];
+	float4 lightColors[4];
+	int    numLights;
+};
+
+struct PSInput {
+	float4 position  : SV_Position;
+	float3 worldPos  : TEXCOORD0;
+	float3 normal    : NORMAL;
+};
+
+[fragment]
+float4 main(PSInput input) : SV_Target {
+	float3 result = float3(0.0, 0.0, 0.0);
+	float3 N = normalize(input.normal);
+
+	// Loop over lights
+	for (int i = 0; i < numLights; i = i + 1) {
+		float3 L = lightPositions[i].xyz - input.worldPos;
+		float dist = length(L);
+		L = L / dist;
+
+		float NdotL = max(dot(N, L), 0.0);
+		float atten = 1.0 / (dist * dist);
+
+		result = result + lightColors[i].rgb * NdotL * atten;
+	}
+
+	return float4(result, 1.0);
+}

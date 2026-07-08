@@ -1,0 +1,25 @@
+// Test shader for global variables with default values
+
+float4 color = {1, 1, 1, 1};
+float  metallic = 0;
+float  roughness = 1;
+float3 emission = {0, 0, 0};
+float  opacity = 1.0;
+
+Texture2D<float4> albedoTex : register(t0);
+SamplerState      linearSampler : register(s0);
+
+cbuffer Transform : register(b0) {
+	float4x4 worldMatrix;
+	float4x4 viewProj;
+};
+
+[vertex]
+float4 main(float3 pos : POSITION) : SV_Position {
+	return mul(viewProj, mul(worldMatrix, float4(pos, 1.0)));
+}
+
+[fragment]
+float4 frag() : SV_Target {
+	return color * opacity;
+}

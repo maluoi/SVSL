@@ -1,0 +1,19 @@
+# Build output
+build/
+build_*/
+build-*/
+
+# skshaderc staged here by sk_renderer when svsl_view runs
+bin/
+
+# Compiled shader artifacts
+*.spv
+*.spvasm
+*.sks
+
+# Editor / tooling
+.cache/
+.vscode/
+.idea/
+compile_commands.json
+imgui.ini

@@ -1,0 +1,87 @@
+// Comprehensive operator test
+// Tests compound assignment, increment/decrement, bitwise operations
+struct PSInput {
+	float4 position : SV_Position;
+	float2 texcoord : TEXCOORD0;
+};
+
+cbuffer Params : register(b0) {
+	uint  flags;
+	int   offset;
+	float scale;
+};
+
+[fragment]
+float4 main(PSInput input) : SV_Target {
+	float4 color = float4(0.0, 0.0, 0.0, 1.0);
+
+	// ==========================================
+	// Compound assignment operators
+	// ==========================================
+	float f = 1.0;
+	f += 0.5;       // f = 1.5
+	f -= 0.25;      // f = 1.25
+	f *= 2.0;       // f = 2.5
+	f /= 5.0;       // f = 0.5
+	color.r = f;
+
+	int i = 10;
+	i += 5;         // i = 15
+	i -= 3;         // i = 12
+	i *= 2;         // i = 24
+	i /= 4;         // i = 6
+	i %= 4;         // i = 2
+	color.g = float(i) / 10.0;
+
+	// ==========================================
+	// Increment/decrement operators
+	// ==========================================
+	int count = 0;
+	count++;        // Post-increment: count = 1
+	++count;        // Pre-increment: count = 2
+	count--;        // Post-decrement: count = 1
+	--count;        // Pre-decrement: count = 0
+
+	// Test value in expression
+	int a = 5;
+	int b = a++;    // b = 5, a = 6
+	int c = ++a;    // a = 7, c = 7
+	color.b = float(b + c) / 20.0; // (5 + 7) / 20 = 0.6
+
+	// ==========================================
+	// Bitwise operators
+	// ==========================================
+	uint x = 0xF0u;
+	uint y = 0x0Fu;
+
+	uint andResult = x & y;        // 0x00
+	uint orResult  = x | y;        // 0xFF
+	uint xorResult = x ^ y;        // 0xFF
+	uint notResult = ~x;           // 0xFFFFFF0F
+
+	// Shift operators
+	uint shifted = 1u << 4;        // 16
+	uint rshifted = 256u >> 4;     // 16
+
+	// Compound bitwise
+	uint bits = 0xFFu;
+	bits &= 0x0Fu;  // bits = 0x0F
+	bits |= 0xF0u;  // bits = 0xFF
+	bits ^= 0x0Fu;  // bits = 0xF0
+	bits <<= 4;     // bits = 0xF00
+	bits >>= 8;     // bits = 0x0F
+
+	color.a = float(bits & 0xFFu) / 255.0;
+
+	// ==========================================
+	// Bitwise with cbuffer values
+	// ==========================================
+	if ((flags & 0x01u) != 0u) {
+		color.r = 1.0;
+	}
+	if ((flags & 0x02u) != 0u) {
+		color.g = 1.0;
+	}
+
+	return color;
+}

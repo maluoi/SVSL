@@ -1,0 +1,26 @@
+// Interpolation modifiers
+struct VSOutput {
+	float4 position      : SV_Position;
+	float3 normal        : NORMAL;
+	float2 texcoord      : TEXCOORD0;
+	noperspective float2 screenUV : TEXCOORD1;
+	flat int   instanceId : TEXCOORD2;
+	centroid float3 centroidPos : TEXCOORD3;
+};
+
+[vertex]
+VSOutput VSMain(float3 pos : POSITION, float3 normal : NORMAL, float2 uv : TEXCOORD0, uint instId : SV_InstanceID) {
+	VSOutput output;
+	output.position = float4(pos, 1.0);
+	output.normal = normal;
+	output.texcoord = uv;
+	output.screenUV = pos.xy;
+	output.instanceId = int(instId);
+	output.centroidPos = pos;
+	return output;
+}
+
+[fragment]
+float4 PSMain(VSOutput input) : SV_Target {
+	return float4(input.normal, 1.0);
+}

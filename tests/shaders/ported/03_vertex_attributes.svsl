@@ -1,0 +1,24 @@
+// Vertex shader with multiple input attributes
+struct VSInput {
+	float3 position : POSITION;
+	float3 normal   : NORMAL;
+	float2 texcoord : TEXCOORD0;
+	float4 color    : COLOR;
+};
+
+struct VSOutput {
+	float4 position : SV_Position;
+	float3 normal   : NORMAL;
+	float2 texcoord : TEXCOORD0;
+	float4 color    : COLOR;
+};
+
+[vertex]
+VSOutput main(VSInput input) {
+	VSOutput output;
+	output.position = float4(input.position, 1.0);
+	output.normal   = input.normal;
+	output.texcoord = input.texcoord;
+	output.color    = input.color;
+	return output;
+}

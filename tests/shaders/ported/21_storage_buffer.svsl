@@ -1,0 +1,51 @@
+// Storage buffer test - read/write access with fixed-size arrays
+struct DataBlock {
+	float4 values[16];
+	uint   count;
+	float  scale;
+};
+
+storagebuffer readonly InputData : register(t0) {
+	DataBlock data;
+};
+
+storagebuffer writeonly OutputData : register(u0) {
+	float4 results[16];
+};
+
+cbuffer Params : register(b0) {
+	float multiplier;
+};
+
+// StructuredBuffer test - HLSL-style templated syntax
+struct Particle {
+	float4 position;
+	float4 velocity;
+};
+StructuredBuffer<Particle>   particles    : register(t1);
+RWStructuredBuffer<Particle> particles_rw : register(u1);
+
+[compute]
+[numthreads(16, 1, 1)]
+void main(uint3 dispatchID : SV_DispatchThreadID) {
+	uint idx = dispatchID.x;
+	if (idx >= data.count) {
+		return;
+	}
+
+	// Read from storage buffer (block syntax)
+	float4 value = data.values[idx];
+
+	// Process
+	value = value * data.scale * multiplier;
+
+	// Write to output storage buffer (block syntax)
+	results[idx] = value;
+
+	// Read from StructuredBuffer (templated syntax)
+	Particle p = particles[idx];
+
+	// Modify and write to RWStructuredBuffer
+	p.position = p.position + p.velocity * multiplier;
+	particles_rw[idx] = p;
+}

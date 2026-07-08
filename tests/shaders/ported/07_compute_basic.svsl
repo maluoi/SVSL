@@ -1,0 +1,21 @@
+// Basic compute shader
+RWTexture2D<float4> outputTex : register(u0);
+
+cbuffer Params : register(b0) {
+	float2 resolution;
+	float  time;
+};
+
+[numthreads(8, 8, 1)]
+[compute]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
+	float2 uv = float2(dispatchThreadId.xy) / resolution;
+
+	float4 color;
+	color.r = uv.x;
+	color.g = uv.y;
+	color.b = sin(time);
+	color.a = 1.0;
+
+	outputTex[dispatchThreadId.xy] = color;
+}

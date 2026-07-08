@@ -1,0 +1,36 @@
+// Multiple textures and samplers
+struct PSInput {
+	float4 position : SV_Position;
+	float2 texcoord : TEXCOORD0;
+};
+
+Texture2D<float4> albedoTex  : register(t0);
+Texture2D<float4> normalTex  : register(t1);
+Texture2D<float>  roughTex   : register(t2);
+TextureCube<float4> envMap   : register(t3);
+
+SamplerState linearSampler  : register(s0);
+SamplerState pointSampler   : register(s1);
+
+cbuffer Material : register(b0) {
+	float metallic;
+	float roughnessScale;
+};
+
+[fragment]
+float4 main(PSInput input) : SV_Target {
+	// Sample different texture types
+	float4 albedo = albedoTex.Sample(linearSampler, input.texcoord);
+	float4 normal = normalTex.Sample(linearSampler, input.texcoord);
+	float  roughness = roughTex.Sample(pointSampler, input.texcoord);
+
+	// Sample cubemap
+	float3 reflectDir = float3(0.0, 1.0, 0.0);
+	float4 envColor = envMap.Sample(linearSampler, reflectDir);
+
+	// Combine
+	float4 result = albedo;
+	result.rgb = result.rgb + envColor.rgb * metallic;
+
+	return result;
+}

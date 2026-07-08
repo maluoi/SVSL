@@ -1,0 +1,83 @@
+// Local function test - helper functions, recursion-like patterns
+struct PSInput {
+	float4 position : SV_Position;
+	float2 texcoord : TEXCOORD0;
+};
+
+cbuffer Params : register(b0) {
+	float time;
+	int   iterations;
+};
+
+// Simple helper function
+float square(float x) {
+	return x * x;
+}
+
+// Function with multiple parameters
+float3 blend(float3 a, float3 b, float t) {
+	return a * (1.0 - t) + b * t;
+}
+
+// Function using other functions
+float magnitude(float2 v) {
+	return sqrt(square(v.x) + square(v.y));
+}
+
+// Function with out parameter
+void sincos_custom(float angle, out float s, out float c) {
+	s = sin(angle);
+	c = cos(angle);
+}
+
+// Function with inout parameter
+void normalize_inplace(inout float3 v) {
+	float len = length(v);
+	if (len > 0.0001) {
+		v = v / len;
+	}
+}
+
+// Function that returns a struct-like value
+float4 createColor(float r, float g, float b) {
+	return float4(r, g, b, 1.0);
+}
+
+// More complex function
+float sdf_circle(float2 p, float2 center, float radius) {
+	return magnitude(p - center) - radius;
+}
+
+[fragment]
+float4 main(PSInput input) : SV_Target {
+	// Test simple function
+	float sq = square(input.texcoord.x);
+
+	// Test blend function
+	float3 color1 = float3(1.0, 0.0, 0.0);
+	float3 color2 = float3(0.0, 0.0, 1.0);
+	float3 blended = blend(color1, color2, input.texcoord.y);
+
+	// Test out parameters
+	float s;
+	float c;
+	sincos_custom(time, s, c);
+
+	// Test inout parameter
+	float3 normal = float3(input.texcoord.x - 0.5, input.texcoord.y - 0.5, 1.0);
+	normalize_inplace(normal);
+
+	// Test struct-returning function
+	float4 baseColor = createColor(blended.r, blended.g, blended.b);
+
+	// Test SDF function
+	float dist = sdf_circle(input.texcoord, float2(0.5, 0.5), 0.3);
+
+	// Combine results
+	float4 result = baseColor;
+	result.r = result.r * (c * 0.5 + 0.5);
+	result.g = result.g * (s * 0.5 + 0.5);
+	result.b = dist < 0.0 ? 1.0 : 0.0;
+
+	return result;
+}

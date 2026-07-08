@@ -1,0 +1,26 @@
+// Matrix operations
+cbuffer MatParams : register(b0) {
+	float4x4 mat4;
+	float3x3 mat3;
+	float4   vec4Param;
+};
+
+[vertex]
+float4 main(float3 pos : POSITION) : SV_Position {
+	// Matrix-vector multiplication
+	float4 transformed = mul(mat4, float4(pos, 1.0));
+
+	// Matrix construction
+	float4x4 identity = float4x4(
+		1.0, 0.0, 0.0, 0.0,
+		0.0, 1.0, 0.0, 0.0,
+		0.0, 0.0, 1.0, 0.0,
+		0.0, 0.0, 0.0, 1.0
+	);
+
+	// Column access
+	float4 col0 = mat4[0];
+	float4 col1 = mat4[1];
+
+	return transformed;
+}

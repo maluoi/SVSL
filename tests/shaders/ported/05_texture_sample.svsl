@@ -1,0 +1,14 @@
+// Texture sampling
+struct PSInput {
+	float4 position : SV_Position;
+	float2 texcoord : TEXCOORD0;
+};
+
+Texture2D<float4> diffuseMap : register(t0);
+SamplerState linearSampler : register(s0);
+
+[fragment]
+float4 main(PSInput input) : SV_Target {
+	float4 color = diffuseMap.Sample(linearSampler, input.texcoord);
+	return color;
+}

@@ -1,0 +1,52 @@
+// Math intrinsic functions
+cbuffer MathParams : register(b0) {
+	float  fParam;
+	float3 v3Param;
+};
+
+[fragment]
+float4 main() : SV_Target {
+	float4 result = float4(0.0, 0.0, 0.0, 1.0);
+
+	// Trigonometric
+	float s = sin(fParam);
+	float c = cos(fParam);
+	float t = tan(fParam);
+	float as = asin(0.5);
+	float ac = acos(0.5);
+	float at = atan(1.0);
+
+	// Exponential
+	float e = exp(fParam);
+	float e2 = exp2(fParam);
+	float lg = log(fParam);
+	float lg2 = log2(fParam);
+	float pw = pow(fParam, 2.0);
+	float sq = sqrt(fParam);
+	float rsq = rsqrt(fParam);
+
+	// Common
+	float ab = abs(fParam);
+	float fl = floor(fParam);
+	float ce = ceil(fParam);
+	float fr = frac(fParam);
+	float sg = sign(fParam);
+	float mn = min(fParam, 1.0);
+	float mx = max(fParam, 0.0);
+	float cl = clamp(fParam, 0.0, 1.0);
+	float lp = lerp(0.0, 1.0, fParam);
+	float st = step(0.5, fParam);
+	float ss = smoothstep(0.0, 1.0, fParam);
+
+	// Vector ops
+	float len = length(v3Param);
+	float dst = distance(v3Param, float3(0.0, 0.0, 0.0));
+	float3 nrm = normalize(v3Param);
+	float3 rfl = reflect(v3Param, float3(0.0, 1.0, 0.0));
+
+	result.r = s + c;
+	result.g = len;
+	result.b = cl;
+
+	return result;
+}

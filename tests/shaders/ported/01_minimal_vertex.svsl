@@ -1,0 +1,11 @@
+// Minimal vertex shader - just pass through position
+struct VSOutput {
+	float4 position : SV_Position;
+};
+
+[vertex]
+VSOutput main(float3 pos : POSITION) {
+	VSOutput output;
+	output.position = float4(pos, 1.0);
+	return output;
+}

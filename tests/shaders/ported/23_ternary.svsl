@@ -1,0 +1,46 @@
+// Ternary operator test - exercises OpSelect
+struct PSInput {
+	float4 position : SV_Position;
+	float2 texcoord : TEXCOORD0;
+};
+
+cbuffer Params : register(b0) {
+	float threshold;
+	int   mode;
+	uint  enabled;  // Use uint since SPIR-V doesn't allow bool in uniform buffers
+};
+
+[fragment]
+float4 main(PSInput input) : SV_Target {
+	// Basic ternary
+	float4 colorA = float4(1.0, 0.0, 0.0, 1.0); // Red
+	float4 colorB = float4(0.0, 0.0, 1.0, 1.0); // Blue
+	float4 result = input.texcoord.x > 0.5 ? colorA : colorB;
+
+	// Nested ternary
+	float value = input.texcoord.y > 0.66 ? 1.0 :
+	              input.texcoord.y > 0.33 ? 0.5 : 0.0;
+	result.g = value;
+
+	// Ternary with uniform condition
+	result = (enabled != 0u) ? result : float4(0.5, 0.5, 0.5, 1.0);
+
+	// Ternary in expression
+	float intensity = (mode == 0) ? 1.0 :
+	                  (mode == 1) ? 0.75 :
+	                  (mode == 2) ? 0.5 : 0.25;
+	result = result * intensity;
+
+	// Ternary for component selection
+	result.r = input.texcoord.x > threshold ? 1.0 : 0.0;
+	result.b = input.texcoord.y > threshold ? 1.0 : 0.0;
+
+	// Ternary with arithmetic
+	float blend = input.texcoord.x > 0.5 ?
+	              input.texcoord.x * 2.0 - 1.0 :
+	              input.texcoord.x * 2.0;
+
+	result.a = blend;
+
+	return result;
+}

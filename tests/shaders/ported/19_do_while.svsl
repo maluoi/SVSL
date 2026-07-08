@@ -1,0 +1,41 @@
+// Do-while loop test
+struct PSInput {
+	float4 position : SV_Position;
+	float2 texcoord : TEXCOORD0;
+};
+
+cbuffer Params : register(b0) {
+	int maxIterations;
+	float epsilon;
+};
+
+[fragment]
+float4 main(PSInput input) : SV_Target {
+	float4 color = float4(0.0, 0.0, 0.0, 1.0);
+
+	// Do-while: always executes at least once
+	float value = input.texcoord.x;
+	int iterations = 0;
+	do {
+		value = value * 0.5;
+		iterations = iterations + 1;
+	} while (value > epsilon && iterations < maxIterations);
+
+	// Encode iterations in color
+	color.r = float(iterations) / float(maxIterations);
+	color.g = value;
+
+	// Nested do-while
+	int i = 0;
+	int j = 0;
+	do {
+		j = 0;
+		do {
+			color.b = color.b + 0.01;
+			j = j + 1;
+		} while (j < 3);
+		i = i + 1;
+	} while (i < 3);
+
+	return color;
+}

@@ -1,0 +1,29 @@
+// Storage image (RW texture) usage
+RWTexture2D<float4> outputImage : register(u0);
+Texture2D<float4>   inputImage  : register(t0);
+SamplerState        linearSamp  : register(s0);
+
+cbuffer BlurParams : register(b0) {
+	float2 texelSize;
+	float  blurRadius;
+};
+
+[numthreads(8, 8, 1)]
+[compute]
+void main(uint3 tid : SV_DispatchThreadID) {
+	float2 uv = (float2(tid.xy) + 0.5) * texelSize;
+
+	// Simple box blur
+	float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+	int samples = 0;
+
+	for (int y = -2; y <= 2; y = y + 1) {
+		for (int x = -2; x <= 2; x = x + 1) {
+			float2 offset = float2(float(x), float(y)) * texelSize * blurRadius;
+			sum = sum + inputImage.Sample(linearSamp, uv + offset);
+			samples = samples + 1;
+		}
+	}
+
+	outputImage[tid.xy] = sum / float(samples);
+}
