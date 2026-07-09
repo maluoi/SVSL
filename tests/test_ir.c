@@ -452,7 +452,7 @@ static void test_ir_buffer_dimensions(void) {
 	// layout constant; both must be stored to the out arguments
 	ir_run_t r = run_ir(&arena,
 		"struct item_t { float4 a; float2 b; };\n"
-		"StructuredBuffer<item_t> items;\n"
+		"std430 StructuredBuffer<item_t> items;\n"
 		"RWStructuredBuffer<float4> outp;\n"
 		"[numthreads(1,1,1)]\n"
 		"void cs(uint3 id : SV_DispatchThreadID) {\n"

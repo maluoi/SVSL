@@ -203,6 +203,7 @@ struct svsl_ast_var_t {
 	uint32_t         flags;    // svsl_var_flag_
 	uint8_t          interp;   // svsl_interp_
 	uint8_t          dir;      // svsl_dir_ (params)
+	uint8_t          pack;     // svsl_pack_ — layout keyword; buffer resources only
 	int16_t          bit_width;  // packed-struct bit field width; -1 = not a bit field
 	uint8_t          bit_format; // svsl_bitfmt_
 	svsl_ast_attrs_t attrs;
@@ -261,9 +262,10 @@ typedef enum svsl_block_kind_ {
 
 typedef enum svsl_pack_ {
 	svsl_pack_default = 0,
-	svsl_pack_1,
-	svsl_pack_8,
-	svsl_pack_16,
+	svsl_pack_1,   // 'pack1' / 'scalar' — C layout (scalarBlockLayout when members straddle)
+	svsl_pack_8,   // 'pack8' / 'relaxed' — vectors align to min(natural, 8)
+	svsl_pack_16,  // 'pack16' / 'std140'
+	svsl_pack_430, // 'std430' — the explicit spelling of the storage-buffer block default
 } svsl_pack_;
 
 typedef struct svsl_ast_struct_t {

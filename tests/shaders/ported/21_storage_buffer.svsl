@@ -5,11 +5,11 @@ struct DataBlock {
 	float  scale;
 };
 
-storagebuffer readonly InputData : register(t0) {
+readonly storagebuffer InputData : register(t0) {
 	DataBlock data;
 };
 
-storagebuffer writeonly OutputData : register(u0) {
+writeonly storagebuffer OutputData : register(u0) {
 	float4 results[16];
 };
 

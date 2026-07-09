@@ -209,7 +209,7 @@ static void test_sema_storagebuffer_block(void) {
 
 	sema_run_t r = run_sema(&arena,
 		"struct Vertex { float3 position; float3 normal; float2 uv; };\n"
-		"storagebuffer readonly Vertices : register(t0, space1) { Vertex vertices[]; };\n"
+		"readonly storagebuffer Vertices : register(t0, space1) { Vertex vertices[]; };\n"
 		"storagebuffer Counts { uint counts[]; };\n"
 		"void cs() { }\n");
 	TEST_CHECK(r.ok);
@@ -260,6 +260,87 @@ static void test_sema_unsized_arrays(void) {
 	svsl_arena_free(&arena);
 }
 
+// Structured-buffer element layouts: C-packed by default (refusing what core
+// Vulkan can't express), with pack keywords + standards-name aliases selecting
+// the other modes. particle_t is the reference example: C 16 / relaxed+std430
+// 24 / std140 32 bytes per element.
+static void test_sema_pack_layouts(void) {
+	svsl_arena_t arena = {0};
+	const char *body = "[numthreads(1,1,1)] void cs(uint3 id : SV_DispatchThreadID) { d[id.x].scale = d[id.x].pos.x; }\n";
+	const char *decl = "struct particle_t { uint id; float2 pos; float scale; };\n";
+	char src[512];
+
+	struct { const char *kw; uint32_t stride; } rows[] = {
+		{ "",        16 }, // default: C layout
+		{ "pack1 ",  16 }, { "scalar ",  16 },
+		{ "pack8 ",  24 }, { "relaxed ", 24 },
+		{ "pack16 ", 32 }, { "std140 ",  32 },
+		{ "std430 ", 24 },
+	};
+	for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		snprintf(src, sizeof(src), "%s%sRWStructuredBuffer<particle_t> d : register(u0);\n%s",
+		         decl, rows[i].kw, body);
+		sema_run_t r = run_sema(&arena, src);
+		TEST_CHECK(r.ok);
+		const svsl_resource_t *res = find_resource(&r.prog, "d");
+		TEST_CHECK(res && res->element_size == rows[i].stride);
+		TEST_CHECK(!r.prog.needs_scalar_layout); // particle_t never breaks relaxed rules
+	}
+
+	// bit-packed structs resolve to backing uint32 words before layout runs, so
+	// they are inherently alignment-neutral: dense 4-byte words under the C
+	// default (== pack1 == std430), and only pack16 rounds the stride to 16.
+	// All-scalar backing words can never straddle -> never the scalar feature.
+	const char *packed = "struct tiny_t { float val : un8; int32 a : 4; int32 b : 4; };\n";
+	struct { const char *kw; uint32_t stride; } prows[] = {
+		{ "", 4 }, { "pack1 ", 4 }, { "std430 ", 4 }, { "pack16 ", 16 },
+	};
+	for (size_t i = 0; i < sizeof(prows) / sizeof(prows[0]); i++) {
+		snprintf(src, sizeof(src), "%s%sRWStructuredBuffer<tiny_t> d : register(u0);\n%s",
+		         packed, prows[i].kw,
+		         "[numthreads(1,1,1)] void cs(uint3 id : SV_DispatchThreadID) { d[id.x].a = 3; }\n");
+		sema_run_t pr = run_sema(&arena, src);
+		TEST_CHECK(pr.ok);
+		const svsl_resource_t *pres = find_resource(&pr.prog, "d");
+		TEST_CHECK(pres && pres->element_size == prows[i].stride);
+		TEST_CHECK(!pr.prog.needs_scalar_layout);
+	}
+
+	// a straddling C layout is refused by the default and allowed by explicit
+	// pack1, which flags the scalarBlockLayout requirement
+	const char *wide = "struct wide_t { float a; float4 b; };\n";
+	snprintf(src, sizeof(src), "%sRWStructuredBuffer<wide_t> d : register(u0);\n%s", wide,
+	         "[numthreads(1,1,1)] void cs(uint3 id : SV_DispatchThreadID) { d[id.x].a = d[id.x].b.x; }\n");
+	sema_run_t r = run_sema_ex(&arena, src, true);
+	TEST_CHECK(!r.ok);
+	snprintf(src, sizeof(src), "%spack1 RWStructuredBuffer<wide_t> d : register(u0);\n%s", wide,
+	         "[numthreads(1,1,1)] void cs(uint3 id : SV_DispatchThreadID) { d[id.x].a = d[id.x].b.x; }\n");
+	r = run_sema(&arena, src);
+	TEST_CHECK(r.ok);
+	TEST_CHECK(r.prog.needs_scalar_layout);
+
+	// a pack1 block with a straddling member also flags the feature
+	r = run_sema(&arena,
+		"pack1 storagebuffer Wide : register(u0) { float a; float4 b; };\n"
+		"[numthreads(1,1,1)] void cs(uint3 id : SV_DispatchThreadID) { a = b.x; }\n");
+	TEST_CHECK(r.ok);
+	TEST_CHECK(r.prog.needs_scalar_layout);
+
+	// layout keywords are honored or rejected, never dropped
+	r = run_sema_ex(&arena, "pack16 Texture2D tex : register(t0);\nvoid ps() { }\n", true);
+	TEST_CHECK(!r.ok);
+	r = run_sema_ex(&arena, "pack1 float loose;\nvoid ps() { }\n", true);
+	TEST_CHECK(!r.ok);
+	r = run_sema_ex(&arena, "float4 ps() : SV_TARGET { pack1 float x = 1; return x.xxxx; }\n", true);
+	TEST_CHECK(r.diags.error_count > 0); // rejected at parse: locals have no layout
+
+	// layout keywords rejected on specialization constants
+	r = run_sema_ex(&arena, "pack1 specialization const uint BAD = 1;\nvoid ps() { }\n", true);
+	TEST_CHECK(!r.ok);
+
+	svsl_arena_free(&arena);
+}
+
 static void test_sema_errors(void) {
 	svsl_arena_t arena = {0};
 
@@ -269,7 +350,7 @@ static void test_sema_errors(void) {
 	r = run_sema_ex(&arena, "Texture2D a : register(t3);\nTexture2D b : register(t3);\nvoid ps() { }\n", true);
 	TEST_CHECK(!r.ok); // register collision
 
-	r = run_sema_ex(&arena, "uniform pack1 Bad { float x; };\nvoid ps() { }\n", true);
+	r = run_sema_ex(&arena, "pack1 uniform Bad { float x; };\nvoid ps() { }\n", true);
 	TEST_CHECK(!r.ok); // uniform must be pack16
 
 	r = run_sema_ex(&arena, "specialization const float4 v = 1;\nvoid ps() { }\n", true);
@@ -485,7 +566,7 @@ static void test_sema_half_strict16(void) {
 	svsl_arena_t arena = {0};
 	const char *src =
 		"struct data_t { half a; half2 b; };\n"
-		"StructuredBuffer<data_t> data : register(t0);\n"
+		"std430 StructuredBuffer<data_t> data : register(t0);\n"
 		"half brightness;\n"
 		"float4 ps() : SV_TARGET { return (float)(data[0].a * (half)brightness); }\n";
 
@@ -864,5 +945,6 @@ void test_sema(void) {
 	test_sema_texture_index();
 	test_sema_porting_hints();
 	test_sema_unsized_arrays();
+	test_sema_pack_layouts();
 	test_sema_errors();
 }

@@ -132,12 +132,15 @@ svsl_result_t *result = svsl_compile(
 	&(svsl_source_t ){ .text      = source, .filename = "shader.hlsl" },
 	&(svsl_options_t){ .opt_level = svsl_opt_default });
 
-for (int32_t i = 0; i < r->diagnostic_count; i++)
-	report(&r->diagnostics[i]); // severity, source loc, message
+for (int32_t i = 0; i < result->diagnostic_count; i++)
+	report(&result->diagnostics[i]); // severity, source loc, message
 
 if (result->ok) {
 	for (int32_t i = 0; i < r->stage_count; i++)
-		upload(r->stages[i].stage, r->stages[i].spirv, r->stages[i].spirv_word_count);
+		upload(
+			result->stages[i].stage,
+			result->stages[i].spirv,
+			result->stages[i].spirv_word_count);
 
 	svsl_bytes_t sks = svsl_result_sks(result); // the StereoKit container
 	// also: svsl_result_header(result, name), svsl_result_reflection(result), svsl_result_ir(result)

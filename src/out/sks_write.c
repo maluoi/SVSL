@@ -63,7 +63,10 @@ static uint16_t sks_binding(const svsl_binding_t *bind) {
 	}
 }
 
-static uint16_t var_type_of(const svsl_types_t *types, svsl_type_id_t id, uint16_t *out_count) {
+// Reflected variable type. Bools reflect differently by storage context: buffer
+// members store as uint 0/1, while spec constants stay OpTypeBool and reflect as
+// int (VkBool32) — matching sksc. Pass as_spec for the spec-constant context.
+static uint16_t var_type_of(const svsl_types_t *types, svsl_type_id_t id, bool as_spec, uint16_t *out_count) {
 	const svsl_type_t *t     = svsl_type_get(types, id);
 	int32_t            elems = 1;
 	if (t->kind == svsl_type_array) {
@@ -75,7 +78,7 @@ static uint16_t var_type_of(const svsl_types_t *types, svsl_type_id_t id, uint16
 	*out_count = (uint16_t)(components * elems);
 	if (t->kind == svsl_type_struct) return var_none; // struct members: type_name carries the info
 	switch (t->scalar) {
-	case svsl_scalar_bool:                             return var_uint; // stored as uint 0/1
+	case svsl_scalar_bool:                             return as_spec ? var_int : var_uint;
 	case svsl_scalar_int8: case svsl_scalar_int16:
 	case svsl_scalar_int32: case svsl_scalar_int64:    return var_int;
 	case svsl_scalar_uint8:                            return var_uint8;
@@ -168,6 +171,9 @@ enum {
 	sks_feat_formatless       = 13, // StorageImageRead/WriteWithoutFormat
 	sks_feat_tile_image       = 14, // (+SPV_EXT_shader_tile_image)
 	sks_feat_float_atomics    = 15, // (+SPV_EXT_shader_atomic_float[2])
+	sks_feat_scalar_layout    = 16, // VK_EXT_scalar_block_layout: a pack1/pack8 buffer
+	                                // layout breaks core relaxed rules. Not derivable
+	                                // from the SPIR-V (no capability) — sema flags it.
 	sks_feat_unknown          = 63, // capability/extension with no assigned bit
 };
 
@@ -393,6 +399,7 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 			features |= 1ull << sks_feat_wave_size;
 	}
 	if (prog->wave_size > 0) features |= 1ull << sks_feat_wave_size;
+	if (prog->needs_scalar_layout) features |= 1ull << sks_feat_scalar_layout;
 	wu64(&w, features);
 	wu64(&w, 0);
 
@@ -423,7 +430,7 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 		for (int32_t m = 0; m < buf->members.count; m++) {
 			const svsl_buf_member_t *member = &buf->members.items[m];
 			uint16_t type_count;
-			uint16_t type = var_type_of(&prog->types, member->type, &type_count);
+			uint16_t type = var_type_of(&prog->types, member->type, false, &type_count);
 			wstr(&w, member->name, 32);
 			wstr(&w, member->extra, 64);
 			wstr(&w, var_type_name(&prog->types, member->type), 32);
@@ -488,11 +495,7 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 			wstr(&w, sc->name, 32);
 			wu32(&w, sc->id);
 			wu32(&w, sc->default_bits);
-			// spec-const bools stay OpTypeBool in SPIR-V; sksc reflects those as
-			// int (VkBool32), unlike buffer members which are stored as uint
-			uint16_t sc_type = var_type_of(&prog->types, sc->type, &type_count);
-			if (svsl_type_get(&prog->types, sc->type)->scalar == svsl_scalar_bool)
-				sc_type = var_int;
+			uint16_t sc_type = var_type_of(&prog->types, sc->type, true, &type_count);
 			wu16(&w, sc_type);
 			wu8(&w, usage.spec_stages[i]);
 		}

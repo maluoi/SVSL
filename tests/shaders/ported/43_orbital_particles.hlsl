@@ -7,9 +7,11 @@ float  max_speed;
 float3 color_fast;
 float  _pad2;
 
-struct Particle {
+struct Particle { // padded: the C-packed layout matches std430 exactly
 	float3 position;
+	float  _pad0;
 	float3 velocity;
+	float  _pad1;
 };
 StructuredBuffer<Particle> particles : register(t3, space0);
 

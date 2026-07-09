@@ -101,7 +101,10 @@ static bool corpus_check_file(const char *path) {
 			if (!f) continue;
 			fwrite(blob.words, 4, (size_t)blob.word_count, f);
 			fclose(f);
-			if (system("spirv-val --target-env vulkan1.1 svsl_corpus_tmp.spv") != 0) {
+			const char *val_cmd = program.needs_scalar_layout
+				? "spirv-val --target-env vulkan1.1 --scalar-block-layout svsl_corpus_tmp.spv"
+				: "spirv-val --target-env vulkan1.1 svsl_corpus_tmp.spv";
+			if (system(val_cmd) != 0) {
 				printf("  spirv-val failed: %s (entry %d)\n", path, i);
 				svsl_diag_add(&arena, &diags, svsl_severity_error,
 				              (svsl_loc_t){ .file = path }, "SPIR-V validation failed");

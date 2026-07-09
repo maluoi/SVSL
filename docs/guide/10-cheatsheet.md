@@ -65,15 +65,17 @@ attribute (`[vertex]`, `[fragment]`/`[pixel]`, `[compute]`) works too.
 
 **Buffer layout defaults:**
 
-| Block | Default | Allowed |
-|-------|---------|---------|
+| Declaration | Default | Allowed |
+|-------------|---------|---------|
 | `uniform` / `cbuffer` | `pack16` | `pack16` only |
-| `storagebuffer` | `std430` | `std430` (default, no keyword), `pack1`, `pack8`, `pack16` |
-| `pushconstant` | `std430` | same as storagebuffer |
+| `storagebuffer` | `std430` | any layout keyword |
+| `pushconstant` | `std430` | any layout keyword |
+| `StructuredBuffer<T>` family | C layout (`pack1`, refusing layouts that need a device feature) | any layout keyword |
 
-`pack1` = scalar (C-struct tight, needs `VK_EXT_scalar_block_layout`) · `pack8` = relaxed ·
-`pack16` = std140 · `std430` = the safe core default.
-([Resources §5](05-resources-and-buffers.md#5-memory-layout-pack1-pack8-pack16))
+Keywords prefix the declaration: `pack16 storagebuffer Data { ... };`. Aliases:
+`pack1` = `scalar` (C-struct tight; `scalarBlockLayout` only when a vector straddles) ·
+`pack8` = `relaxed` · `pack16` = `std140` · `std430` = the core storage default.
+([Resources §5](05-resources-and-buffers.md#5-memory-layout-pack1-pack8-pack16-std430))
 
 **Binding offsets (prefix-letter `register()`):** `b` → +0 · `t`/`s` → +100 · `u` → +200. The
 direct `register(binding, set)` form applies **no** offset. `register()` is optional - omit it

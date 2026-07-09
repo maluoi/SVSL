@@ -26,18 +26,13 @@ bugs and cleanups from the code review are tracked in `docs/CODE_REVIEW.md`.
   Wiring those needs the parser to record which spelling was used (the `legacy_spelling` var
   flag is in place for the keyword cases).
 
-- **Object-form `StructuredBuffer<T>` is hardcoded std430 and diverges from both glslang
-  and C.** For `struct { uint id; float2 pos; float scale; }`: plain C / D3D packs
-  0/4/12 stride 16; SVSL std430 packs 0/8/16 stride 24; glslang emits a hybrid that
-  matches nobody — DX offsets (0/4/12) but a std430-rounded stride (24), so C arrays
-  break from element 1 even with skshaderc. Alignment-neutral element structs (all of
-  StereoKit's builtins) are unaffected; `check_bool_store` deliberately orders members
-  that way. Block-form buffers already solve this via `pack1` (byte-identical to C,
-  verified; see spec §4.2). Options for the object form: accept a layout keyword there
-  (`StructuredBuffer<T>` + pack1 spelling TBD), or flip its default to DX packing with
-  scalarBlockLayout inferred only when a member actually straddles. Reflection
-  element_size follows whatever is chosen. Don't bitwise-compare alignment-sensitive
-  cases against skshaderc — the glslang hybrid can't be matched meaningfully.
+- **Never bitwise-compare alignment-sensitive structured-buffer layouts against
+  skshaderc.** glslang's HLSL mode emits a hybrid element layout that matches nobody —
+  DX-packed member offsets with a std430-rounded array stride (its own code carries a
+  TODO admitting the inconsistency; see docs/DECISIONS.md "Structured-buffer element
+  layout"). SVSL's object-form elements are C-packed by default with keyword overrides
+  (spec §4.2), so alignment-sensitive cases need golden-value tiers
+  (`check_pack_layout`); alignment-neutral structs still compare bitwise.
 
 ## Testing
 

@@ -127,12 +127,13 @@ static uint32_t convert_composite(emit_t *e, uint32_t value, svsl_type_id_t type
 	} else if (t->scalar == svsl_scalar_bool) {
 		// bools live in buffers as uint 0/1 (spv_type_laid): != 0 on the way to a
 		// value, select 1/0 on the way back
+		svsl_type_id_t ushape = bool_buffer_uint(e, t);
 		if (to_value)
 			return emit_value_inst(e, &e->spv.funcs, SpvOpINotEqual, value_t,
-			                       (uint32_t[]){ value, spv_uint_shape_const(e, t, 0) }, 2);
+			                       (uint32_t[]){ value, const_splat(e, ushape, 0) }, 2);
 		return emit_value_inst(e, &e->spv.funcs, SpvOpSelect, laid_t,
-		                       (uint32_t[]){ value, spv_uint_shape_const(e, t, 1),
-		                                     spv_uint_shape_const(e, t, 0) }, 3);
+		                       (uint32_t[]){ value, const_splat(e, ushape, 1),
+		                                     const_splat(e, ushape, 0) }, 3);
 	} else {
 		return value;
 	}
@@ -750,7 +751,7 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 		case svsl_ref_resource:
 			result = e->resource_vars[inst->args[1]];
 			e->value_class[i]  = SpvStorageClassStorageBuffer;
-			e->value_layout[i] = (uint8_t)svsl_layout_std430;
+			e->value_layout[i] = e->prog->resources.items[inst->args[1]].layout;
 			break;
 		case svsl_ref_workgroup:
 			result = e->workgroup_ids[inst->args[1]];
@@ -795,7 +796,7 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 			const svsl_resource_t *res = &e->prog->resources.items[base_inst->args[1]];
 			class_    = SpvStorageClassStorageBuffer;
 			base_var  = e->resource_vars[base_inst->args[1]];
-			layout    = (uint8_t)svsl_layout_std430;
+			layout    = res->layout;
 			in_buffer = true;
 			ops[count++] = base_var;
 			if (res->buffer_index < 0) // object form wraps in struct { T @data[]; }

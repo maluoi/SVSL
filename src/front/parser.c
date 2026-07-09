@@ -634,8 +634,35 @@ typedef struct decl_mods_t {
 	uint32_t flags;
 	uint8_t  interp;
 	uint8_t  dir;
+	uint8_t  pack;   // svsl_pack_
 	bool     any;
 } decl_mods_t;
+
+// Layout keywords by their standards names — context-sensitive identifiers, not
+// reserved words ('relaxed' is also an atomic order argument, 'scalar' a likely
+// variable name). Only recognized when what follows can continue a declaration:
+// a type name, a block keyword, or another modifier.
+static bool accept_pack_alias(parse_t *p, uint8_t *out_pack) {
+	if (!at(p, svsl_tok_ident)) return false;
+	uint8_t pack;
+	if      (svsl_str_eq_cstr(cur(p)->text, "scalar"))  pack = svsl_pack_1;
+	else if (svsl_str_eq_cstr(cur(p)->text, "relaxed")) pack = svsl_pack_8;
+	else if (svsl_str_eq_cstr(cur(p)->text, "std140"))  pack = svsl_pack_16;
+	else if (svsl_str_eq_cstr(cur(p)->text, "std430"))  pack = svsl_pack_430;
+	else return false;
+
+	const svsl_token_t *nx = peek(p, 1);
+	bool decl_follows = nx->kind == svsl_tok_ident &&
+		(is_type_name(p, nx->text) ||
+		 nx->keyword == svsl_kw_storagebuffer || nx->keyword == svsl_kw_pushconstant ||
+		 nx->keyword == svsl_kw_uniform       || nx->keyword == svsl_kw_cbuffer      ||
+		 nx->keyword == svsl_kw_readonly      || nx->keyword == svsl_kw_writeonly    ||
+		 nx->keyword == svsl_kw_coherent      || nx->keyword == svsl_kw_volatile);
+	if (!decl_follows) return false;
+	*out_pack = pack;
+	advance(p);
+	return true;
+}
 
 // static/const/workgroup/etc. and interpolation modifiers, in any order
 static decl_mods_t parse_decl_mods(parse_t *p, bool allow_dir) {
@@ -656,6 +683,10 @@ static decl_mods_t parse_decl_mods(parse_t *p, bool allow_dir) {
 		else if (accept_kw(p, svsl_kw_centroid))        mods.interp |= svsl_interp_centroid;
 		else if (accept_kw(p, svsl_kw_invariant))       mods.interp |= svsl_interp_invariant;
 		else if (accept_kw(p, svsl_kw_precise))         mods.flags  |= svsl_var_flag_precise;
+		else if (accept_kw(p, svsl_kw_pack1))           mods.pack = svsl_pack_1;
+		else if (accept_kw(p, svsl_kw_pack8))           mods.pack = svsl_pack_8;
+		else if (accept_kw(p, svsl_kw_pack16))          mods.pack = svsl_pack_16;
+		else if (accept_pack_alias(p, &mods.pack))      {} // std430/std140/scalar/relaxed
 		// 'sample' and 'linear' are context-sensitive: only modifiers when followed by a type
 		else if ((at_kw(p, svsl_kw_sample) || (at(p, svsl_tok_ident) && svsl_str_eq_cstr(cur(p)->text, "linear"))) &&
 		         peek(p, 1)->kind == svsl_tok_ident && is_type_name(p, peek(p, 1)->text)) {
@@ -675,6 +706,15 @@ static decl_mods_t parse_decl_mods(parse_t *p, bool allow_dir) {
 		mods.any = true;
 	}
 	return mods;
+}
+
+// layout keywords name a whole buffer's memory layout — they have no meaning on
+// locals, parameters, or individual members
+static void reject_pack_mods(parse_t *p, decl_mods_t *mods, svsl_loc_t loc) {
+	if (!mods->pack) return;
+	svsl_diag_add(p->arena, p->diags, svsl_severity_error, loc,
+	              "layout keywords only apply to buffer declarations");
+	mods->pack = 0;
 }
 
 // one declarator: name [dims] [: semantic] [: register] [= init]
@@ -717,6 +757,7 @@ static svsl_ast_var_t *parse_declarator(parse_t *p, const svsl_ast_type_t *base_
 	var->flags  = mods->flags;
 	var->interp = mods->interp;
 	var->dir    = mods->dir;
+	var->pack   = mods->pack;
 	var->attrs  = attrs;
 
 	for (int32_t a = 0; a < attrs.count; a++)
@@ -885,6 +926,7 @@ static svsl_ast_stmt_t *parse_stmt_inner(parse_t *p) {
 			if (stmt_starts_decl(p)) {
 				svsl_ast_stmt_t *init = stmt_new(p, svsl_stmt_var_decl, cur(p)->loc);
 				decl_mods_t      mods = parse_decl_mods(p, false);
+				reject_pack_mods(p, &mods, cur(p)->loc);
 				var_list_t       vars = {0};
 				parse_var_decl_list(p, &mods, (svsl_ast_attrs_t){0}, &vars);
 				init->var_decl.vars  = vars.items;
@@ -947,6 +989,7 @@ static svsl_ast_stmt_t *parse_stmt_inner(parse_t *p) {
 	if (stmt_starts_decl(p)) {
 		svsl_ast_stmt_t *s    = stmt_new(p, svsl_stmt_var_decl, loc);
 		decl_mods_t      mods = parse_decl_mods(p, false);
+		reject_pack_mods(p, &mods, loc);
 		var_list_t       vars = {0};
 		parse_var_decl_list(p, &mods, attrs, &vars);
 		s->var_decl.vars  = vars.items;
@@ -977,6 +1020,7 @@ static void parse_member_list(parse_t *p, var_list_t *out) {
 		int32_t          before = p->pos;
 		svsl_ast_attrs_t attrs  = parse_attrs(p); // [offset(N)], [location(N)]
 		decl_mods_t      mods   = parse_decl_mods(p, false);
+		reject_pack_mods(p, &mods, cur(p)->loc);
 		parse_var_decl_list(p, &mods, attrs, out);
 		if (p->pos == before) { stmt_sync(p); if (p->pos == before) advance(p); }
 	}
@@ -1041,27 +1085,41 @@ static svsl_ast_type_t *make_type_named(parse_t *p, svsl_str_t name, svsl_loc_t 
 	return t;
 }
 
-// cbuffer/uniform/storagebuffer/pushconstant blocks
+// access modifiers and layout keywords that used to follow the block keyword and
+// now prefix it — reserved words, so none can ever be a valid buffer name
+static bool at_buffer_postfix_mod(const parse_t *p) {
+	return at_kw(p, svsl_kw_readonly) || at_kw(p, svsl_kw_writeonly) ||
+	       at_kw(p, svsl_kw_coherent) || at_kw(p, svsl_kw_volatile)  ||
+	       at_kw(p, svsl_kw_pack1)    || at_kw(p, svsl_kw_pack8)     || at_kw(p, svsl_kw_pack16);
+}
+
+// cbuffer/uniform/storagebuffer/pushconstant blocks; access modifiers and the
+// pack layout arrive as prefix declaration modifiers ('readonly pack16 storagebuffer B')
 static svsl_ast_decl_t *parse_buffer_block(parse_t *p, svsl_block_kind_ kind, bool legacy,
-                                           svsl_ast_attrs_t attrs) {
+                                           svsl_ast_attrs_t attrs, const decl_mods_t *mods) {
 	svsl_ast_decl_t *d = decl_new(p, svsl_decl_block, cur(p)->loc);
 	advance(p); // block keyword
 	d->block.loc    = d->loc;
 	d->block.kind   = kind;
 	d->block.legacy = legacy;
 	d->block.attrs  = attrs;
+	d->block.pack   = (svsl_pack_)mods->pack;
 
-	for (;;) { // access modifiers and pack layout, any order
-		if      (accept_kw(p, svsl_kw_readonly))  d->block.flags |= svsl_var_flag_readonly;
-		else if (accept_kw(p, svsl_kw_writeonly)) d->block.flags |= svsl_var_flag_writeonly;
-		else if (accept_kw(p, svsl_kw_coherent))  d->block.flags |= svsl_var_flag_coherent;
-		else if (accept_kw(p, svsl_kw_volatile))  d->block.flags |= svsl_var_flag_volatile;
-		else if (accept_kw(p, svsl_kw_pack1))     d->block.pack = svsl_pack_1;
-		else if (accept_kw(p, svsl_kw_pack8))     d->block.pack = svsl_pack_8;
-		else if (accept_kw(p, svsl_kw_pack16))    d->block.pack = svsl_pack_16;
-		else break;
+	const uint32_t block_flags = svsl_var_flag_readonly | svsl_var_flag_writeonly |
+	                             svsl_var_flag_coherent | svsl_var_flag_volatile;
+	d->block.flags = mods->flags & block_flags;
+	if ((mods->flags & ~block_flags) || mods->interp)
+		svsl_diag_add(p->arena, p->diags, svsl_severity_error, d->loc,
+		              "only access modifiers and a layout keyword may prefix a buffer block");
+
+	// catch the old postfix order ('storagebuffer readonly Name') so it gives a
+	// clear diagnostic and recovers, instead of consuming the keyword as the name
+	if (at_buffer_postfix_mod(p)) {
+		svsl_diag_add(p->arena, p->diags, svsl_severity_error, cur(p)->loc,
+		              "access modifiers and layout keywords now prefix the block keyword, "
+		              "e.g. 'readonly storagebuffer Name' instead of 'storagebuffer readonly Name'");
+		while (at_buffer_postfix_mod(p)) advance(p);
 	}
-
 	d->block.name = expect_ident(p, "buffer name");
 	parse_colon_clauses(p, NULL, &d->block.reg);
 
@@ -1090,6 +1148,7 @@ static svsl_ast_decl_t *parse_function(parse_t *p, svsl_ast_type_t *return_type,
 		      peek(p, 1)->kind == svsl_tok_rparen)) {
 			do {
 				decl_mods_t      mods  = parse_decl_mods(p, true);
+				reject_pack_mods(p, &mods, cur(p)->loc);
 				svsl_ast_type_t *ptype = parse_type(p);
 				svsl_ast_var_t  *param = parse_declarator(p, ptype, &mods, (svsl_ast_attrs_t){0});
 				svsl_array_push(p->arena, &params, param);
@@ -1111,19 +1170,26 @@ static svsl_ast_decl_t *parse_function(parse_t *p, svsl_ast_type_t *return_type,
 
 // handles the keyword-introduced declarations; returns NULL for the
 // modifier/type-led forms (globals, functions) which parse_decl_into finishes
-static svsl_ast_decl_t *parse_decl(parse_t *p, svsl_ast_attrs_t attrs, svsl_loc_t loc) {
+static svsl_ast_decl_t *parse_decl(parse_t *p, svsl_ast_attrs_t attrs, svsl_loc_t loc,
+                                   const decl_mods_t *mods) {
 	if (at_kw(p, svsl_kw_struct)) {
+		if (mods->any)
+			svsl_diag_add(p->arena, p->diags, svsl_severity_error, loc,
+			              "modifiers do not apply to struct declarations");
 		svsl_ast_decl_t *d = parse_struct(p);
 		d->struct_decl.loc = loc;
 		return d;
 	}
 	if (at_kw(p, svsl_kw_cbuffer))
-		return parse_buffer_block(p, svsl_block_uniform, true, attrs);
+		return parse_buffer_block(p, svsl_block_uniform, true, attrs, mods);
 	if (at_kw(p, svsl_kw_storagebuffer))
-		return parse_buffer_block(p, svsl_block_storagebuffer, false, attrs);
+		return parse_buffer_block(p, svsl_block_storagebuffer, false, attrs, mods);
 	if (at_kw(p, svsl_kw_pushconstant))
-		return parse_buffer_block(p, svsl_block_pushconstant, false, attrs);
+		return parse_buffer_block(p, svsl_block_pushconstant, false, attrs, mods);
 	if (at_kw(p, svsl_kw_include) && peek(p, 1)->kind == svsl_tok_string_lit) {
+		if (mods->any)
+			svsl_diag_add(p->arena, p->diags, svsl_severity_error, loc,
+			              "modifiers do not apply to includes");
 		advance(p);
 		svsl_ast_decl_t *d = decl_new(p, svsl_decl_include, loc);
 		d->include_path = cur(p)->text;
@@ -1178,7 +1244,10 @@ static void parse_decl_into(parse_t *p, decl_list_t *out) {
 		return;
 	}
 
-	svsl_ast_decl_t *simple = parse_decl(p, attrs, loc);
+	// modifiers first: they prefix every declaration form (vars, blocks, resources)
+	decl_mods_t mods = parse_decl_mods(p, false);
+
+	svsl_ast_decl_t *simple = parse_decl(p, attrs, loc, &mods);
 	if (simple) {
 		svsl_array_push(p->arena, out, simple);
 		return;
@@ -1188,19 +1257,18 @@ static void parse_decl_into(parse_t *p, decl_list_t *out) {
 		if (peek(p, 1)->kind == svsl_tok_ident && is_type_name(p, peek(p, 1)->text) &&
 		    peek(p, 2)->kind == svsl_tok_ident) {
 			advance(p); // 'uniform' as a legacy modifier on a global
-			decl_mods_t mods = { .flags = svsl_var_flag_uniform | svsl_var_flag_legacy_spelling };
+			mods.flags |= svsl_var_flag_uniform | svsl_var_flag_legacy_spelling;
 			decl_mods_t more = parse_decl_mods(p, false);
 			mods.flags  |= more.flags;
 			mods.interp |= more.interp;
+			if (more.pack) mods.pack = more.pack;
 			push_var_decls(p, out, &mods, attrs, loc);
 			return;
 		}
-		svsl_array_push(p->arena, out, parse_buffer_block(p, svsl_block_uniform, false, attrs));
+		svsl_array_push(p->arena, out, parse_buffer_block(p, svsl_block_uniform, false, attrs, &mods));
 		return;
 	}
 
-	// modifiers + type: either a function or global variable(s)
-	decl_mods_t mods = parse_decl_mods(p, false);
 	if (!at(p, svsl_tok_ident)) {
 		svsl_diag_add(p->arena, p->diags, svsl_severity_error, loc,
 		              "expected declaration, got '%.*s'", cur(p)->text.len ? cur(p)->text.len : 5,

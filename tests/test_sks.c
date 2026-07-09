@@ -343,6 +343,35 @@ static void test_sks_bool_params(void) {
 	svsl_arena_free(&arena);
 }
 
+// scalarBlockLayout has no SPIR-V capability, so feature-mask bit 16 is the only
+// machine-readable signal that a pack1/pack8 layout broke core relaxed rules
+static void test_sks_scalar_layout_feature(void) {
+	svsl_arena_t arena = {0};
+
+	svsl_sks_blob_t blob = {0};
+	TEST_CHECK(compile_sks(&arena, "checks/check_pack_scalar.hlsl", &blob));
+	sks_file_t f = {0};
+	TEST_CHECK(sks_read(blob.bytes, blob.size, &f));
+	TEST_CHECK((f.features & (1ull << 16)) != 0); // pack1 + straddling float4
+
+	svsl_sks_blob_t plain = {0};
+	TEST_CHECK(compile_sks(&arena, "checks/check_pack_layout.hlsl", &plain));
+	sks_file_t fp = {0};
+	TEST_CHECK(sks_read(plain.bytes, plain.size, &fp));
+	TEST_CHECK((fp.features & (1ull << 16)) == 0); // C-packed default stays core-legal
+
+	// object-form buffer whose element straddles only from element 1 onward: the
+	// straddle is invisible at offset 0, so it is caught only by walking element
+	// stride phases — must raise bit 16 like the equivalent block form
+	svsl_sks_blob_t stride = {0};
+	TEST_CHECK(compile_sks(&arena, "checks/check_pack_stride.hlsl", &stride));
+	sks_file_t fst = {0};
+	TEST_CHECK(sks_read(stride.bytes, stride.size, &fst));
+	TEST_CHECK((fst.features & (1ull << 16)) != 0); // pack1 + element-1 straddle
+
+	svsl_arena_free(&arena);
+}
+
 // --- reference comparison (runs when skshaderc is available) -----------------------------
 
 static bool compare_with_reference(svsl_arena_t *arena, const char *shader) {
@@ -424,5 +453,6 @@ static void test_sks_reference(void) {
 void test_sks(void) {
 	test_sks_structure();
 	test_sks_bool_params();
+	test_sks_scalar_layout_feature();
 	test_sks_reference();
 }

@@ -2,7 +2,9 @@
 
 struct Particle {
 	float3 position;
+	float  _pad0;
 	float3 velocity;
+	float  _pad1;
 };
 
 float  time;

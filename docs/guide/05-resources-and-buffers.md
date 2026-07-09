@@ -222,15 +222,16 @@ Uniform blocks are read-only - writing a member is an error - and must use `pack
 ### `storagebuffer` - read/write, runtime-sized
 
 ```c
-storagebuffer readonly InputData : register(t0) {
+readonly storagebuffer InputData : register(t0) {
 	Vertex vertices[];              // runtime-sized: last member only
 };
-storagebuffer writeonly OutputData : register(u0) {
+writeonly storagebuffer OutputData : register(u0) {
 	float4 results[16];
 };
 ```
 
-`readonly` / `writeonly` (and `coherent`, `volatile`) are access qualifiers. A runtime-sized
+`readonly` / `writeonly` (and `coherent`, `volatile`) are access qualifiers, written
+before the storage keyword like every other declaration modifier. A runtime-sized
 array (`[]`) is legal only as the **last** member of a `storagebuffer`; its length comes from
 the bound buffer. Storage buffers default to **std430** layout (§5).
 
@@ -244,6 +245,10 @@ RWStructuredBuffer<Particle> particles_rw : register(u1);
 Particle p = particles[i];
 particles_rw[i] = p;
 ```
+
+Unlike blocks, their elements default to **C layout** — a plain C struct with the same
+members matches byte-for-byte (§5). A layout keyword before the declaration overrides:
+`pack16 StructuredBuffer<Particle> particles;`.
 
 ### `pushconstant` - small, fast, no descriptor
 
@@ -260,32 +265,87 @@ members are used by name. Push-constant blocks default to **std430**.
 
 ---
 
-## 5. Memory layout: `pack1`, `pack8`, `pack16`
+## 5. Memory layout: `pack1`, `pack8`, `pack16`, `std430`
 
 Layout controls the byte offset and stride of every member - critical, because the CPU side
-must write matching bytes. A layout qualifier goes right after the storage keyword:
+must write matching bytes. A layout keyword prefixes the declaration, on blocks and on the
+object-form buffers alike, and every mode also answers to its standards name:
 
 ```c
-storagebuffer pack16 Data  : register(t0) { float4 v[]; };
-uniform       pack16 Scene : register(b0) { float4x4 vp; float3 eye; float t; };
+pack16 storagebuffer Data  : register(t0) { float4 v[]; };
+std140 uniform       Scene : register(b0) { float4x4 vp; float3 eye; float t; };
+pack16 RWStructuredBuffer<particle_t> parts : register(u1);
+scalar readonly storagebuffer Raw { float data[]; };
 ```
 
-| Qualifier | Rule | Vulkan equivalent |
-|-----------|------|-------------------|
-| *(none)* → **`std430`** | vectors natural-aligned, no 16-byte array-stride rounding - the safe default; it has no keyword because it exists only as the default | core (validates on every Vulkan device) |
-| `pack1` | scalar layout - every member aligns to its scalar size; `float3` is 12 bytes; matches a tightly packed C struct | scalar block layout (VK_EXT_scalar_block_layout) |
-| `pack8` | vectors align to `min(natural, 8)` | relaxed block layout |
-| `pack16` | std140 - `float3`/`float4` align to 16, array elements round up to a 16-byte stride, struct alignment ≥16 | core |
+| Keyword | Alias | Rule | Vulkan |
+|---------|-------|------|--------|
+| `pack1` | `scalar` | every member aligns to its scalar size; `float3` is 12 bytes; matches a tightly packed C struct | core when nothing straddles a 16-byte boundary, else the `scalarBlockLayout` device feature |
+| `pack8` | `relaxed` | vectors align to `min(natural, 8)` | same rule as `pack1` |
+| `pack16` | `std140` | `float3`/`float4` align to 16, array elements round up to a 16-byte stride, struct alignment >=16 | core |
+| `std430` | - | vectors natural-aligned, no 16-byte array-stride rounding | core |
+
+The aliases are context-sensitive, so `scalar` and `relaxed` remain usable as ordinary
+identifiers.
 
 Defaults and constraints:
 
-- `uniform` - **`pack16` only** (also the default). `uniform pack1 Bad { ... }` is an error:
+- `uniform` - **`pack16` only** (also the default). `pack1 uniform Bad { ... }` is an error:
   `uniform buffer 'Bad' must use pack16`. The implicit `$Global` buffer (§6) is always
   `pack16`.
-- `storagebuffer` / `pushconstant` - default **`std430`** (no keyword - it's the safe core
-  layout that validates on every device); any explicit pack qualifier is allowed.
+- `storagebuffer` / `pushconstant` blocks - default **`std430`** (the safe core layout that
+  validates on every device); any explicit layout keyword is allowed.
+- `StructuredBuffer<T>` / `RWStructuredBuffer<T>` / `Buffer<T>` elements - default to
+  **C layout where C layout is free**. "C layout" is `pack1`/`scalar`; the default differs
+  from writing the keyword only in policy. A valid pack1 layout whose vector straddles a
+  16-byte boundary (or whose stride breaks std430 alignment) is only loadable on devices
+  with `scalarBlockLayout` - and a bare declaration names no layout, so it must not
+  silently acquire a device dependency. The default refuses such structs with a compile
+  error; writing `pack1` supplies the consent, emits the same layout, and records the
+  requirement in the SKS feature mask (bit 16).
 
-`pack1` pulls in `VK_EXT_scalar_block_layout` automatically.
+How the same struct lands under each mode:
+
+```c
+struct particle_t {
+	uint   id;    // C: offset 0
+	float2 pos;   // C: offset 4
+	float  scale; // C: offset 12, sizeof 16
+};
+```
+
+| Mode | `id` | `pos` | `scale` | array stride |
+|------|------|-------|---------|--------------|
+| `pack1` / `scalar` | 0 | 4 | 12 | 16 |
+| `pack8` / `relaxed` | 0 | 8 | 16 | 24 |
+| `pack16` / `std140` | 0 | 8 | 16 | 32 |
+| `std430` | 0 | 8 | 16 | 24 |
+
+Only `pack1` matches the natural C layout byte-for-byte - under the other modes a matching
+C struct needs explicit padding members, so reflected `element_size` equals the C `sizeof`
+only under `pack1`. `particle_t` never straddles, so as a `StructuredBuffer` element it
+needs no keyword and no device feature. A struct like `{ float a; float4 b; }` does
+straddle (`b` at offset 4): the default refuses it, and `pack1` opts in. One caveat when
+mirroring structs in C: SVSL `bool` is stored as a 32-bit uint - pair it with
+`uint32_t`/`int32_t` on the CPU side, never C `bool`.
+
+### Which layout should I use?
+
+Prefer **no keyword at all**: design element structs alignment-neutral, and the C-packed
+default, std430, and std140 all agree byte-for-byte - no device requirements, no hidden
+padding, and the source stays valid HLSL. The recipes are mechanical: build in
+`float4`-sized rows, pair every `float3` with a scalar, keep `float2` members on 8-byte
+offsets, and write explicit `_pad` members rather than letting a layout engine insert
+invisible ones. When the compiler refuses a struct, reordering or padding it is almost
+always the best fix - that's why the error suggests it first.
+
+Reach for a keyword when restructuring isn't an option: `std430` (or `pack16`) when
+mirroring a CPU layout you don't control or porting existing code wholesale - the padding
+then lives implicitly on the GPU side, and the CPU code must match it. Use `pack1` when
+density is the point and no reordering can help: `{ float3 position; float3 velocity; }`
+is 24 bytes packed but 32 padded or under std430, a 25% bandwidth cut on a
+bandwidth-bound pass - a deliberate trade for knowing your devices support
+`scalarBlockLayout`.
 
 ### Explicit member offsets
 

@@ -109,7 +109,7 @@ static const char *legacy_type_native(svsl_str_t name) {
 	if (svsl_str_starts_with(name, "min16float"))         return "half";
 	if (svsl_str_eq_cstr(name, "SamplerState"))           return "Sampler";
 	if (svsl_str_eq_cstr(name, "SamplerComparisonState")) return "SamplerComparison";
-	if (svsl_str_eq_cstr(name, "StructuredBuffer"))       return "storagebuffer readonly";
+	if (svsl_str_eq_cstr(name, "StructuredBuffer"))       return "readonly storagebuffer";
 	if (svsl_str_eq_cstr(name, "RWStructuredBuffer"))     return "storagebuffer";
 	if (svsl_str_starts_with(name, "RWTexture"))          return "Image";
 	return NULL;
@@ -799,6 +799,18 @@ static bool parse_value_list(svsl_str_t text, const svsl_type_t *t, uint8_t *out
 
 // --- main pass -----------------------------------------------------------------------------
 
+// a buffer's pack keyword names its memory layout; the fallback is the layout
+// used when no keyword was given (differs for uniform blocks vs object buffers)
+static svsl_layout_ pack_to_layout(svsl_pack_ pack, svsl_layout_ fallback) {
+	switch (pack) {
+	case svsl_pack_1:   return svsl_layout_pack1;
+	case svsl_pack_8:   return svsl_layout_pack8;
+	case svsl_pack_16:  return svsl_layout_pack16;
+	case svsl_pack_430: return svsl_layout_std430;
+	default:            return fallback;
+	}
+}
+
 static void add_buffer_block(sema_t *s, const svsl_ast_block_t *block_in) {
 	svsl_ast_block_t local = *block_in;
 	svsl_ast_block_t *block = &local;
@@ -813,14 +825,9 @@ static void add_buffer_block(sema_t *s, const svsl_ast_block_t *block_in) {
 			err(s, attr->loc, "[[vk::binding]] on '%.*s' needs (binding[, set]) constants", block->name);
 	}
 
-	svsl_layout_ layout;
 	bool         is_uniform = block->kind == svsl_block_uniform;
-	switch (block->pack) {
-	case svsl_pack_1:  layout = svsl_layout_pack1;  break;
-	case svsl_pack_8:  layout = svsl_layout_pack8;  break;
-	case svsl_pack_16: layout = svsl_layout_pack16; break;
-	default:           layout = is_uniform ? svsl_layout_pack16 : svsl_layout_std430; break;
-	}
+	svsl_layout_ layout     = pack_to_layout((svsl_pack_)block->pack,
+	                                         is_uniform ? svsl_layout_pack16 : svsl_layout_std430);
 	if (is_uniform && layout != svsl_layout_pack16) {
 		err(s, block->loc, "uniform buffer '%.*s' must use pack16", block->name);
 		layout = svsl_layout_pack16;
@@ -855,6 +862,15 @@ static void add_buffer_block(sema_t *s, const svsl_ast_block_t *block_in) {
 	uint32_t  size    = svsl_layout_members(&s->prog->types, members.items, members.count, layout, offsets, &bad);
 	if (bad >= 0)
 		err(s, members.items[bad].loc, "[offset] on '%.*s' moves backwards or breaks alignment", members.items[bad].name);
+
+	// explicit pack1/pack8 layouts may break the core relaxed rules; that's legal
+	// but requires the scalarBlockLayout device feature — record it
+	if (layout == svsl_layout_pack1 || layout == svsl_layout_pack8)
+		for (int32_t i = 0; i < members.count; i++)
+			if (svsl_layout_needs_scalar(&s->prog->types, members.items[i].type, layout, offsets[i], NULL)) {
+				s->prog->needs_scalar_layout = true;
+				break;
+			}
 
 	svsl_buffer_t buffer = {
 		.name   = block->name,
@@ -892,6 +908,7 @@ static void add_buffer_block(sema_t *s, const svsl_ast_block_t *block_in) {
 			.subpass_index= -1,
 			.buffer_index = s->prog->buffers.count - 1,
 			.element_size = elem_size,
+			.layout       = (uint8_t)layout,
 			.loc          = block->loc });
 	}
 }
@@ -1107,6 +1124,8 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 		if (ast->decls[i]->kind != svsl_decl_var) continue;
 		const svsl_ast_var_t *var = &ast->decls[i]->var;
 		svsl_attrs_check(arena, s.diags, &var->attrs, svsl_attr_ctx_var, s.prog->porting);
+		if (var->pack && (var->flags & (svsl_var_flag_workgroup | svsl_var_flag_static | svsl_var_flag_const | svsl_var_flag_specialization)))
+			err(&s, var->loc, "layout keyword on '%.*s': only buffer resources have a memory layout", var->name);
 		if (var->flags & svsl_var_flag_specialization) continue;
 		if (var->flags & svsl_var_flag_workgroup) {
 			svsl_array_push(arena, &s.prog->workgroup_vars, (svsl_global_t){
@@ -1174,9 +1193,37 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 				t    = svsl_type_get(&s.prog->types, type);
 				base = t->kind == svsl_type_array ? svsl_type_get(&s.prog->types, t->elem) : t;
 			}
-			uint32_t element_size = 0;
-			if (base->kind == svsl_type_buffer && base->elem != SVSL_TYPE_NONE)
-				element_size = svsl_layout_array_stride(&s.prog->types, base->elem, svsl_layout_std430);
+			// Object-form buffer elements default to C layout (pack1 rules), refusing
+			// what baseline Vulkan can't express: a straddling vector is an error
+			// unless a layout keyword makes the device requirement explicit.
+			svsl_layout_ elem_layout  = svsl_layout_pack1;
+			uint32_t     element_size = 0;
+			if (var->pack && base->kind != svsl_type_buffer)
+				err(&s, var->loc, "layout keyword on '%.*s': only buffer resources have a memory layout", var->name);
+			if (base->kind == svsl_type_buffer && base->elem != SVSL_TYPE_NONE) {
+				elem_layout  = pack_to_layout((svsl_pack_)var->pack, svsl_layout_pack1);
+				element_size = svsl_layout_array_stride(&s.prog->types, base->elem, elem_layout);
+				// the element sits in an implicit runtime array; probe it as one so
+				// the stride-alignment and per-element straddle checks match the block
+				// form (needs_scalar's array case walks every distinct stride phase, not
+				// just element 0 — a vector can straddle only from element 1 onward)
+				svsl_type_id_t elem_array = svsl_type_array_id(&s.prog->types, base->elem, 0);
+				bool           violates   = svsl_layout_needs_scalar(&s.prog->types, elem_array, elem_layout, 0, NULL);
+				// interning the probe array may have grown the type table; re-derive
+				t    = svsl_type_get(&s.prog->types, type);
+				base = t->kind == svsl_type_array ? svsl_type_get(&s.prog->types, t->elem) : t;
+				if ((elem_layout == svsl_layout_pack1 || elem_layout == svsl_layout_pack8) && violates) {
+					if (var->pack == svsl_pack_default)
+						svsl_diag_add(arena, s.diags, svsl_severity_error, var->loc,
+						              "the C-packed element layout of '%.*s' is not expressible under "
+						              "core Vulkan rules — reorder or pad the struct so vectors don't "
+						              "cross 16-byte boundaries and the stride is 16-aligned, or "
+						              "declare 'pack1' to require the scalarBlockLayout device feature",
+						              var->name.len, var->name.ptr);
+					else
+						s.prog->needs_scalar_layout = true;
+				}
+			}
 			int32_t subpass_index = -1; // attachment index for subpass AND tile image
 			if ((base->kind == svsl_type_subpass || base->kind == svsl_type_tileimage) &&
 			    var->type->index) {
@@ -1210,9 +1257,12 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 				.subpass_index = subpass_index,
 				.buffer_index  = -1,
 				.element_size  = element_size,
+				.layout        = (uint8_t)elem_layout,
 				.loc           = var->loc });
 			continue;
 		}
+		if (var->pack)
+			err(&s, var->loc, "layout keyword on '%.*s': only buffer resources have a memory layout", var->name);
 		svsl_array_push(arena, &globals, var);
 	}
 

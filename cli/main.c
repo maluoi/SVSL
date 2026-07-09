@@ -218,7 +218,9 @@ static bool compile_file(const cli_t *cli, const char *path) {
 
 			if (cli->validate) {
 				char cmd[1200];
-				snprintf(cmd, sizeof(cmd), "spirv-val --target-env vulkan1.1 %s", out_path);
+				snprintf(cmd, sizeof(cmd), "spirv-val --target-env vulkan1.1%s %s",
+				         svsl_result_needs_scalar_layout(r) ? " --scalar-block-layout" : "",
+				         out_path);
 				if (system(cmd) != 0) {
 					fprintf(stderr, "svslc: validation failed for '%s'\n", out_path);
 					ok = false;

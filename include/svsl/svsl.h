@@ -155,6 +155,11 @@ const char  *svsl_result_header    (svsl_result_t *result, const char *name); //
 const char  *svsl_result_reflection(svsl_result_t *result);             // human-readable table
 const char  *svsl_result_ir        (svsl_result_t *result);             // IR dump (debugging)
 
+// True when a pack1/pack8 buffer layout breaks core relaxed block layout rules:
+// the device needs VK_EXT_scalar_block_layout, and spirv-val needs
+// --scalar-block-layout. Also recorded as bit 16 of the SKS feature mask.
+bool svsl_result_needs_scalar_layout(svsl_result_t *result);
+
 // ============================================================================
 // SKS container reading
 // ============================================================================

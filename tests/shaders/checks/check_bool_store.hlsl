@@ -6,9 +6,10 @@
 // the buffer must match skshaderc bitwise; the final line round-trips a bool
 // through a member load+store to exercise both conversions on one pointer.
 //
-// Member order keeps every offset alignment-neutral: glslang packs structured
-// buffer elements DX-style (uint2 at 4) where SVSL uses std430 (uint2 at 8) —
-// a divergence tracked in docs/BACKLOG.md that this test deliberately avoids.
+// Member order keeps every offset alignment-neutral, so SVSL's C-packed element
+// default, std430, and glslang's hybrid layout all agree byte-for-byte — this
+// test stays bitwise-comparable against the reference (see check_pack_layout
+// for the layouts where no reference comparison is possible).
 
 struct rec_t {
 	bool2 pair; // offset 0 under both layouts

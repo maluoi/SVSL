@@ -129,14 +129,29 @@ static void test_parse_decls(void) {
 		"uniform SceneData : register(b0, space0) { float4x4 viewProj; };",
 		"(uniform SceneData :register(b0,space0) (member viewProj float4x4))\n"));
 	TEST_CHECK(dump_is(&arena,
-		"storagebuffer readonly Vertices : register(t0, space1) { Vertex vertices[]; };",
+		"readonly storagebuffer Vertices : register(t0, space1) { Vertex vertices[]; };",
 		"(storagebuffer Vertices readonly :register(t0,space1) (member vertices Vertex[]))\n"));
 	TEST_CHECK(dump_is(&arena,
 		"pushconstant Draw { float4x4 model; uint32 materialId; };",
 		"(pushconstant Draw (member model float4x4) (member materialId uint32))\n"));
 	TEST_CHECK(dump_is(&arena,
-		"storagebuffer pack16 Data { float4 v[]; };",
+		"pack16 storagebuffer Data { float4 v[]; };",
 		"(storagebuffer Data pack16 (member v float4[]))\n"));
+	TEST_CHECK(dump_is(&arena, // standards-name aliases, context-sensitive
+		"std140 storagebuffer D2 { float4 v[]; };",
+		"(storagebuffer D2 pack16 (member v float4[]))\n"));
+	TEST_CHECK(dump_is(&arena,
+		"scalar readonly storagebuffer D3 { float4 v[]; };",
+		"(storagebuffer D3 pack1 readonly (member v float4[]))\n"));
+	TEST_CHECK(dump_is(&arena,
+		"std430 pushconstant D4 { float4 v; };",
+		"(pushconstant D4 std430 (member v float4))\n"));
+	TEST_CHECK(dump_is(&arena, // pack keyword on an object-form resource
+		"pack1 RWStructuredBuffer<float4> results : register(u0);",
+		"(global results pack1 RWStructuredBuffer<float4> :register(u0,space0))\n"));
+	TEST_CHECK(dump_is(&arena, // 'scalar' and 'relaxed' stay plain identifiers elsewhere
+		"float4 ps() : SV_TARGET { float scalar = 1; return scalar.xxxx; }",
+		"(func ps (ret float4 :SV_TARGET) (block (decl (var scalar float = 1)) (return (. scalar xxxx))))\n"));
 	TEST_CHECK(dump_is(&arena,
 		"specialization const uint32 TILE = 16;",
 		"(global TILE spec const uint32 = 16)\n"));
@@ -148,6 +163,16 @@ static void test_parse_decls(void) {
 		TEST_CHECK(r.diags.error_count == 1);
 		TEST_CHECK(strstr(r.diags.items[0].message, "inheritance") != NULL);
 		TEST_CHECK(r.ast->decl_count == 1 && r.ast->decls[0]->struct_decl.member_count == 1);
+	}
+
+	// the old postfix modifier order ('storagebuffer readonly Name') gets a clear
+	// diagnostic and recovers to the real name, not the modifier keyword
+	{
+		parse_run_t r = run_parse(&arena, "storagebuffer readonly Vertices { float4 v[]; };");
+		TEST_CHECK(!r.ok);
+		TEST_CHECK(strstr(r.diags.items[0].message, "prefix the block keyword") != NULL);
+		TEST_CHECK(r.ast->decl_count == 1 &&
+		           svsl_str_eq_cstr(r.ast->decls[0]->block.name, "Vertices"));
 	}
 	TEST_CHECK(dump_is(&arena,
 		"Texture2D tex : register(0, 1);",

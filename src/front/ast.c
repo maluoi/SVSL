@@ -228,6 +228,10 @@ static void dump_var(dump_t *d, const svsl_ast_var_t *v, const char *tag) {
 	if (v->flags & svsl_var_flag_volatile)       put(d, "volatile ");
 	if (v->flags & svsl_var_flag_precise)        put(d, "precise ");
 	if (v->flags & svsl_var_flag_uniform)        put(d, "uniform ");
+	if (v->pack == svsl_pack_1)                  put(d, "pack1 ");
+	if (v->pack == svsl_pack_8)                  put(d, "pack8 ");
+	if (v->pack == svsl_pack_16)                 put(d, "pack16 ");
+	if (v->pack == svsl_pack_430)                put(d, "std430 ");
 	if (v->interp & svsl_interp_flat)            put(d, "flat ");
 	if (v->interp & svsl_interp_noperspective)   put(d, "noperspective ");
 	if (v->interp & svsl_interp_centroid)        put(d, "centroid ");
@@ -361,9 +365,10 @@ const char *svsl_ast_dump(svsl_arena_t *arena, const svsl_ast_t *ast) {
 			put(&d, "(%s ", kind);
 			put_str(&d, decl->block.name);
 			dump_attrs(&d, decl->block.attrs);
-			if (decl->block.pack == svsl_pack_1)  put(&d, " pack1");
-			if (decl->block.pack == svsl_pack_8)  put(&d, " pack8");
-			if (decl->block.pack == svsl_pack_16) put(&d, " pack16");
+			if (decl->block.pack == svsl_pack_1)   put(&d, " pack1");
+			if (decl->block.pack == svsl_pack_8)   put(&d, " pack8");
+			if (decl->block.pack == svsl_pack_16)  put(&d, " pack16");
+			if (decl->block.pack == svsl_pack_430) put(&d, " std430");
 			if (decl->block.flags & svsl_var_flag_readonly) put(&d, " readonly");
 			if (decl->block.reg.present) {
 				if (decl->block.reg.direct) put(&d, " :register(%d,%d)", decl->block.reg.slot, decl->block.reg.space);

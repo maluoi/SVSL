@@ -241,7 +241,7 @@ not a set of knobs you turn.
 | `int16`/`uint16` | `Int16` (+ 16-bit storage caps) |
 | `int64` | `Int64` |
 | `float64` | `Float64` |
-| `pack1` layout | `VK_EXT_scalar_block_layout` (a Vulkan device feature - not a SPIR-V extension) |
+| `pack1`/`pack8` layout breaking core relaxed rules | `VK_EXT_scalar_block_layout` (a Vulkan device feature - no SPIR-V capability; recorded as `.sks` feature-mask bit 16) |
 | `SV_ViewID` | `MultiView` (core in SPIR-V 1.3 - no extension) |
 | `demote` / `is_helper_invocation` | `DemoteToHelperInvocation` |
 | subgroup ops | `GroupNonUniform` + `Vote`/`Ballot`/`Arithmetic`/`Shuffle`/`Clustered`/`Quad` as used |

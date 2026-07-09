@@ -44,9 +44,9 @@ emit a hint; the keyword rows (`cbuffer`, `groupshared`, `nointerpolation`) do n
 | HLSL spelling | SVSL-native | Notes |
 |---------------|-------------|-------|
 | `cbuffer N : register(b0) { }` | `uniform N : register(b0) { }` | read-only constant buffer |
-| `StructuredBuffer<T>` | `storagebuffer readonly N { T x[]; }` | subscript vs. block access |
+| `StructuredBuffer<T>` | `readonly storagebuffer N { T x[]; }` | subscript vs. block access |
 | `RWStructuredBuffer<T>` | `storagebuffer N { T x[]; }` | |
-| `Buffer<T>` | `storagebuffer readonly` block | |
+| `Buffer<T>` | `readonly storagebuffer` block | |
 | `groupshared` | `workgroup` | compute shared memory |
 | `SamplerState` | `Sampler` | |
 | `SamplerComparisonState` | `SamplerComparison` | |
@@ -123,8 +123,9 @@ A short list of gotchas for someone arriving from HLSL/DXC:
 - **Recursion is a compile error** - every call is inlined, and SPIR-V forbids recursion.
 - **Resources can't be local variables** - declare them as globals and pass them into helper
   functions as parameters (which *is* allowed, and inlines away).
-- **`uniform` buffers must use `pack16`.** Only `storagebuffer` / `pushconstant` accept
-  `pack1` / `pack8`.
+- **`uniform` buffers must use `pack16`.** Storage buffers, push constants, and the
+  object-form `StructuredBuffer` family accept any layout keyword; structured-buffer
+  elements default to C layout ([Resources §5](05-resources-and-buffers.md#5-memory-layout-pack1-pack8-pack16-std430)).
 - **Legacy D3D9 intrinsics `lit`, `dst`, `msad4` are rejected** with an error - compute the
   terms directly.
 - **Bare globals with initializers aren't private variables** - they become `$Global`

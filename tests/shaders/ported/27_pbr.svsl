@@ -20,7 +20,7 @@ float  roughness       = 1;
 struct Inst {
 	float4x4 world;
 };
-storagebuffer readonly InstData : register(t2) {
+readonly storagebuffer InstData : register(t2) {
 	Inst inst[];
 };
 

@@ -119,6 +119,94 @@ uint32_t svsl_layout_size(const svsl_types_t *types, svsl_type_id_t id, svsl_lay
 	return 0;
 }
 
+// Vulkan's relaxed block layout (core 1.1, no device feature) is std430 with one
+// relaxation: vector members may sit at component alignment as long as they don't
+// improperly straddle a 16-byte boundary. Everything else — composite member
+// offsets, array strides, matrix column strides — must still satisfy std430
+// alignment. A concrete layout violating that needs the scalarBlockLayout device
+// feature. (SVSL layouts always keep members component-aligned, so the relaxation
+// baseline itself is never violated.)
+static bool vector_straddles(uint32_t offset, uint32_t size) {
+	if (size > 16) return (offset % 16) != 0;
+	return offset / 16 != (offset + size - 1) / 16;
+}
+
+// A member's offset given the running cursor and its alignment: the next aligned
+// slot, unless a valid explicit [offset] overrides it (must move forward and stay
+// aligned). out_ok, when given, reports whether an explicit offset was rejected.
+static uint32_t member_offset(uint32_t cursor, uint32_t align, int32_t explicit_offset, bool *out_ok) {
+	uint32_t offset = align_up(cursor, align);
+	if (out_ok) *out_ok = true;
+	if (explicit_offset < 0) return offset;
+	uint32_t e = (uint32_t)explicit_offset;
+	if (e >= offset && (e % align) == 0) return e;
+	if (out_ok) *out_ok = false;
+	return offset;
+}
+
+bool svsl_layout_needs_scalar(const svsl_types_t *types, svsl_type_id_t id,
+                              svsl_layout_ layout, uint32_t base, uint32_t *out_offset) {
+	if (id == SVSL_TYPE_NONE) return false;
+	const svsl_type_t *t = svsl_type_get(types, id);
+
+	// composites themselves must sit at their std430 alignment
+	if (t->kind == svsl_type_matrix || t->kind == svsl_type_array || t->kind == svsl_type_struct) {
+		if (base % svsl_layout_align(types, id, svsl_layout_std430) != 0) {
+			if (out_offset) *out_offset = base;
+			return true;
+		}
+	}
+
+	switch (t->kind) {
+	case svsl_type_vector:
+		if (!vector_straddles(base, (uint32_t)t->count * (uint32_t)svsl_scalar_size(t->scalar)))
+			return false;
+		if (out_offset) *out_offset = base;
+		return true;
+	case svsl_type_matrix: {
+		uint32_t col_size   = (uint32_t)t->rows * (uint32_t)svsl_scalar_size(t->scalar);
+		uint32_t col_stride = matrix_col_stride(t, layout);
+		uint32_t col_align  = vector_natural_align(t->scalar, t->rows); // std430 column alignment
+		for (int32_t c = 0; c < t->cols; c++) {
+			uint32_t at = base + (uint32_t)c * col_stride;
+			if (at % col_align != 0 || vector_straddles(at, col_size)) {
+				if (out_offset) *out_offset = at;
+				return true;
+			}
+		}
+		return false;
+	}
+	case svsl_type_array: {
+		uint32_t stride = svsl_layout_array_stride(types, t->elem, layout);
+		if (stride % svsl_layout_align(types, t->elem, svsl_layout_std430) != 0) {
+			if (out_offset) *out_offset = base;
+			return true;
+		}
+		// offsets repeat modulo 16 after at most 16 elements (strides are 4-aligned)
+		int32_t count = t->array_count > 0 && t->array_count < 16 ? t->array_count : 16;
+		for (int32_t i = 0; i < count; i++)
+			if (svsl_layout_needs_scalar(types, t->elem, layout, base + (uint32_t)i * stride, out_offset))
+				return true;
+		return false;
+	}
+	case svsl_type_struct: {
+		const svsl_struct_info_t *info   = &types->structs.items[t->struct_index];
+		uint32_t                  cursor = 0;
+		for (int32_t i = 0; i < info->members.count; i++) {
+			const svsl_member_t *m      = &info->members.items[i];
+			uint32_t             align  = svsl_layout_align(types, m->type, layout);
+			uint32_t             offset = member_offset(cursor, align, m->explicit_offset, NULL);
+			if (svsl_layout_needs_scalar(types, m->type, layout, base + offset, out_offset))
+				return true;
+			cursor = offset + svsl_layout_size(types, m->type, layout);
+		}
+		return false;
+	}
+	default:
+		return false;
+	}
+}
+
 uint32_t svsl_layout_members(const svsl_types_t *types, const svsl_member_t *members,
                              int32_t count, svsl_layout_ layout,
                              uint32_t *out_offsets, int32_t *out_bad_member) {
@@ -131,16 +219,9 @@ uint32_t svsl_layout_members(const svsl_types_t *types, const svsl_member_t *mem
 		uint32_t size  = svsl_layout_size (types, members[i].type, layout);
 		if (align > max_align) max_align = align;
 
-		uint32_t offset = align_up(cursor, align);
-		if (members[i].explicit_offset >= 0) {
-			uint32_t explicit = (uint32_t)members[i].explicit_offset;
-			// may only move forward, and must stay aligned
-			if (explicit < offset || (explicit % align) != 0) {
-				if (*out_bad_member < 0) *out_bad_member = i;
-			} else {
-				offset = explicit;
-			}
-		}
+		bool     ok;
+		uint32_t offset = member_offset(cursor, align, members[i].explicit_offset, &ok);
+		if (!ok && *out_bad_member < 0) *out_bad_member = i; // explicit moved back or misaligned
 		if (out_offsets) out_offsets[i] = offset; // NULL when only the total size is wanted
 		cursor = offset + size;
 	}

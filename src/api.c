@@ -114,6 +114,11 @@ void svsl_result_free(svsl_result_t *result) {
 	free(impl);
 }
 
+bool svsl_result_needs_scalar_layout(svsl_result_t *result) {
+	impl_t *impl = result->_impl;
+	return result->ok && impl->have_program && impl->program.needs_scalar_layout;
+}
+
 svsl_bytes_t svsl_result_sks(svsl_result_t *result) {
 	impl_t *impl = result->_impl;
 	if (!result->ok || !impl->have_ir) return (svsl_bytes_t){0};

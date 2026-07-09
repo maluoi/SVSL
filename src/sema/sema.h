@@ -60,6 +60,7 @@ typedef struct svsl_resource_t {
 	svsl_binding_t bind;
 	int32_t        sampler_slot; // texture: paired sampler s-slot, -1 if unpaired
 	uint32_t       element_size; // structured buffers: element stride
+	uint8_t        layout;       // svsl_layout_ — object-form structured buffers: element layout
 	int32_t        subpass_index;// subpass inputs: input_attachment_index (-1 = auto)
 	int32_t        buffer_index; // block-form storage buffers: index into buffers (-1 = object form)
 	svsl_str_t     value;        // //-- default texture name
@@ -123,6 +124,7 @@ typedef struct svsl_program_t {
 	svsl_str_t   name;      // //--name, else source filename without extension
 	bool         name_from_meta; // SKS writes an empty name unless //--name was given
 	bool         porting;   // emit porting hints on legacy HLSL spellings (-Wporting)
+	bool         needs_scalar_layout; // a pack1/pack8 layout straddles: scalarBlockLayout feature
 	int32_t      wave_size; // //--wave_size or [wave_size(N)], 0 = none
 
 	svsl_array_t(svsl_buffer_t)       buffers;

@@ -5,7 +5,7 @@
 // CalculateLevelOfDetail (OpImageQueryLod).
 
 struct item_t { float4 pos; float2 uv; };
-StructuredBuffer<item_t>   items;
+std430 StructuredBuffer<item_t>   items;
 RWStructuredBuffer<float4> outp;
 Texture2D    tex;
 SamplerState tex_s;

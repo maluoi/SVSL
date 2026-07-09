@@ -35,6 +35,7 @@ typedef struct emit_t {
 	uint32_t *type_ids;
 	// layout-decorated composite types, unique per (type, layout)
 	uint32_t *laid_ids[4];
+	int32_t   type_cap; // size of type_ids/laid_ids; ids >= this were interned mid-emit
 	uint8_t  *value_layout; // svsl_layout_ of the buffer a pointer points into
 
 	// globals
@@ -135,18 +136,6 @@ static uint32_t spv_float_const(emit_t *e, float v) {
 	memcpy(&bits, &v, 4);
 	return svsl_spv_const(&e->spv, f32, bits, false, false);
 }
-// uint constant splatted to a bool value's shape, for the bool<->uint buffer lowering
-static uint32_t spv_uint_shape_const(emit_t *e, const svsl_type_t *shape, uint32_t v) {
-	uint32_t scalar = spv_uint_const(e, v);
-	if (shape->kind != svsl_type_vector) return scalar;
-	uint32_t vec_t = svsl_spv_type(&e->spv, SpvOpTypeVector,
-	                               (uint32_t[]){ spv_scalar_type(e, svsl_scalar_uint32), shape->count }, 2);
-	uint32_t id = svsl_spv_id(&e->spv);
-	uint32_t words[6] = { vec_t, id, scalar, scalar, scalar, scalar };
-	svsl_spv_inst(&e->spv, &e->spv.types, SpvOpConstantComposite, words, 2 + (uint32_t)shape->count);
-	return id;
-}
-
 // A storage image's format: the explicit template/attribute format if named
 static SpvDim spv_dim(svsl_texdim_ dim) {
 	switch (dim) {
@@ -179,7 +168,10 @@ static uint32_t spv_image_type(emit_t *e, const svsl_type_t *t) {
 
 static uint32_t spv_type_for(emit_t *e, svsl_type_id_t id) {
 	if (id == SVSL_TYPE_NONE) return svsl_spv_type(&e->spv, SpvOpTypeVoid, NULL, 0);
-	if (e->type_ids[id]) return e->type_ids[id];
+	// types interned during emission land beyond the memoization cache; skip the
+	// cache for them (svsl_spv_type still dedups the underlying SPIR-V type)
+	bool cacheable = id < e->type_cap;
+	if (cacheable && e->type_ids[id]) return e->type_ids[id];
 
 	const svsl_type_t *t  = svsl_type_get(&e->prog->types, id);
 	uint32_t           result = 0;
@@ -240,7 +232,7 @@ static uint32_t spv_type_for(emit_t *e, svsl_type_id_t id) {
 		break;
 	// no default: -Wswitch flags every site when a type kind is added
 	}
-	e->type_ids[id] = result;
+	if (cacheable) e->type_ids[id] = result;
 	return result;
 }
 
@@ -311,21 +303,26 @@ static uint32_t matrix_stride_for(emit_t *e, const svsl_type_t *m, svsl_layout_ 
 		svsl_type_vector_id((svsl_types_t *)&e->prog->types, m->scalar, m->rows), layout);
 }
 
+// A bool scalar/vector stores in a buffer as the matching uint type (glslang
+// lowering); the svsl type id of that uint shape.
+static svsl_type_id_t bool_buffer_uint(emit_t *e, const svsl_type_t *t) {
+	svsl_types_t *types = (svsl_types_t *)&e->prog->types;
+	return t->kind == svsl_type_vector
+		? svsl_type_vector_id(types, svsl_scalar_uint32, t->count)
+		: svsl_type_scalar_id(types, svsl_scalar_uint32);
+}
+
 static uint32_t spv_type_laid(emit_t *e, svsl_type_id_t type, svsl_layout_ layout) {
 	const svsl_type_t *t = svsl_type_get(&e->prog->types, type);
 	// OpTypeBool has no external layout: buffer members store uint 0/1 instead,
 	// converting at load/store (matches glslang; see convert_composite)
 	if (t->scalar == svsl_scalar_bool &&
-	    (t->kind == svsl_type_scalar || t->kind == svsl_type_vector)) {
-		svsl_types_t  *types = (svsl_types_t *)&e->prog->types;
-		svsl_type_id_t as_u  = t->kind == svsl_type_vector
-			? svsl_type_vector_id(types, svsl_scalar_uint32, t->count)
-			: svsl_type_scalar_id(types, svsl_scalar_uint32);
-		return spv_type_for(e, as_u);
-	}
+	    (t->kind == svsl_type_scalar || t->kind == svsl_type_vector))
+		return spv_type_for(e, bool_buffer_uint(e, t));
 	if (t->kind != svsl_type_array && t->kind != svsl_type_struct)
 		return spv_type_for(e, type);
-	if (e->laid_ids[layout][type]) return e->laid_ids[layout][type];
+	bool cacheable = type < e->type_cap;
+	if (cacheable && e->laid_ids[layout][type]) return e->laid_ids[layout][type];
 
 	uint32_t result;
 	if (t->kind == svsl_type_array) {
@@ -355,7 +352,7 @@ static uint32_t spv_type_laid(emit_t *e, svsl_type_id_t type, svsl_layout_ layou
 			decorate_member(e, result, i, info->members.items[i].type, offsets[i],
 			                info->members.items[i].name, layout);
 	}
-	e->laid_ids[layout][type] = result;
+	if (cacheable) e->laid_ids[layout][type] = result;
 	return result;
 }
 
@@ -683,9 +680,9 @@ static void create_globals(emit_t *e) {
 			continue;
 		}
 		if (res->kind == svsl_res_structured || res->kind == svsl_res_rw_structured) {
-			// object form: struct { T @data[]; } Block
+			// object form: struct { T @data[]; } Block, elements in the declared layout
 			small_scalar_caps(e, t->elem, SpvStorageClassStorageBuffer);
-			uint32_t elem = spv_type_laid(e, t->elem, svsl_layout_std430);
+			uint32_t elem = spv_type_laid(e, t->elem, (svsl_layout_)res->layout);
 			uint32_t rt   = svsl_spv_id(spv);
 			svsl_spv_inst2(spv, &spv->types, SpvOpTypeRuntimeArray, rt, elem);
 			svsl_spv_inst3(spv, &spv->decor, SpvOpDecorate, rt, SpvDecorationArrayStride, res->element_size);
@@ -1366,9 +1363,10 @@ bool svsl_spirv_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 	e.value_class       = svsl_arena_alloc(arena, (size_t)inst_count * 4);
 	e.value_spec        = svsl_arena_alloc(arena, (size_t)inst_count);
 	e.if_has_else       = svsl_arena_alloc(arena, (size_t)inst_count);
-	e.type_ids          = svsl_arena_alloc(arena, (size_t)(prog->types.types.count > 0 ? prog->types.types.count : 1) * 4);
+	e.type_cap          = prog->types.types.count > 0 ? prog->types.types.count : 1;
+	e.type_ids          = svsl_arena_alloc(arena, (size_t)e.type_cap * 4);
 	for (int32_t l = 0; l < 4; l++)
-		e.laid_ids[l] = svsl_arena_alloc(arena, (size_t)(prog->types.types.count > 0 ? prog->types.types.count : 1) * 4);
+		e.laid_ids[l] = svsl_arena_alloc(arena, (size_t)e.type_cap * 4);
 	e.value_layout      = svsl_arena_alloc(arena, (size_t)inst_count);
 	e.buffer_vars       = svsl_arena_alloc(arena, (size_t)(prog->buffers.count > 0 ? prog->buffers.count : 1) * 4);
 	e.resource_vars     = svsl_arena_alloc(arena, (size_t)(prog->resources.count > 0 ? prog->resources.count : 1) * 4);

@@ -514,6 +514,28 @@ static const compute_cfg_t compute_cfgs[] = {
 	  .buffers = { { "result", 64 * 14 } } },
 	{ .file = "check_atomics", .passes = { { .dispatch = { 1, 1, 1 } } },
 	  .buffers = { { "result", 16 } } },
+	{ .file    = "check_pack_layout", // C-packed default vs pack16 elements
+	  .passes  = { { .dispatch = { 1, 1, 1 } } },
+	  .buffers = { { "parts", 8, fill_zero }, { "parts16", 8, fill_zero } },
+	  // No reference: glslang packs neither like C nor like std430 (hybrid), so
+	  // goldens come from the layouts by hand. parts element i = 4 words at 4i:
+	  // [id=i, pos.x=.25i, pos.y=.5i, scale=2(1+i)]; parts16 element i = 8 words
+	  // at 32+8i: [id, pad, pos.x, pos.y, scale=(1+i), pad, pad, pad].
+	  .expect  = { {  0, .value = 0, .eps = 0.1f }, // parts[0].id = 0
+	               {  3, 0x40000000 },              // parts[0].scale = 2*(1+0) = 2.0f
+	               {  4, 1 },                       // parts[1].id
+	               {  5, 0x3E800000 },              // parts[1].pos.x = 0.25f
+	               {  6, 0x3F000000 },              // parts[1].pos.y = 0.5f
+	               {  7, 0x40800000 },              // parts[1].scale = 4.0f
+	               { 28, 7 },                       // parts[7].id
+	               { 29, 0x3FE00000 },              // parts[7].pos.x = 1.75f
+	               { 30, 0x40600000 },              // parts[7].pos.y = 3.5f
+	               { 31, 0x41800000 },              // parts[7].scale = 16.0f
+	               { 40, 1 },                       // parts16[1].id (word 32+8)
+	               { 41, .value = 0, .eps = 0.1f }, // parts16[1] std140 pad word
+	               { 42, 0x3E800000 },              // parts16[1].pos.x at offset 8
+	               { 44, 0x40000000 },              // parts16[1].scale = 2.0f (not doubled)
+	               { 95, .value = 0, .eps = 0.1f } } }, // tail pad of parts16[7]
 	{ .file    = "check_bool_store", // bool struct members: uint 0/1 in memory
 	  .passes  = { { .dispatch = { 1, 1, 1 } } },
 	  .buffers = { { "results", 8, fill_zero } },

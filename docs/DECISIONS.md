@@ -44,6 +44,7 @@ prototype failure is addressed *structurally* here:
 | Optimization | Fixed in-IR pipeline iterated to a fixpoint: fold, peephole, store→load forwarding, dead-store, CSE, DCE — value-preserving at `-O1` (default, oracle-covered), float algebra opt-in at `-O2`. `-O0/1/2` flag. No pass manager. See `docs/OPTIMIZATION_PLAN.md`. | Clean output without linking SPIRV-Tools; `-O1` cut corpus SPIR-V ~14% / live IR ~34%, pixel-identical to skshaderc; heavy opt still `spirv-opt`'d externally |
 | Correctness bar | Outputs only: pixels and buffer bits, bit-exact for compute | SPIR-V text differences are legal encodings of the same program; comparing them creates false failures and hides real ones |
 | glslang divergences | Keep HLSL/DXC-correct behavior; note the divergence in the check shader | Verified glslang bugs: WavePrefixSum emits inclusive (should be exclusive), InterlockedCompareStore emits nothing, `ldexp` with float exponent emits invalid SPIR-V |
+| Structured-buffer element layout | Object-form elements default to **C layout where C layout is free**: pack1 rules, but layouts needing `scalarBlockLayout` are compile errors unless `pack1` is written explicitly, which permits them and records SKS feature bit 16. Layout keywords prefix declarations (any form) with standards-name aliases `scalar`/`relaxed`/`std140`/`std430`. | The product goal is C-struct interop: `element_size == sizeof`, offsets match plain C. The error-vs-infer split is about consent, mirroring `float16`: typing a feature opts into its device requirement, but a bare declaration names no layout and must not silently narrow device support (the failure would surface as pipeline-creation errors on other people's hardware). glslang was rejected as the reference here — its HLSL mode emits DX-packed offsets with a std430-rounded stride (a TODO'd inconsistency in `updateMemberOffset`, which even excludes `$Global` by name), matching neither C nor std430, so C arrays break from element 1. The structs the default refuses are exactly those std430 silently corrupted against C. |
 
 ## SKS v9 additions
 
@@ -57,6 +58,8 @@ compatibility mechanism, so a version bump means recompiling shaders.
   compiler from the SPIR-V it actually emitted (capabilities/extensions, plus one
   format-implying opcode). Each bit is a device-level feature question the runtime settles
   before pipeline creation without parsing the blob; unknown capabilities set bit 63.
+  Bit 16 (`scalarBlockLayout`) is set from sema rather than the blob — scalar block
+  layout has no SPIR-V capability, so the mask is its only machine-readable signal.
 - **Per-resource shape/format bytes**: a texture shape byte (dim/arrayed/MS/comparison) and
   a storage-image format byte, for bind-time validation instead of guessing from names.
 - **Per-stage `wave_size`**: so multiple compute entries can pin subgroup size independently.

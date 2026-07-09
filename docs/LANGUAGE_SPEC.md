@@ -168,6 +168,10 @@ Layout rules, matching C:
   No clamping or rounding is inserted; clamp yourself if a value may exceed the range.
 - The struct's storage is exactly its backing words (`Packed` above is 3 × `uint32` =
   12 bytes), so it round-trips with a matching CPU-side layout in a `StructuredBuffer`.
+  Because the backing words are plain scalars, packed structs are alignment-neutral
+  under every layout keyword — dense 4-byte words under the C-packed default, `pack1`,
+  and `std430` alike, never needing a device feature; only `pack16` rounds the element
+  stride up to 16.
 
 ### 3.4.2 Enums
 
@@ -284,7 +288,7 @@ uniform SceneData : register(b0, space0) {
 };
 
 // Storage buffer — std430 default; runtime-sized array allowed as last member
-storagebuffer readonly Vertices : register(t0, space1) {
+readonly storagebuffer Vertices : register(t0, space1) {
 	Vertex vertices[];
 };
 
@@ -300,23 +304,50 @@ grouping, not a namespace. `cbuffer N : register(b#) { }` is the HLSL alias of `
 
 ### 4.2 Layout keywords
 
-Placed after the storage keyword: `uniform`/`storagebuffer`/`pushconstant` `pack1|pack8|pack16 Name { }`.
+A layout keyword prefixes the declaration, like any other modifier — on blocks and
+on the object-form buffers alike:
 
-| Keyword | Rule | SPIR-V / Vulkan |
-|---|---|---|
-| `pack1` | scalar alignment — members align to their scalar size; `float3` = 12 bytes, 4-aligned; matches C struct layout | scalar block layout (VK_EXT_scalar_block_layout) |
-| `pack8` | vectors align to min(natural, 8) | relaxed block layout |
-| `pack16` | std140 — `float3`/`float4` 16-aligned, array elements 16-stride | core |
-| *(none)* | std430 — vectors natural-aligned, no 16-stride array rounding | core |
+```c
+pack16 storagebuffer Particles : register(u0) { particle_t items[]; };
+pack16 RWStructuredBuffer<particle_t> particles : register(u1);
+scalar readonly storagebuffer Raw { float data[]; };   // standards-name alias
+```
 
-Allowed: `uniform` = pack16 only (default); `storagebuffer`/`pushconstant` = any.
-Without a keyword, storage buffers and push constants use **std430**, which validates
-on every Vulkan device with no extra feature. `pack1` is the opt-in for exact C-struct
-mirroring (it needs the `scalarBlockLayout` device feature); std430 has no keyword —
-it exists only as the safe default. The object forms `StructuredBuffer<T>` /
-`RWStructuredBuffer<T>` take no layout keyword and always use std430. Violations are
-compile errors. `[offset(N)]` on a member (native spelling of `[[vk::offset]]`) sets
-an explicit byte offset; it may only increase offsets.
+Most modes have both an SVSL `packN` spelling and a standards-name alias; `std430` is
+spelled by its standards name only. Any spelling is accepted everywhere a layout keyword is:
+
+| Keyword | Alias | Rule | Vulkan requirement |
+|---|---|---|---|
+| `pack1` | `scalar` | members align to their scalar size; `float3` = 12 bytes, 4-aligned; matches C struct layout | core when no vector straddles a 16-byte boundary, else the `scalarBlockLayout` device feature |
+| `pack8` | `relaxed` | vectors align to min(natural, 8) | same rule as `pack1` |
+| `pack16` | `std140` | std140 — `float3`/`float4` 16-aligned, array elements 16-stride | core |
+| `std430` | — | vectors natural-aligned, no 16-stride array rounding | core |
+
+The aliases are context-sensitive, not reserved words — `scalar` and `relaxed` stay
+usable as identifiers.
+
+Defaults, by declaration form:
+
+- `uniform` blocks are `pack16` only (constant-buffer hardware rules).
+- `storagebuffer` / `pushconstant` blocks default to **std430**.
+- `StructuredBuffer<T>` / `RWStructuredBuffer<T>` / `Buffer<T>` elements default to
+  **C layout where C layout is free** — a plain C struct with the same members
+  matches byte-for-byte, and reflected `element_size` equals the C `sizeof`.
+  "C layout" is not a fifth mode: it **is** `pack1`/`scalar`. The default differs
+  from writing `pack1` only in policy. Some valid pack1 layouts (a vector
+  improperly straddling a 16-byte boundary, or a stride off its std430 alignment)
+  are only loadable on devices with the `scalarBlockLayout` feature — and a bare
+  declaration names no layout, so it must not silently acquire a device
+  dependency the author never chose. The default therefore refuses those layouts
+  with a compile error at the declaration; writing `pack1` supplies the consent,
+  emits the same layout, and records the requirement in the SKS feature mask
+  (bit 16) — the same contract as `float16`, where typing the feature is what
+  opts into its device requirement.
+  One C-matching caveat: SVSL `bool` is stored as a 32-bit uint (§3.1) — pair it
+  with `uint32_t`/`int32_t` on the CPU side, never C `bool`.
+
+Violations are compile errors. `[offset(N)]` on a member (native spelling of
+`[[vk::offset]]`) sets an explicit byte offset; it may only increase offsets.
 
 How the same struct lands under each mode:
 
@@ -330,17 +361,18 @@ struct particle_t {
 
 | Mode | `id` | `pos` | `scale` | array stride |
 |---|---|---|---|---|
-| `pack1` | 0 | 4 | 12 | 16 |
-| `pack8` | 0 | 8 | 16 | 24 |
-| `pack16` (std140) | 0 | 8 | 16 | 32 |
-| *(none)* (std430) | 0 | 8 | 16 | 24 |
+| `pack1` / `scalar` | 0 | 4 | 12 | 16 |
+| `pack8` / `relaxed` | 0 | 8 | 16 | 24 |
+| `pack16` / `std140` | 0 | 8 | 16 | 32 |
+| `std430` | 0 | 8 | 16 | 24 |
 
 Only `pack1` is byte-identical to the natural C layout — under the other modes a
 matching C struct needs explicit padding members. `pack8` happens to match std430
 here because `float2` already aligns to 8; the two differ on `float3`/`float4`
-members, which std430 aligns to 16 and `pack8` to 8. When a buffer is shared with
-CPU code, either declare it `pack1` or order members so no padding is needed under
-the mode in use (`float4`-sized groups first, scalars packed in `float3` tails).
+members, which std430 aligns to 16 and `pack8` to 8. `particle_t` never straddles,
+so the C-packed default carries no device requirement; a struct like
+`{ float a; float4 b; }` does straddle (`b` at offset 4) and is refused by the
+default with a fix-it — reorder, pad, or opt in with `pack1`.
 
 ### 4.3 Access and variable storage
 
@@ -838,7 +870,7 @@ attribute aliases, and legacy semantics are accepted silently (their hints are b
 |---|---|
 | `cbuffer N : register(b0) { }` | `uniform N : register(b0, space0) { }` |
 | `StructuredBuffer<T>` / `RWStructuredBuffer<T>` | `storagebuffer [readonly] N { T x[]; }` |
-| `Buffer<T>` | `storagebuffer readonly` block |
+| `Buffer<T>` | `readonly storagebuffer` block |
 | `groupshared` | `workgroup` |
 | `SamplerState` / `SamplerComparisonState` | `Sampler` / `SamplerComparison` |
 | `RWTexture2D<T>` (etc.) | `Image2D<T[, format]>` |
@@ -860,7 +892,7 @@ attribute aliases, and legacy semantics are accepted silently (their hints are b
 | `float16` | Float16 (+ StorageBuffer16BitAccess / UniformAndStorageBuffer16BitAccess in buffers) |
 | `half` | (none — RelaxedPrecision decoration only) |
 | `int8`/`uint8`, `int16`/`uint16`, `int64`, `float64` | Int8, Int16, Int64, Float64 (+ storage caps) |
-| `pack1` layout | VK_EXT_scalar_block_layout |
+| `pack1`/`pack8` layout breaking core relaxed rules | *(no SPIR-V capability — VK_EXT_scalar_block_layout recorded as `.sks` feature-mask bit 16)* |
 | `SV_ViewID` | MultiView (core in SPIR-V 1.3 — no extension) |
 | `demote` / `is_helper_invocation` | DemoteToHelperInvocation |
 | subgroup ops | GroupNonUniform + Vote/Ballot/Arithmetic/Shuffle/Clustered/Quad as used |
