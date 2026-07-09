@@ -150,7 +150,9 @@ static svsl_include_src_t sks_include(void *user, const char *path, const char *
 	int32_t len;
 	char   *content = sks_read_file(arena, full, &len);
 	if (!content) return (svsl_include_src_t){0};
-	return (svsl_include_src_t){ .content = content, .length = len, .path = full };
+	// .path must outlive this callback (the pp copies it); `full` is stack-local
+	char *path_out = svsl_arena_strndup(arena, full, strlen(full));
+	return (svsl_include_src_t){ .content = content, .length = len, .path = path_out };
 }
 
 static bool compile_sks(svsl_arena_t *arena, const char *shader, svsl_sks_blob_t *out_blob) {

@@ -273,6 +273,7 @@ int main(int argc, char **argv) {
 	}
 
 	include_src = read_file(SVSL_TEST_DIR "/shaders/include/stereokit.hlsli", &include_len);
+	bool include_owned = include_src != NULL; // "" fallback is a literal, must not be freed
 	if (!include_src) { include_src = ""; include_len = 0; }
 
 	if (file) { // reproduce a saved case
@@ -320,5 +321,7 @@ int main(int argc, char **argv) {
 	}
 	printf("fuzz: done, %lld runs clean (crash-free; reproduce any case with -seed %llu -dump ITER)\n",
 	       (long long)runs, (unsigned long long)seed);
+	free(buf);
+	if (include_owned) free(include_src);
 	return 0;
 }
