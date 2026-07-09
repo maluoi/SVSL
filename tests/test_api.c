@@ -83,6 +83,11 @@ static void test_api_sks_roundtrip(void) {
 		TEST_CHECK(strcmp(f->name, "api/test") == 0);
 		TEST_CHECK(f->stage_count == 2);
 
+		// v10: each vertex input carries its SPIR-V location
+		TEST_CHECK(f->vertex_input_count == 2);
+		TEST_CHECK(f->vertex_inputs[0].location == 0); // p : POSITION
+		TEST_CHECK(f->vertex_inputs[1].location == 1); // uv : TEXCOORD0
+
 		// the $Global-style constant buffer survives with its members
 		bool found_params = false;
 		for (int32_t b = 0; b < f->buffer_count; b++) {

@@ -23,7 +23,7 @@ extern "C" {
 
 // The SKS container version this build reads and writes. One version at a time:
 // the field lets runtimes refuse foreign files, it is not a compatibility knob.
-#define SVSL_SKS_VERSION 9
+#define SVSL_SKS_VERSION 10
 
 // ============================================================================
 // Diagnostics
@@ -228,6 +228,7 @@ typedef struct svsl_sks_vertex_input_t {
 	uint8_t count;
 	int32_t semantic; // skr_semantic_
 	uint8_t slot;
+	uint8_t location; // SPIR-V input location (first of the span for arrays/matrices)
 } svsl_sks_vertex_input_t;
 
 typedef struct svsl_sks_spec_t {

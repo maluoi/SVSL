@@ -379,9 +379,16 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 		resource_indices[resource_count++] = i;
 	}
 
+	// The vertex-inputs block mirrors the vs blob's interface exactly: an entry
+	// is written iff its OpVariable survived emission, at its recorded location.
+	// Locations come from the emitter (blob.vs_input_locations), never re-derived.
+	const int32_t *vs_locs = NULL;
+	for (int32_t i = 0; i < module->func_count; i++)
+		if (module->funcs[i].entry->stage == svsl_stage_vertex)
+			vs_locs = blobs[i].vs_input_locations;
 	int32_t used_inputs = 0;
 	for (int32_t i = 0; i < prog->vertex_inputs.count; i++)
-		if (usage.vs_input_used[i]) used_inputs++;
+		if (vs_locs && vs_locs[i] >= 0) used_inputs++;
 
 	const char tag[8] = { 'S', 'K', 'S', 'H', 'A', 'D', 'E', 'R' };
 	wbytes(&w, tag, 8);
@@ -442,7 +449,7 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 	}
 
 	for (int32_t i = 0; i < prog->vertex_inputs.count; i++) {
-		if (!usage.vs_input_used[i]) continue;
+		if (!vs_locs || vs_locs[i] < 0) continue; // stripped from the SPIR-V
 		const svsl_vertex_input_t *in = &prog->vertex_inputs.items[i];
 		uint8_t count, slot;
 		int32_t format   = vertex_format_of(&prog->types, in->type, &count);
@@ -451,6 +458,7 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 		wu8(&w, count);
 		wi32(&w, semantic);
 		wu8(&w, slot);
+		wu8(&w, (uint8_t)vs_locs[i]);
 	}
 
 	for (int32_t ri = 0; ri < resource_count; ri++) {

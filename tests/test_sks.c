@@ -1,5 +1,5 @@
 // SKS container tests: our writer's metadata must match what skshaderc
-// produces for the same shader, record by record (both emit v9 — one version
+// produces for the same shader, record by record (both emit v10 — one version
 // at a time). The reference comparison runs when the local skshaderc build is
 // present; the structural checks always run.
 
@@ -65,7 +65,7 @@ typedef struct sks_file_t {
 	sks_buf_t  bufs[8];
 	sks_res_t  res[16];
 	sks_spec_t specs[8];
-	uint8_t    vins[16][10]; // format(4) count(1) semantic(4) slot(1)
+	uint8_t    vins[16][11]; // format(4) count(1) semantic(4) slot(1) location(1)
 } sks_file_t;
 
 static bool sks_read(const uint8_t *data, int32_t size, sks_file_t *out) {
@@ -80,7 +80,7 @@ static bool sks_read(const uint8_t *data, int32_t size, sks_file_t *out) {
 	TAKE(out->name, 256);
 	TAKE(&out->buffer_count, 4);
 	TAKE(&out->resource_count, 4);
-	if (out->version != 9) return false; // one version at a time
+	if (out->version != 10) return false; // one version at a time
 	TAKE(&out->vertex_input_count, 4);
 	TAKE(&out->spec_count, 4);
 	TAKE(&out->features, 8);
@@ -107,7 +107,7 @@ static bool sks_read(const uint8_t *data, int32_t size, sks_file_t *out) {
 		}
 	}
 	for (int32_t v = 0; v < out->vertex_input_count && v < 16; v++)
-		TAKE(out->vins[v], 10);
+		TAKE(out->vins[v], 11);
 	for (uint32_t r = 0; r < out->resource_count && r < 16; r++) {
 		sks_res_t *res = &out->res[r];
 		TAKE(res->name, 32); TAKE(res->value, 64); TAKE(res->tags, 64);
@@ -191,11 +191,17 @@ static void test_sks_structure(void) {
 	sks_file_t f = {0};
 	TEST_CHECK(sks_read(blob.bytes, blob.size, &f));
 
-	TEST_CHECK(f.version == 9);
+	TEST_CHECK(f.version == 10);
 	TEST_CHECK(f.stage_count == 2);
 	TEST_CHECK(strcmp(f.name, "sk/unlit") == 0);
 	TEST_CHECK(f.buffer_count == 2);
 	TEST_CHECK(f.vertex_input_count == 3); // norm is unused and dropped
+
+	// v10 locations mirror the SPIR-V: dropped `norm` still consumed location 1,
+	// so the surviving pos/uv/col sit at 0/2/3 — the gap must be visible
+	TEST_CHECK(f.vins[0][10] == 0);
+	TEST_CHECK(f.vins[1][10] == 2);
+	TEST_CHECK(f.vins[2][10] == 3);
 
 	// $Global first (slot order), with baked defaults
 	TEST_CHECK(strcmp(f.bufs[0].name, "$Global") == 0);
@@ -236,6 +242,18 @@ static void test_sks_structure(void) {
 		if (strcmp(f.res[r].name, "diffuse") == 0) TEST_CHECK(f.res[r].shape == 1);
 		if (strcmp(f.res[r].name, "sk_inst") == 0) TEST_CHECK(f.res[r].shape == 0);
 	}
+
+	// v10 location metadata: a stripped middle input leaves a hole, an unused
+	// standalone param is stripped like glslang does, and [location(N)] records
+	// the explicit value (see the shader's comment for the expected layout)
+	svsl_sks_blob_t vl = {0};
+	TEST_CHECK(compile_sks(&arena, "checks/check_vertex_locations.hlsl", &vl));
+	sks_file_t fvl = {0};
+	TEST_CHECK(sks_read(vl.bytes, vl.size, &fvl));
+	TEST_CHECK(fvl.vertex_input_count == 3); // norm stripped
+	TEST_CHECK(fvl.vins[0][10] == 0);        // pos
+	TEST_CHECK(fvl.vins[1][10] == 2);        // uv  (norm consumed 1)
+	TEST_CHECK(fvl.vins[2][10] == 6);        // col, explicit [[vk::location(6)]]
 
 	// a wave shader must raise the subgroup feature bit
 	svsl_sks_blob_t wave = {0};
@@ -403,7 +421,7 @@ static bool compare_with_reference(svsl_arena_t *arena, const char *shader) {
 	CMP(ref.resource_count == ours.resource_count, "resource_count");
 	CMP(ref.vertex_input_count == ours.vertex_input_count, "vertex_input_count");
 	for (int32_t v = 0; v < ref.vertex_input_count && v < 16; v++)
-		CMP(memcmp(ref.vins[v], ours.vins[v], 10) == 0, "vertex input");
+		CMP(memcmp(ref.vins[v], ours.vins[v], 11) == 0, "vertex input");
 	for (uint32_t b = 0; b < ref.buffer_count && b < 8; b++) {
 		sks_buf_t *rb = &ref.bufs[b], *ob = NULL;
 		for (uint32_t k = 0; k < ours.buffer_count && k < 8; k++)
@@ -446,6 +464,7 @@ static void test_sks_reference(void) {
 		"builtin/shader_builtin_sh_compute.hlsl",
 		"examples/skt_default_lighting.hlsl", // struct-typed cbuffer member
 		"examples/basic_shadow.hlsl",
+		"checks/check_vertex_locations.hlsl", // v10 location gaps + explicit [location]
 	};
 	for (int32_t i = 0; i < (int32_t)(sizeof(shaders) / sizeof(shaders[0])); i++)
 		TEST_CHECK(compare_with_reference(&arena, shaders[i]));

@@ -55,6 +55,7 @@ typedef struct emit_t {
 	uint32_t *sampler_vars;     // standalone sampler variables for cross-paired sampling
 	uint32_t *output_vars;      // flattened return outputs (sized to the return type)
 	int32_t   output_count;
+	int32_t  *vs_input_locations; // per prog->vertex_inputs entry; vertex stage only
 	// scalar-replaced return struct: a local var whose members are stored then
 	// returned whole is elided — member stores go straight to the stage-output
 	// variables (output_vars), so no local struct is built and torn apart again.
@@ -847,6 +848,27 @@ static void io_decorate(emit_t *e, uint32_t var, svsl_str_t semantic, svsl_sem_i
 		svsl_spv_inst2(&e->spv, &e->spv.decor, SpvOpDecorate, var, SpvDecorationInvariant);
 }
 
+// Records the location assigned to the next prog->vertex_inputs entry (-1 = its
+// OpVariable was stripped). The prologue's walk must mirror collect_vertex_inputs
+// (sema.c) — same order, same generated-semantic exclusions — so each entry is
+// name-checked and a divergence fails the compile instead of writing metadata
+// that lies about the SPIR-V interface.
+static void record_vs_input(emit_t *e, int32_t *ref_index, svsl_str_t name,
+                            svsl_loc_t loc, int32_t location) {
+	if (!e->vs_input_locations) return;
+	int32_t i = (*ref_index)++;
+	if (i >= e->prog->vertex_inputs.count ||
+	    !svsl_str_eq(e->prog->vertex_inputs.items[i].name, name)) {
+		eerr(e, loc, "vertex input metadata diverged from the emitted interface");
+		return;
+	}
+	if (location > 255) {
+		eerr(e, loc, "vertex input location exceeds the container's limit of 255");
+		return;
+	}
+	e->vs_input_locations[i] = location;
+}
+
 // --- function body -----------------------------------------------------------------
 
 static void begin_block(emit_t *e, uint32_t label) {
@@ -1260,7 +1282,8 @@ static void emit_body(emit_t *e, uint32_t fn_id, uint32_t void_type, uint32_t fn
 
 	// prologue: flatten stage inputs into the param shadow variables
 	{
-		int32_t      location = 0;
+		int32_t      location    = 0;
+		int32_t      vs_input_at = 0; // running index into prog->vertex_inputs
 		svsl_sem_io_ io = entry->stage == svsl_stage_vertex ? svsl_sem_vs_in :
 		                  entry->stage == svsl_stage_pixel  ? svsl_sem_ps_in : svsl_sem_cs_in;
 		for (int32_t p = 0; p < entry->func->param_count; p++) {
@@ -1277,11 +1300,15 @@ static void emit_body(emit_t *e, uint32_t fn_id, uint32_t void_type, uint32_t fn
 				for (int32_t m = 0; m < si->members.count && m < SVSL_EMIT_MAX_MEMBERS; m++) {
 					const svsl_member_t *member = &si->members.items[m];
 					if (member->explicit_location >= 0) location = member->explicit_location;
+					bool counted = !sroa_sem_is_builtin(member->semantic, io);
 					if (e->param_member_var[p * SVSL_EMIT_MAX_MEMBERS + m]) { // referenced
+						if (counted)
+							record_vs_input(e, &vs_input_at, member->name, entry->func->loc, location);
 						uint32_t var = make_io_var(e, member->type, false, member->name);
 						io_decorate(e, var, member->semantic, io, &location, member->type, member->interp);
 						e->param_member_var[p * SVSL_EMIT_MAX_MEMBERS + m] = var;
-					} else if (!sroa_sem_is_builtin(member->semantic, io)) {
+					} else if (counted) {
+						record_vs_input(e, &vs_input_at, member->name, entry->func->loc, -1);
 						location += location_span(&e->prog->types, member->type); // slot still consumed
 					}
 				}
@@ -1294,6 +1321,8 @@ static void emit_body(emit_t *e, uint32_t fn_id, uint32_t void_type, uint32_t fn
 					const svsl_member_t *member = &si->members.items[m];
 					uint32_t var = make_io_var(e, member->type, false, member->name);
 					if (member->explicit_location >= 0) location = member->explicit_location;
+					if (!sroa_sem_is_builtin(member->semantic, io))
+						record_vs_input(e, &vs_input_at, member->name, entry->func->loc, location);
 					io_decorate(e, var, member->semantic, io, &location, member->type, member->interp);
 					parts[m] = emit_value_inst(e, fs, SpvOpLoad, spv_type_for(e, member->type),
 					                           (uint32_t[]){ var }, 1);
@@ -1301,7 +1330,20 @@ static void emit_body(emit_t *e, uint32_t fn_id, uint32_t void_type, uint32_t fn
 				value = emit_value_inst(e, fs, SpvOpCompositeConstruct, spv_type_for(e, ptype),
 				                        parts, (uint32_t)si->members.count);
 			} else {
+				bool counted = !sroa_sem_is_builtin(entry->func->params[p]->semantic, io);
+				// glslang strips vertex inputs nothing reads (their location is
+				// still consumed); match it so this module, its metadata, and the
+				// reference compiler agree on the input interface
+				if (counted && entry->stage == svsl_stage_vertex && !e->param_shadow[p]) {
+					record_vs_input(e, &vs_input_at, entry->func->params[p]->name,
+					                entry->func->loc, -1);
+					location += location_span(&e->prog->types, ptype);
+					continue;
+				}
 				uint32_t var = make_io_var(e, ptype, false, entry->func->params[p]->name);
+				if (counted)
+					record_vs_input(e, &vs_input_at, entry->func->params[p]->name,
+					                entry->func->loc, location);
 				io_decorate(e, var, entry->func->params[p]->semantic, io, &location,
 				            ptype, entry->func->params[p]->interp);
 				value = emit_value_inst(e, fs, SpvOpLoad, spv_type_for(e, ptype), (uint32_t[]){ var }, 1);
@@ -1309,6 +1351,10 @@ static void emit_body(emit_t *e, uint32_t fn_id, uint32_t void_type, uint32_t fn
 			if (e->param_shadow[p]) // unreferenced params have no shadow variable
 				svsl_spv_inst2(spv, fs, SpvOpStore, e->param_shadow[p], value);
 		}
+		// every vertex_inputs entry must have been visited, or the walk above no
+		// longer mirrors collect_vertex_inputs
+		if (e->vs_input_locations && vs_input_at != e->prog->vertex_inputs.count)
+			eerr(e, entry->func->loc, "vertex input metadata diverged from the emitted interface");
 	}
 
 	// outputs: flattened from the entry's return type
@@ -1380,6 +1426,11 @@ bool svsl_spirv_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 	e.builtin_input     = svsl_arena_alloc(arena, 16 * 4);
 	e.spec_const_ids    = svsl_arena_alloc(arena, (size_t)(prog->spec_consts.count > 0 ? prog->spec_consts.count : 1) * 4);
 	e.sampler_vars      = svsl_arena_alloc(arena, (size_t)(prog->resources.count > 0 ? prog->resources.count : 1) * 4);
+	if (fn->entry->stage == svsl_stage_vertex) {
+		e.vs_input_locations = svsl_arena_alloc(arena, (size_t)(prog->vertex_inputs.count > 0 ? prog->vertex_inputs.count : 1) * 4);
+		for (int32_t i = 0; i < prog->vertex_inputs.count; i++)
+			e.vs_input_locations[i] = -1;
+	}
 
 	svsl_spv_cap(&e.spv, SpvCapabilityShader);
 	e.spv.glsl450 = svsl_spv_id(&e.spv);
@@ -1445,6 +1496,7 @@ bool svsl_spirv_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 			svsl_spv_inst2(&e.spv, &e.spv.exec_modes, SpvOpExecutionMode, fn_id,
 			               SpvExecutionModeEarlyFragmentTests);
 
-	out_blob->words = svsl_spv_finalize(&e.spv, &out_blob->word_count);
+	out_blob->words              = svsl_spv_finalize(&e.spv, &out_blob->word_count);
+	out_blob->vs_input_locations = e.vs_input_locations;
 	return !e.failed;
 }

@@ -126,6 +126,7 @@ svsl_sks_file_t *svsl_sks_parse(const void *bytes, int32_t size) {
 		vins[v].count    = rd_u8(&r);
 		vins[v].semantic = rd_i32(&r);
 		vins[v].slot     = rd_u8(&r);
+		vins[v].location = rd_u8(&r);
 	}
 
 	// --- resources ---

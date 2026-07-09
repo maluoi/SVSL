@@ -356,6 +356,21 @@ static void test_sema_errors(void) {
 	r = run_sema_ex(&arena, "specialization const float4 v = 1;\nvoid ps() { }\n", true);
 	TEST_CHECK(!r.ok); // spec constants are 32-bit scalars
 
+	// an SV_* spelling the semantics table doesn't know can't be a vertex
+	// attribute (nothing can feed it) — rejected, not silently dropped; known
+	// system values (SV_VertexID here) and SV_Position stay accepted
+	r = run_sema_ex(&arena,
+		"struct O { float4 pos : SV_Position; };\n"
+		"O vs(float4 p : SV_Position, float3 w : SV_Wibble) { O o; o.pos = p + float4(w, 0); return o; }\n"
+		"float4 ps(O i) : SV_Target { return 1; }\n", true);
+	TEST_CHECK(!r.ok);
+	r = run_sema(&arena,
+		"struct O { float4 pos : SV_Position; };\n"
+		"O vs(float4 p : SV_Position, uint id : SV_VertexID) { O o; o.pos = p * id; return o; }\n"
+		"float4 ps(O i) : SV_Target { return 1; }\n");
+	TEST_CHECK(r.ok);
+	TEST_CHECK(r.prog.vertex_inputs.count == 1); // id is generated, not an attribute
+
 	// containment cycles used to recurse forever in layout
 	r = run_sema_ex(&arena, "struct A { A a; };\nfloat4 ps() : SV_Target { A x; return 1; }\n", true);
 	TEST_CHECK(!r.ok);

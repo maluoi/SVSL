@@ -30,7 +30,7 @@ prototype failure is addressed *structurally* here:
 | v1 scope | HLSL core + float16/layouts/pushconstant/multiview/spec-constants/demote/interp + subgroups/atomics/barriers + early-Z toolkit/`[wave_size]`/`SubpassInput` | Honest spec; the corpus needs most of it anyway; the additions are decoration-cheap except SubpassInput (runtime support landed in sk_renderer) |
 | Names over numbers | Bare `specialization` auto-ids; `register()` optional with deterministic auto-binding; locations by declaration order | Reflection is name-based, so numbers are an interop detail; auto-assignment never collides with explicit values |
 | Deferred | pointers/bindless, mesh/task, RT, coop-matrix, interlock | Big surface; the prototype proved the cost of promising them early |
-| Output | SKS container v9, plus `.spv`/headers; one version at a time, no back-compat | StereoKit is the target consumer; the version field exists to refuse old files, not to branch on |
+| Output | SKS container v10, plus `.spv`/headers; one version at a time, no back-compat | StereoKit is the target consumer; the version field exists to refuse old files, not to branch on |
 | Codegen | AST → small SSA-ish IR → SPIR-V, mandatory full inlining | Structurally fixes opaque-params and access-chain bugs; matches reference-compiler behavior |
 | Dependencies | Core lib + CLI: libc only; vendored `spirv.h`; `spirv-val` shelled out; app deps FetchContent, dev-only | Dependency-free/light core is a hard requirement |
 | Compat level | Corpus compiles (light porting acceptable); legacy forms porting-warn under `-Wporting` (opt-in, off by default) | User-selected; hints are opt-in so a clean corpus build stays quiet, and someone modernizing turns them on deliberately |
@@ -43,7 +43,7 @@ prototype failure is addressed *structurally* here:
 | Preprocessor | Real separate pass with a line map | The corpus requires it; the prototype's parser-embedded half-preprocessor was a known smell |
 | Optimization | Fixed in-IR pipeline iterated to a fixpoint: fold, peephole, store→load forwarding, dead-store, CSE, DCE — value-preserving at `-O1` (default, oracle-covered), float algebra opt-in at `-O2`. `-O0/1/2` flag. No pass manager. See `docs/OPTIMIZATION_PLAN.md`. | Clean output without linking SPIRV-Tools; `-O1` cut corpus SPIR-V ~14% / live IR ~34%, pixel-identical to skshaderc; heavy opt still `spirv-opt`'d externally |
 | Correctness bar | Outputs only: pixels and buffer bits, bit-exact for compute | SPIR-V text differences are legal encodings of the same program; comparing them creates false failures and hides real ones |
-| glslang divergences | Keep HLSL/DXC-correct behavior; note the divergence in the check shader | Verified glslang bugs: WavePrefixSum emits inclusive (should be exclusive), InterlockedCompareStore emits nothing, `ldexp` with float exponent emits invalid SPIR-V |
+| glslang divergences | Keep HLSL/DXC-correct behavior; note the divergence in the check shader | Verified glslang bugs: WavePrefixSum emits inclusive (should be exclusive), InterlockedCompareStore emits nothing, `ldexp` with float exponent emits invalid SPIR-V, unknown `SV_*` on a vertex input silently becomes a located attribute that its own reflection then drops (meta ≠ SPIR-V — the bug class SKS v10 exists to kill; SVSL rejects it like DXC) |
 | Structured-buffer element layout | Object-form elements default to **C layout where C layout is free**: pack1 rules, but layouts needing `scalarBlockLayout` are compile errors unless `pack1` is written explicitly, which permits them and records SKS feature bit 16. Layout keywords prefix declarations (any form) with standards-name aliases `scalar`/`relaxed`/`std140`/`std430`. | The product goal is C-struct interop: `element_size == sizeof`, offsets match plain C. The error-vs-infer split is about consent, mirroring `float16`: typing a feature opts into its device requirement, but a bare declaration names no layout and must not silently narrow device support (the failure would surface as pipeline-creation errors on other people's hardware). glslang was rejected as the reference here — its HLSL mode emits DX-packed offsets with a std430-rounded stride (a TODO'd inconsistency in `updateMemberOffset`, which even excludes `$Global` by name), matching neither C nor std430, so C arrays break from element 1. The structs the default refuses are exactly those std430 silently corrupted against C. |
 
 ## SKS v9 additions
@@ -63,3 +63,23 @@ compatibility mechanism, so a version bump means recompiling shaders.
 - **Per-resource shape/format bytes**: a texture shape byte (dim/arrayed/MS/comparison) and
   a storage-image format byte, for bind-time validation instead of guessing from names.
 - **Per-stage `wave_size`**: so multiple compute entries can pin subgroup size independently.
+
+## SKS v10 additions
+
+v10 adds one byte per vertex-input record: `uint8 location`, the input's SPIR-V location
+(first of the span for arrays/matrices), serialized after `semantic_slot`. It exists so
+sk_renderer can wire mesh components to shader inputs by semantic at pipeline creation
+(`../sk_renderer/docs/PLAN_attribute_remap.md`) instead of assuming meta array index ==
+location — an assumption v9 silently broke whenever an unused input was dropped from the
+meta while its location stayed consumed in the SPIR-V.
+
+Invariant, and where the data flows: **the vertex-inputs block mirrors the vs module's
+input interface exactly** — an entry is written iff its OpVariable survived emission, at
+the location the emitter actually decorated. The emitter records this per input while
+decorating (`svsl_spirv_blob_t.vs_input_locations`, name-checked against
+`prog->vertex_inputs` so a walk divergence is a compile error, not wrong metadata); the
+SKS writer only consumes it. Location math is never re-derived downstream, and the old
+IR-side vertex-input usage scan was deleted with it. Unused inputs are stripped from the
+SPIR-V (matching glslang) but still consume their location, so recorded locations have
+visible gaps — `checks/check_vertex_locations.hlsl` pins this and the explicit
+`[location(N)]` path against the reference compiler.

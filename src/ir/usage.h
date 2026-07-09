@@ -1,7 +1,7 @@
 // Usage analysis over lowered IR: which buffers/resources/spec constants each
-// stage touches, and which vertex-input members the vertex entry actually reads.
-// Feeds SKS stage_bits and the used-only vertex-input reflection (matching
-// skshaderc, which reflects post-optimization SPIR-V).
+// stage touches. Feeds SKS stage_bits. (Vertex-input usage is not derived here:
+// the emitter records each input's presence and location while decorating, and
+// the SKS writer consumes that — see svsl_spirv_blob_t.vs_input_locations.)
 
 #pragma once
 
@@ -11,7 +11,6 @@ typedef struct svsl_usage_t {
 	uint8_t *buffer_stages;   // per program buffer: svsl_stage_ bits
 	uint8_t *resource_stages; // per program resource
 	uint8_t *spec_stages;     // per spec constant
-	uint8_t *vs_input_used;   // per program vertex_input entry (declaration order)
 } svsl_usage_t;
 
 void svsl_ir_analyze_usage(svsl_arena_t *arena, const svsl_program_t *prog,

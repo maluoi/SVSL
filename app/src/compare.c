@@ -182,14 +182,14 @@ typedef struct sks_info_t {
 	int32_t     buf_count, res_count, stage_count, var_count;
 } sks_info_t;
 
-// walks the SKS v9 byte layout (matches sksc_build_file / sksc_file.c)
+// walks the SKS v10 byte layout (matches sksc_build_file / sksc_file.c)
 static bool sks_parse(const uint8_t *sks, int32_t size, sks_info_t *out) {
 	memset(out, 0, sizeof(*out));
 	if (size < 300) return false;
 	int32_t  o = 8;
 	uint16_t version;
 	memcpy(&version, sks + o, 2); o += 2;
-	if (version != 9) return false; // one version at a time
+	if (version != 10) return false; // one version at a time
 	uint32_t stage_count, bufc, resc, specc;
 	int32_t  vinc;
 	memcpy(&stage_count, sks + o, 4); o += 4;
@@ -221,7 +221,7 @@ static bool sks_parse(const uint8_t *sks, int32_t size, sks_info_t *out) {
 			o += 32 + 64 + 32 + 4 + 4 + 2 + 2; // name, extra, type name, offset, size, type, count
 		}
 	}
-	o += vinc * 10;
+	o += vinc * 11; // format, count, semantic, slot, location
 
 	for (uint32_t r = 0; r < resc && out->res_count < 16; r++) {
 		sks_res_t *res = &out->res[out->res_count++];

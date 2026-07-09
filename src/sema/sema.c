@@ -2,6 +2,7 @@
 #include "check.h"
 
 #include "../tables/formats.h"
+#include "../tables/semantics.h"
 #include "../tables/types_builtin.h"
 #include "../util/array.h"
 
@@ -960,9 +961,11 @@ static void add_spec_const(sema_t *s, const svsl_ast_var_t *var) {
 		.name = var->name, .id = id, .default_bits = bits, .type = type, .loc = var->loc });
 }
 
-// True for system-generated VS inputs (SV_VertexID, SV_InstanceID, SV_ViewID...).
-// SV_Position on a *vertex input* is a regular attribute (StereoKit's pos field —
-// skshaderc reflects it as Position0), so SV_* alone doesn't disqualify.
+// True for SV_-prefixed semantics other than SV_Position — the system-value
+// spellings. SV_Position on a *vertex input* is a regular attribute (StereoKit's
+// pos field — skshaderc reflects it as Position0), so SV_* alone doesn't
+// disqualify. Syntactic only: whether the spelling names a real system value is
+// the semantics table's call (vs_input_is_attribute).
 static bool semantic_is_generated(svsl_str_t semantic) {
 	bool sv = semantic.len >= 3 &&
 	          (semantic.ptr[0] == 'S' || semantic.ptr[0] == 's') &&
@@ -984,6 +987,25 @@ static bool semantic_is_generated(svsl_str_t semantic) {
 	return true;
 }
 
+// A vertex-entry input is a mesh attribute (collected for reflection) or a
+// system-generated value (a table-verified vs-input builtin — skipped). An SV_*
+// spelling the table doesn't recognize is neither: it can't be fed by a mesh
+// and the container can't name it for attribute matching, so it is an error —
+// not a silent drop that would leave the metadata disagreeing with the SPIR-V.
+// This must classify exactly like the emitter's counted/builtin split; both
+// consult the same semantics table, and the emitter's record_vs_input guard
+// fails the compile if they ever drift.
+static bool vs_input_is_attribute(sema_t *s, svsl_str_t semantic, svsl_loc_t loc) {
+	svsl_semantic_info_t info;
+	if (svsl_semantic_lookup(semantic, svsl_sem_vs_in, &info) && info.is_builtin)
+		return false; // system-generated (SV_VertexID, SV_InstanceID, SV_ViewID...)
+	if (semantic_is_generated(semantic)) {
+		err(s, loc, "unknown system-value semantic '%.*s' on a vertex input", semantic);
+		return false;
+	}
+	return true;
+}
+
 static void collect_vertex_inputs(sema_t *s, const svsl_ast_func_t *func) {
 	for (int32_t p = 0; p < func->param_count; p++) {
 		const svsl_ast_var_t *param = func->params[p];
@@ -995,11 +1017,11 @@ static void collect_vertex_inputs(sema_t *s, const svsl_ast_func_t *func) {
 			const svsl_struct_info_t *info = &s->prog->types.structs.items[t->struct_index];
 			for (int32_t m = 0; m < info->members.count; m++) {
 				const svsl_member_t *member = &info->members.items[m];
-				if (semantic_is_generated(member->semantic)) continue;
+				if (!vs_input_is_attribute(s, member->semantic, member->loc)) continue;
 				svsl_array_push(s->arena, &s->prog->vertex_inputs, (svsl_vertex_input_t){
 					.name = member->name, .type = member->type, .semantic = member->semantic });
 			}
-		} else if (!semantic_is_generated(param->semantic)) {
+		} else if (vs_input_is_attribute(s, param->semantic, param->loc)) {
 			svsl_array_push(s->arena, &s->prog->vertex_inputs, (svsl_vertex_input_t){
 				.name = param->name, .type = type, .semantic = param->semantic });
 		}
