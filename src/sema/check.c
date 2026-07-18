@@ -1,5 +1,6 @@
 #include "check.h"
 
+#include "../../vendor/spirv.h"
 #include "../tables/intrinsics.h"
 #include "../tables/spirv_opcodes.h"
 #include "../util/array.h"
@@ -536,6 +537,66 @@ static svsl_type_id_t check_method_call(check_t *c, svsl_ast_expr_t *e) {
 		if (!convert_to(c, args[1], make_shape(types, svsl_scalar_float32, qn))) return SVSL_TYPE_NONE;
 		return f32;
 	}
+	case svsl_method_sample_weighted:
+	case svsl_method_box_filter: {
+		// QCOM image processing: 2D single-layer sampled textures only
+		if (obj->kind != svsl_type_texture || obj->dim != svsl_texdim_2d ||
+		    obj->arrayed || obj->multisampled) {
+			cerr(c, e->loc, "'%.*s' needs a Texture2D", callee->member.name);
+			return SVSL_TYPE_NONE;
+		}
+		if (arg_count != 3) {
+			svsl_diag_add(c->arena, c->diags, svsl_severity_error, e->loc,
+			              "'%.*s' takes 3 arguments (sampler, coords, %s), got %d",
+			              callee->member.name.len, callee->member.name.ptr,
+			              method == svsl_method_sample_weighted ? "weights" : "boxSize", arg_count);
+			return SVSL_TYPE_NONE;
+		}
+		if (svsl_type_get(types, args[0]->sema_type)->kind != svsl_type_sampler) {
+			cerr(c, args[0]->loc, "first argument of '%.*s' must be a sampler", callee->member.name);
+			return SVSL_TYPE_NONE;
+		}
+		if (!convert_to(c, args[1], make_shape(types, svsl_scalar_float32, 2))) return SVSL_TYPE_NONE;
+		if (method == svsl_method_sample_weighted) {
+			const svsl_type_t *w = svsl_type_get(types, args[2]->sema_type);
+			if (w->kind != svsl_type_texture || w->dim != svsl_texdim_2d ||
+			    !w->arrayed || w->multisampled) {
+				cerr(c, args[2]->loc, "the weights argument of '%.*s' must be a Texture2DArray", callee->member.name);
+				return SVSL_TYPE_NONE;
+			}
+		} else if (!convert_to(c, args[2], make_shape(types, svsl_scalar_float32, 2))) {
+			return SVSL_TYPE_NONE;
+		}
+		return svsl_type_vector_id(types, elem_scal, 4);
+	}
+	case svsl_method_block_match: {
+		if (obj->kind != svsl_type_texture || obj->dim != svsl_texdim_2d ||
+		    obj->arrayed || obj->multisampled) {
+			cerr(c, e->loc, "'%.*s' needs a Texture2D", callee->member.name);
+			return SVSL_TYPE_NONE;
+		}
+		if (arg_count != 5) {
+			svsl_diag_add(c->arena, c->diags, svsl_severity_error, e->loc,
+			              "'%.*s' takes 5 arguments (sampler, targetCoord, reference, refCoord, blockSize), got %d",
+			              callee->member.name.len, callee->member.name.ptr, arg_count);
+			return SVSL_TYPE_NONE;
+		}
+		if (svsl_type_get(types, args[0]->sema_type)->kind != svsl_type_sampler) {
+			cerr(c, args[0]->loc, "first argument of '%.*s' must be a sampler", callee->member.name);
+			return SVSL_TYPE_NONE;
+		}
+		const svsl_type_t *r = svsl_type_get(types, args[2]->sema_type);
+		if (r->kind != svsl_type_texture || r->dim != svsl_texdim_2d ||
+		    r->arrayed || r->multisampled) {
+			cerr(c, args[2]->loc, "the reference argument of '%.*s' must be a Texture2D", callee->member.name);
+			return SVSL_TYPE_NONE;
+		}
+		svsl_type_id_t u2 = make_shape(types, svsl_scalar_uint32, 2);
+		if (!convert_to(c, args[1], u2)) return SVSL_TYPE_NONE;
+		if (!convert_to(c, args[3], u2)) return SVSL_TYPE_NONE;
+		if (!convert_to(c, args[4], u2)) return SVSL_TYPE_NONE;
+		return svsl_type_vector_id(types, elem_scal, 4);
+	}
 	case svsl_method_atomic: {
 		if (obj->kind != svsl_type_image || arg_count < 2) { cerr(c, e->loc, "image atomics need coords and a value%.*s", (svsl_str_t){0}); return SVSL_TYPE_NONE; }
 		if (!convert_to(c, args[0], coord_i)) return SVSL_TYPE_NONE;
@@ -851,6 +912,8 @@ static svsl_type_id_t check_intrinsic_call(check_t *c, svsl_ast_expr_t *e, int32
 	case svsl_ires_int_shape:   return make_shape(types, svsl_scalar_int32, gn);
 	case svsl_ires_float_shape: return make_shape(types, svsl_scalar_float32, gn);
 	case svsl_ires_uint:        return svsl_type_scalar_id(types, svsl_scalar_uint32);
+	case svsl_ires_uint2:       return svsl_type_vector_id(types, svsl_scalar_uint32, 2);
+	case svsl_ires_uint3:       return svsl_type_vector_id(types, svsl_scalar_uint32, 3);
 	case svsl_ires_uint4:       return svsl_type_vector_id(types, svsl_scalar_uint32, 4);
 	case svsl_ires_float2:      return svsl_type_vector_id(types, svsl_scalar_float32, 2);
 	case svsl_ires_float4:      return svsl_type_vector_id(types, svsl_scalar_float32, 4);
@@ -1181,6 +1244,18 @@ static svsl_type_id_t check_expr(check_t *c, svsl_ast_expr_t *e) {
 			inst->spv_op = svsl_spirv_opcode_lookup(inst->opcode);
 			if (inst->spv_op < 0) {
 				cerr(c, inst->loc, "unknown SPIR-V opcode '%.*s'", inst->opcode);
+				ok = false;
+			}
+			// OpCapability/OpExtension are routed to the module's declaration
+			// streams at emit — a block states its own prerequisites
+			if (inst->spv_op == SpvOpCapability &&
+			    (inst->operand_count != 1 || inst->operands[0].kind != svsl_spv_operand_literal)) {
+				cerr(c, inst->loc, "OpCapability takes exactly one integer operand%.*s", (svsl_str_t){0});
+				ok = false;
+			}
+			if (inst->spv_op == SpvOpExtension &&
+			    (inst->operand_count != 1 || inst->operands[0].kind != svsl_spv_operand_string)) {
+				cerr(c, inst->loc, "OpExtension takes exactly one \"string\" operand%.*s", (svsl_str_t){0});
 				ok = false;
 			}
 			for (int32_t o = 0; o < inst->operand_count; o++) {

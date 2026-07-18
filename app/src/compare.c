@@ -189,7 +189,7 @@ static bool sks_parse(const uint8_t *sks, int32_t size, sks_info_t *out) {
 	int32_t  o = 8;
 	uint16_t version;
 	memcpy(&version, sks + o, 2); o += 2;
-	if (version != 10) return false; // one version at a time
+	if (version != 11) return false; // one version at a time
 	uint32_t stage_count, bufc, resc, specc;
 	int32_t  vinc;
 	memcpy(&stage_count, sks + o, 4); o += 4;
@@ -199,7 +199,7 @@ static bool sks_parse(const uint8_t *sks, int32_t size, sks_info_t *out) {
 	memcpy(&vinc, sks + o, 4); o += 4;
 	memcpy(&specc, sks + o, 4); o += 4;
 	memcpy(&out->features, sks + o, 8); o += 16; // mask + reserved word
-	o += 24 + 4; // ops + wave
+	o += 24 + 4 + 8; // ops + wave + tile apron (v11)
 
 	for (uint32_t b = 0; b < bufc; b++) {
 		// only $Global vars: they're the ones skr_compute_set_param can reach

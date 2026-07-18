@@ -370,13 +370,17 @@ static svsl_ast_expr_t *parse_spirv_asm(parse_t *p) {
 				op.kind    = svsl_spv_operand_literal;
 				op.literal = (uint32_t)cur(p)->int_value;
 				advance(p);
+			} else if (at(p, svsl_tok_string_lit)) {
+				op.kind   = svsl_spv_operand_string;
+				op.string = cur(p)->text;
+				advance(p);
 			} else if (at(p, svsl_tok_ident) && svsl_str_eq_cstr(cur(p)->text, "glsl450")) {
 				op.kind = svsl_spv_operand_glsl450;
 				advance(p);
 			} else {
 				svsl_diag_add(p->arena, p->diags, svsl_severity_error, cur(p)->loc,
 				              "expected a spirv_asm operand: %%id, $value, $$type, an integer, "
-				              "or glsl450 (got '%.*s')", cur(p)->text.len ? cur(p)->text.len : 5,
+				              "a \"string\", or glsl450 (got '%.*s')", cur(p)->text.len ? cur(p)->text.len : 5,
 				              cur(p)->text.len ? cur(p)->text.ptr : "<eof>");
 				advance(p); // make progress
 			}

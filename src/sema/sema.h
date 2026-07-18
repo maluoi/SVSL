@@ -63,6 +63,7 @@ typedef struct svsl_resource_t {
 	uint8_t        layout;       // svsl_layout_ — object-form structured buffers: element layout
 	int32_t        subpass_index;// subpass inputs: input_attachment_index (-1 = auto)
 	int32_t        buffer_index; // block-form storage buffers: index into buffers (-1 = object form)
+	bool           tile_attachment; // [tile_attachment]: VK_QCOM_tile_shading storage class
 	svsl_str_t     value;        // //-- default texture name
 	svsl_str_t     tags;         // //-- tag string
 	svsl_loc_t     loc;
@@ -73,6 +74,8 @@ typedef struct svsl_entry_t {
 	svsl_stage_            stage;
 	int32_t                workgroup[3]; // compute
 	int32_t                wave_size;    // 0 = none
+	int32_t                tile_rate[3]; // compute: [tile_shading_rate_qcom], 0 = none
+	bool                   non_coherent_tile_reads; // pixel: [non_coherent_tile_reads_qcom]
 	const svsl_ast_func_t *func;
 } svsl_entry_t;
 
@@ -126,6 +129,8 @@ typedef struct svsl_program_t {
 	bool         porting;   // emit porting hints on legacy HLSL spellings (-Wporting)
 	bool         needs_scalar_layout; // a pack1/pack8 layout straddles: scalarBlockLayout feature
 	int32_t      wave_size; // //--wave_size or [wave_size(N)], 0 = none
+	int32_t      tile_apron[2]; // //--apron = W[, H] — VK_QCOM_tile_shading render pass
+	                            // tileApronSize, applied by the renderer; (0,0) = none
 
 	svsl_array_t(svsl_buffer_t)       buffers;
 	svsl_array_t(svsl_resource_t)     resources;

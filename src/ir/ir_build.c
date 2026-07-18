@@ -821,11 +821,32 @@ static uint32_t lower_method(build_t *b, const svsl_ast_expr_t *e) {
 		return query;
 	}
 
+	// QCOM image processing with a second texture operand: the weight/reference
+	// texture is a resource riding args[3]; one sampler serves both sampled images
+	if (method == svsl_method_sample_weighted || method == svsl_method_block_match) {
+		uint32_t sampler = (uint32_t)resolve_resource(b, e->call.args[0]);
+		uint32_t res2    = (uint32_t)resolve_resource(b, e->call.args[2]);
+		uint32_t parts[3];
+		uint32_t count = 0;
+		parts[count++] = lower_expr(b, e->call.args[1]);
+		if (method == svsl_method_block_match) {
+			parts[count++] = lower_expr(b, e->call.args[3]);
+			parts[count++] = lower_expr(b, e->call.args[4]);
+		}
+		uint32_t aux = aux_push(b, parts, count);
+		return emit(b, (svsl_ir_inst_t){ .op = svsl_ir_tex, .type = e->sema_type,
+		                                 .args = { (uint32_t)res, sampler,
+		                                           (uint32_t)method | ((uint32_t)(channel & 0xFF) << 8),
+		                                           res2 },
+		                                 .aux = aux, .aux_count = count, .loc = e->loc });
+	}
+
 	// sampler argument (Sample family) becomes the sampler resource index
 	uint32_t sampler = SVSL_IR_NONE;
 	int32_t  first   = 0;
 	if (((method >= svsl_method_sample && method <= svsl_method_gather) ||
-	     method == svsl_method_query_lod) && e->call.arg_count > 0 &&
+	     method == svsl_method_query_lod || method == svsl_method_box_filter) &&
+	    e->call.arg_count > 0 &&
 	    svsl_type_get(&b->prog->types, e->call.args[0]->sema_type)->kind == svsl_type_sampler) {
 		sampler = (uint32_t)resolve_resource(b, e->call.args[0]);
 		first   = 1;

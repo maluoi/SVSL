@@ -192,6 +192,7 @@ static void dump_expr(dump_t *d, const svsl_ast_expr_t *e) {
 				case svsl_spv_operand_type:    put(d, "$$"); put_str(d, op->type->name);   break;
 				case svsl_spv_operand_literal: put(d, "%u", op->literal);                  break;
 				case svsl_spv_operand_glsl450: put(d, "glsl450");                          break;
+				case svsl_spv_operand_string:  put(d, "\""); put_str(d, op->string); put(d, "\""); break;
 				}
 			}
 			put(d, ")");

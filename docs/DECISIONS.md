@@ -30,7 +30,7 @@ prototype failure is addressed *structurally* here:
 | v1 scope | HLSL core + float16/layouts/pushconstant/multiview/spec-constants/demote/interp + subgroups/atomics/barriers + early-Z toolkit/`[wave_size]`/`SubpassInput` | Honest spec; the corpus needs most of it anyway; the additions are decoration-cheap except SubpassInput (runtime support landed in sk_renderer) |
 | Names over numbers | Bare `specialization` auto-ids; `register()` optional with deterministic auto-binding; locations by declaration order | Reflection is name-based, so numbers are an interop detail; auto-assignment never collides with explicit values |
 | Deferred | pointers/bindless, mesh/task, RT, coop-matrix, interlock | Big surface; the prototype proved the cost of promising them early |
-| Output | SKS container v10, plus `.spv`/headers; one version at a time, no back-compat | StereoKit is the target consumer; the version field exists to refuse old files, not to branch on |
+| Output | SKS container v11, plus `.spv`/headers; one version at a time, no back-compat | StereoKit is the target consumer; the version field exists to refuse old files, not to branch on |
 | Codegen | AST → small SSA-ish IR → SPIR-V, mandatory full inlining | Structurally fixes opaque-params and access-chain bugs; matches reference-compiler behavior |
 | Dependencies | Core lib + CLI: libc only; vendored `spirv.h`; `spirv-val` shelled out; app deps FetchContent, dev-only | Dependency-free/light core is a hard requirement |
 | Compat level | Corpus compiles (light porting acceptable); legacy forms porting-warn under `-Wporting` (opt-in, off by default) | User-selected; hints are opt-in so a clean corpus build stays quiet, and someone modernizing turns them on deliberately |
@@ -45,6 +45,12 @@ prototype failure is addressed *structurally* here:
 | Correctness bar | Outputs only: pixels and buffer bits, bit-exact for compute | SPIR-V text differences are legal encodings of the same program; comparing them creates false failures and hides real ones |
 | glslang divergences | Keep HLSL/DXC-correct behavior; note the divergence in the check shader | Verified glslang bugs: WavePrefixSum emits inclusive (should be exclusive), InterlockedCompareStore emits nothing, `ldexp` with float exponent emits invalid SPIR-V, unknown `SV_*` on a vertex input silently becomes a located attribute that its own reflection then drops (meta ≠ SPIR-V — the bug class SKS v10 exists to kill; SVSL rejects it like DXC) |
 | Structured-buffer element layout | Object-form elements default to **C layout where C layout is free**: pack1 rules, but layouts needing `scalarBlockLayout` are compile errors unless `pack1` is written explicitly, which permits them and records SKS feature bit 16. Layout keywords prefix declarations (any form) with standards-name aliases `scalar`/`relaxed`/`std140`/`std430`. | The product goal is C-struct interop: `element_size == sizeof`, offsets match plain C. The error-vs-infer split is about consent, mirroring `float16`: typing a feature opts into its device requirement, but a bare declaration names no layout and must not silently narrow device support (the failure would surface as pipeline-creation errors on other people's hardware). glslang was rejected as the reference here — its HLSL mode emits DX-packed offsets with a std430-rounded stride (a TODO'd inconsistency in `updateMemberOffset`, which even excludes `$Global` by name), matching neither C nor std430, so C arrays break from element 1. The structs the default refuses are exactly those std430 silently corrupted against C. |
+| QCOM extensions (image_processing/2, tile_shading) | First-class syntax, every name `QCOM`-postfixed (`SampleWeightedQCOM`, `[tile_shading_rate_qcom]`, `tile_offset_qcom()`). Verification is compile + spirv-val + emitted-word unit tests (`tests/test_qcom.c`) — no desktop implementation exists, and skshaderc cannot compile any of it | A driving reason for SVSL and a differentiator: no HLSL frontend (DXC, glslang-HLSL, Slang) exposes these natively; only GLSL does. The postfix keeps clean names free for a future EXT promotion |
+| QCOM image-processing surface | Texture methods with **one shared sampler** per op; decorations (`WeightTextureQCOM`, `BlockMatchTextureQCOM`, `BlockMatchSamplerQCOM`) inferred from use, and decorated resources are **exclusive to their op family** (compile error on mixing). These modules emit SPIR-V 1.4 — the extension's floor — with the all-globals interface 1.4 mandates; every other module stays 1.3 | The sampler constraints (unnormalized, clamp-only, `IMAGE_PROCESSING` create flag) are identical for both textures of a block match, so split sampler args would only add footguns. Exclusivity mirrors the Vulkan binding rules — no descriptor satisfies a mixed-use resource. spirv-val traces the decorations through *direct* OpLoads, so fused texture+sampler pairs load the combined variable (both decorations land on it, glslang's combined-sampler2D model), and a window-op texture fused with a *different* sampler is unexpressable → compile error |
+| Tile attachments | `[tile_attachment]` attribute on `Texture2D`/`RWTexture2D`, not a new type name | The type *is* a 2D texture/image in every way the type system cares about; only the storage class (`TileAttachmentQCOM`) and bind semantics differ. GLSL made the same call (`tile_attachmentQCOM` layout qualifier). Distinct from `TileImage` (EXT), which has no descriptor at all |
+| Tile shading rate | `[tile_shading_rate_qcom(x,y,z)]` **replaces** `[numthreads]`; declaring both is an error, and the attribute alone marks a compute entry | SPIR-V forbids TileShadingRateQCOM alongside LocalSize — the implementation derives the workgroup shape from the rate (area-based dispatch) |
+| Apron size | Program-level reserved meta key `//--apron = W[, H]` (parsed + validated now, serialized in the SKS v11 bump), warned when nothing tile-shaped consumes it | The apron is per-render-pass state (`VkRenderPassTileShadingCreateInfoQCOM::tileApronSize`) with **no shader-side representation** in SPIR-V or any shading language — a per-attachment spelling would promise granularity the API doesn't have. Carrying it as shader metadata is *more* than GLSL offers (there, apps hardcode it in C++); shaders read the active value via `tile_apron_size_qcom()` |
+| spirv_asm requirements | `OpCapability <int>;` / `OpExtension "name";` inside a block are routed to the module's declaration streams (deduped); string-literal operands added | The escape hatch stays closed under composition — a block states its own prerequisites in SPIR-V's own spelling. Rejected: `//--require` (the `//--` channel is material metadata read by renderers, and it would be the first meta key to change codegen) and a `require`/`#require` keyword (new surface duplicating a spelling SPIR-V already has) |
 
 ## SKS v9 additions
 
@@ -83,3 +89,26 @@ IR-side vertex-input usage scan was deleted with it. Unused inputs are stripped 
 SPIR-V (matching glslang) but still consume their location, so recorded locations have
 visible gaps — `checks/check_vertex_locations.hlsl` pins this and the explicit
 `[location(N)]` path against the reference compiler.
+
+## SKS v11 additions
+
+v11 carries the QCOM extension reflection (lockstep change with sk_renderer's
+`sksc_file.h`/`sksc.cpp`/`sksc_file.c`):
+
+- **`uint32 tile_apron[2]`** in the meta block, after `wave_size` — the `//--apron`
+  value, applied by the renderer as `VkRenderPassTileShadingCreateInfoQCOM::tileApronSize`.
+- **Four `skr_register_` values** so the runtime picks the right descriptor type:
+  `sample_weight` (VK_DESCRIPTOR_TYPE_SAMPLE_WEIGHT_IMAGE_QCOM), `block_match`
+  (BLOCK_MATCH_IMAGE_QCOM), and `tile_sampled`/`tile_storage` (ordinary
+  combined-sampler/storage-image descriptors whose variables live in
+  `TileAttachmentQCOM` storage). The classification comes from the emitters
+  (`svsl_spirv_blob_t.qcom_res_use`, the same array that drives decorations and
+  exclusivity), never re-derived — mirroring the v10 vertex-locations pattern.
+- **Resource shape bit 6**: this sampler serves QCOM image-processing ops and must be
+  created with `VK_SAMPLER_CREATE_IMAGE_PROCESSING_BIT_QCOM`. Set on standalone sampler
+  records, or on the texture record when the sampler is fused (like the comparison
+  bit 5).
+
+Feature bits 17–19 (image_processing, image_processing2, tile_shading) predate the bump
+— they fit the existing v9 mask — but v11 is where runtimes gain the reflection to act
+on them.

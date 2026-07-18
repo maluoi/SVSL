@@ -14,8 +14,21 @@ bugs and cleanups from the code review are tracked in `docs/CODE_REVIEW.md`.
   (unreported); SPIRV-Reflect has the data.
 - **TileImage runtime test** — blocked on `VK_EXT_shader_tile_image` in a local driver (RADV
   lacks it) and an skr pass model for it.
-- **QCOM tile shading** (`VK_QCOM_tile_shading`): interesting for Quest-class hardware; needs
-  an skr rendering model before language syntax is worth designing.
+- **Advance the sk_renderer pin past v11.** SKS v11 (QCOM reflection — see
+  docs/DECISIONS.md) is implemented in both working trees; until sk_renderer tags a
+  release containing it, svsl_view's FetchContent pin (`app/CMakeLists.txt` GIT_TAG)
+  stays behind and needs the `-DFETCHCONTENT_SOURCE_DIR_SK_RENDERER` scratch-build
+  override, and the sibling `~/SK/sk_renderer/build` is configured with
+  `FETCHCONTENT_SOURCE_DIR_SVSL=~/SK/SVSL` so its embedded libsvsl tracks this
+  working tree (clear the cache var to return to the pin).
+- **Apply v11 at runtime in skr**: read `meta.tile_apron` into
+  `VkRenderPassTileShadingCreateInfoQCOM` when creating a tile-shading render pass
+  (needs the skr tile pass model), and create shape-bit-6 samplers with
+  `VK_SAMPLER_CREATE_IMAGE_PROCESSING_BIT_QCOM`. The descriptor-type mapping for the
+  four new register values is already in `skr_shader.c`.
+- **QCOM runtime verification on Adreno** — the extensions have no desktop implementation;
+  compile + spirv-val + emitted-word unit tests (`tests/test_qcom.c`) + v11 container
+  decode are the current bar. A device pass needs the runtime work above.
 
 ## Library surface
 

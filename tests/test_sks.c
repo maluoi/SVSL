@@ -1,5 +1,5 @@
 // SKS container tests: our writer's metadata must match what skshaderc
-// produces for the same shader, record by record (both emit v10 — one version
+// produces for the same shader, record by record (both emit v11 — one version
 // at a time). The reference comparison runs when the local skshaderc build is
 // present; the structural checks always run.
 
@@ -60,6 +60,7 @@ typedef struct sks_file_t {
 	uint16_t   version;
 	uint64_t   features;
 	uint32_t   stage_count, buffer_count, resource_count, spec_count, wave_size;
+	uint32_t   tile_apron[2];
 	int32_t    vertex_input_count;
 	char       name[256];
 	sks_buf_t  bufs[8];
@@ -80,13 +81,14 @@ static bool sks_read(const uint8_t *data, int32_t size, sks_file_t *out) {
 	TAKE(out->name, 256);
 	TAKE(&out->buffer_count, 4);
 	TAKE(&out->resource_count, 4);
-	if (out->version != 10) return false; // one version at a time
+	if (out->version != 11) return false; // one version at a time
 	TAKE(&out->vertex_input_count, 4);
 	TAKE(&out->spec_count, 4);
 	TAKE(&out->features, 8);
 	p += 8;  // reserved features word
 	p += 24; // ops
 	TAKE(&out->wave_size, 4);
+	TAKE(out->tile_apron, 8); // v11+
 	for (uint32_t b = 0; b < out->buffer_count && b < 8; b++) {
 		sks_buf_t *buf = &out->bufs[b];
 		TAKE(buf->name, 32);
@@ -191,7 +193,7 @@ static void test_sks_structure(void) {
 	sks_file_t f = {0};
 	TEST_CHECK(sks_read(blob.bytes, blob.size, &f));
 
-	TEST_CHECK(f.version == 10);
+	TEST_CHECK(f.version == 11);
 	TEST_CHECK(f.stage_count == 2);
 	TEST_CHECK(strcmp(f.name, "sk/unlit") == 0);
 	TEST_CHECK(f.buffer_count == 2);
@@ -417,6 +419,7 @@ static bool compare_with_reference(svsl_arena_t *arena, const char *shader) {
 	CMP(strcmp(ref.name, ours.name) == 0, "name");
 	CMP(ref.stage_count == ours.stage_count, "stage_count");
 	CMP(ref.wave_size == ours.wave_size, "wave_size");
+	CMP(ref.tile_apron[0] == ours.tile_apron[0] && ref.tile_apron[1] == ours.tile_apron[1], "tile_apron");
 	CMP(ref.buffer_count == ours.buffer_count, "buffer_count");
 	CMP(ref.resource_count == ours.resource_count, "resource_count");
 	CMP(ref.vertex_input_count == ours.vertex_input_count, "vertex_input_count");

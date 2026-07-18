@@ -34,6 +34,9 @@ static const struct { const char *name; uint8_t ctx; } attr_table[] = {
 	{ "wave_size",                   svsl_attr_ctx_func },
 	{ "early_depth_stencil",         svsl_attr_ctx_func },
 	{ "earlydepthstencil",           svsl_attr_ctx_func },
+	{ "tile_shading_rate_qcom",      svsl_attr_ctx_func },
+	{ "non_coherent_tile_reads_qcom",svsl_attr_ctx_func },
+	{ "tile_attachment",             svsl_attr_ctx_var },
 	{ "specialization",              svsl_attr_ctx_var },
 	{ "vk::constant_id",             svsl_attr_ctx_var },
 	{ "image_format",                svsl_attr_ctx_var },
@@ -1050,6 +1053,31 @@ static void add_entry(sema_t *s, const svsl_ast_func_t *func, svsl_stage_ stage)
 				err(s, attr->loc, "wave_size on '%.*s' must be a power of two in [4,128]", func->name);
 			}
 		}
+		// VK_QCOM_tile_shading execution modes
+		if (svsl_str_eq_cstr(attr->name, "tile_shading_rate_qcom")) {
+			if (stage != svsl_stage_compute)
+				err(s, attr->loc, "[tile_shading_rate_qcom] on '%.*s': compute entries only", func->name);
+			// the rate replaces LocalSize — the implementation derives the
+			// workgroup shape from it, so an explicit numthreads is an error
+			for (int32_t k = 0; k < func->attrs.count; k++)
+				if (svsl_str_eq_cstr(func->attrs.items[k].name, "numthreads") ||
+				    svsl_str_eq_cstr(func->attrs.items[k].name, "compute"))
+					err(s, attr->loc, "[tile_shading_rate_qcom] on '%.*s' replaces [numthreads] — remove one", func->name);
+			bool ok = attr->arg_count == 3;
+			for (int32_t i = 0; ok && i < 3; i++) {
+				int64_t v;
+				ok = const_eval_int(s, attr->args[i], &v) && v > 0 &&
+				     (i == 2 || (v & (v - 1)) == 0); // x/y rates must be powers of two
+				if (ok) entry.tile_rate[i] = (int32_t)v;
+			}
+			if (!ok)
+				err(s, attr->loc, "[tile_shading_rate_qcom] on '%.*s' needs (x, y, z) with power-of-two x/y", func->name);
+		}
+		if (svsl_str_eq_cstr(attr->name, "non_coherent_tile_reads_qcom")) {
+			if (stage != svsl_stage_pixel)
+				err(s, attr->loc, "[non_coherent_tile_reads_qcom] on '%.*s': pixel entries only", func->name);
+			entry.non_coherent_tile_reads = true;
+		}
 	}
 
 	for (int32_t i = 0; i < s->prog->entries.count; i++) {
@@ -1082,6 +1110,7 @@ static void discover_entries(sema_t *s, const svsl_sema_options_t *opt) {
 			else if (svsl_str_eq_cstr(n, "fragment") || svsl_str_eq_cstr(n, "pixel")) { stage = svsl_stage_pixel;   attr_stage = true; }
 			else if (svsl_str_eq_cstr(n, "compute"))                                 { stage = svsl_stage_compute; attr_stage = true; }
 			else if (svsl_str_eq_cstr(n, "numthreads"))                              has_numthreads = true;
+			else if (svsl_str_eq_cstr(n, "tile_shading_rate_qcom"))                  has_numthreads = true; // also marks a compute entry
 		}
 		if (!attr_stage) {
 			if      (svsl_str_eq_cstr(func->name, name_vs)) stage = svsl_stage_vertex;
@@ -1270,6 +1299,19 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 				if (svsl_str_eq_cstr(attr->name, "vk::binding") && !attr_binding(&s, attr, &reg))
 					err(&s, attr->loc, "[[vk::binding]] on '%.*s' needs (binding[, set]) constants", var->name);
 			}
+			// [tile_attachment] — VK_QCOM_tile_shading: the variable lives in the
+			// TileAttachmentQCOM storage class (still a set/binding descriptor)
+			bool tile_attachment = false;
+			for (int32_t a = 0; a < var->attrs.count; a++) {
+				if (!svsl_str_eq_cstr(var->attrs.items[a].name, "tile_attachment")) continue;
+				bool tex_2d = (base->kind == svsl_type_texture || base->kind == svsl_type_image) &&
+				              base->dim == svsl_texdim_2d && !base->arrayed && !base->multisampled;
+				if (!tex_2d)
+					err(&s, var->attrs.items[a].loc,
+					    "[tile_attachment] on '%.*s': only Texture2D and RWTexture2D can be tile attachments", var->name);
+				else
+					tile_attachment = true;
+			}
 			svsl_array_push(arena, &s.prog->resources, (svsl_resource_t){
 				.name          = var->name,
 				.kind          = kind,
@@ -1280,6 +1322,7 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 				.buffer_index  = -1,
 				.element_size  = element_size,
 				.layout        = (uint8_t)elem_layout,
+				.tile_attachment = tile_attachment,
 				.loc           = var->loc });
 			continue;
 		}
@@ -1413,9 +1456,39 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 			                   "//--wave_size must be a power of two in [4,128]");
 		}
 
+		// //--apron = W[, H]: VK_QCOM_tile_shading render pass tileApronSize.
+		// Purely renderer-facing — the apron has no shader-side representation
+		// (shaders only *read* the active size via tile_apron_size_qcom())
+		const svsl_pp_meta_t *apron = meta_find(pp, "apron");
+		if (apron) {
+			char *text = svsl_arena_strndup(arena, apron->value.ptr, (size_t)apron->value.len);
+			char *end  = NULL;
+			int64_t w = strtol(text, &end, 10), h = w;
+			while (end && (*end == ' ' || *end == '\t')) end++;
+			if (end && *end == ',') h = strtol(end + 1, &end, 10);
+			while (end && (*end == ' ' || *end == '\t')) end++;
+			if (apron->value.len == 0 || !end || *end != '\0' || w < 0 || h < 0) {
+				svsl_diag_add(arena, ref_diags, svsl_severity_error, apron->loc,
+				              "//--apron must be a size in pixels: 'W' or 'W, H'");
+			} else {
+				s.prog->tile_apron[0] = (int32_t)w;
+				s.prog->tile_apron[1] = (int32_t)h;
+				bool tiled = false; // warn when nothing tile-shaped consumes it
+				for (int32_t r = 0; r < s.prog->resources.count; r++)
+					if (s.prog->resources.items[r].tile_attachment) tiled = true;
+				for (int32_t en = 0; en < s.prog->entries.count; en++)
+					if (s.prog->entries.items[en].tile_rate[0] > 0 ||
+					    s.prog->entries.items[en].non_coherent_tile_reads) tiled = true;
+				if (!tiled)
+					svsl_diag_add(arena, ref_diags, svsl_severity_warning, apron->loc,
+					              "//--apron set, but no tile attachment or tile-shading attribute in this shader");
+			}
+		}
+
 		for (int32_t i = 0; i < pp->meta_count; i++) {
 			const svsl_pp_meta_t *meta = &pp->metas[i];
-			if (svsl_str_eq_cstr(meta->name, "name") || svsl_str_eq_cstr(meta->name, "wave_size")) continue;
+			if (svsl_str_eq_cstr(meta->name, "name") || svsl_str_eq_cstr(meta->name, "wave_size") ||
+			    svsl_str_eq_cstr(meta->name, "apron")) continue;
 
 			bool applied = false;
 			for (int32_t b = 0; b < s.prog->buffers.count && !applied; b++) {

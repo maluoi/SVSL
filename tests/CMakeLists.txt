@@ -9,6 +9,7 @@ add_executable(svsl_tests
 	test_ir.c
 	test_sks.c
 	test_api.c
+	test_qcom.c
 	test_corpus.c
 )
 target_link_libraries     (svsl_tests PRIVATE svsl)
@@ -37,4 +38,5 @@ add_test(NAME sema   COMMAND svsl_tests sema)
 add_test(NAME ir     COMMAND svsl_tests ir)
 add_test(NAME sks    COMMAND svsl_tests sks)
 add_test(NAME api    COMMAND svsl_tests api)
+add_test(NAME qcom   COMMAND svsl_tests qcom)
 add_test(NAME corpus COMMAND svsl_tests corpus)

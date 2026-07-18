@@ -85,6 +85,8 @@ svsl_sks_file_t *svsl_sks_parse(const void *bytes, int32_t size) {
 	rd_u64(&r);            // reserved features word
 	rd_take(&r, 24);       // op counts (vertex/pixel total/tex/flow)
 	file->wave_size       = rd_u32(&r);
+	file->tile_apron[0]   = rd_u32(&r); // v11: //--apron
+	file->tile_apron[1]   = rd_u32(&r);
 	if (r.bad || file->version != SVSL_SKS_VERSION) goto fail;
 	if (!count_ok(&r, buffer_count) || !count_ok(&r, resource_count) ||
 	    !count_ok(&r, vin_count) || !count_ok(&r, spec_count) || !count_ok(&r, stage_count))

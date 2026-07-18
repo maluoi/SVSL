@@ -22,6 +22,10 @@ typedef struct svsl_spv_type_key_t {
 typedef struct svsl_spv_t {
 	svsl_arena_t *arena;
 	uint32_t      next_id;
+	// module header version word (major<<16 | minor<<8); starts at the 1.3
+	// baseline, raised by features that need more (QCOM image processing → 1.4).
+	// 1.4+ changes the entry-point interface rule — the emitter handles that.
+	uint32_t      version;
 
 	svsl_spv_stream_t caps;        // OpCapability
 	svsl_spv_stream_t extensions;  // OpExtension
@@ -60,6 +64,7 @@ void svsl_spv_inst_str(svsl_spv_t *spv, svsl_spv_stream_t *stream, SpvOp op,
 
 void svsl_spv_cap(svsl_spv_t *spv, SpvCapability cap);          // deduped
 void svsl_spv_extension(svsl_spv_t *spv, const char *name);     // deduped by content
+void svsl_spv_require_version(svsl_spv_t *spv, uint32_t version); // raises, never lowers
 
 // cached type lookup: emits OpType* on first request. Operands beyond the key
 // are not supported — struct types are emitted uncached by the caller.

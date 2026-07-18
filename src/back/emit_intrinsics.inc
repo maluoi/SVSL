@@ -436,12 +436,20 @@ static uint32_t emit_intrinsic(emit_t *e, int32_t index, const svsl_ir_inst_t *i
 	}
 	case svsl_emit_builtin_var: {
 		// zero-arg intrinsic whose native name is a builtin input variable
-		// (WaveGetLaneCount → subgroup_size, etc.): load the variable
+		// (WaveGetLaneCount → subgroup_size, tile_offset_qcom, …): load it
 		int32_t builtin = svsl_builtin_var_find(svsl_str(name));
-		if (builtin >= 0)
-			return emit_value_inst(e, &e->spv.funcs, SpvOpLoad,
-			                       spv_scalar_type(e, svsl_scalar_uint32),
+		if (builtin >= 0) {
+			if (builtin >= 4 && e->fn->entry->stage == svsl_stage_vertex) { // tile builtins
+				eerr(e, inst->loc, "tile shading builtins need a pixel or compute shader");
+				return 0;
+			}
+			uint32_t u32   = spv_scalar_type(e, svsl_scalar_uint32);
+			uint32_t comps = builtin_input_comps((uint32_t)builtin);
+			uint32_t tid   = comps == 1 ? u32
+			               : svsl_spv_type(&e->spv, SpvOpTypeVector, (uint32_t[]){ u32, comps }, 2);
+			return emit_value_inst(e, &e->spv.funcs, SpvOpLoad, tid,
 			                       (uint32_t[]){ builtin_input_var(e, (uint32_t)builtin) }, 1);
+		}
 		break;
 	}
 	case svsl_emit_none:
@@ -466,10 +474,27 @@ static uint32_t emit_spirv_asm(emit_t *e, const svsl_ir_inst_t *inst) {
 
 	for (int32_t k = 0; k < node->spirv_asm.inst_count; k++) {
 		const svsl_ast_spv_inst_t *ai = &node->spirv_asm.insts[k];
+		if (ai->spv_op == SpvOpCapability) { // requirements route to the module's
+			svsl_spv_cap(&e->spv, (SpvCapability)ai->operands[0].literal);
+			continue;                        // declaration streams, not the code
+		}
+		if (ai->spv_op == SpvOpExtension) {
+			svsl_spv_extension(&e->spv, svsl_arena_strndup(e->arena, ai->operands[0].string.ptr,
+			                                               (size_t)ai->operands[0].string.len));
+			continue;
+		}
 		uint32_t words[128];
 		uint32_t count = 0;
 		for (int32_t o = 0; o < ai->operand_count && count < 128; o++) {
 			const svsl_ast_spv_operand_t *op = &ai->operands[o];
+			if (op->kind == svsl_spv_operand_string) { // packs to multiple words
+				uint32_t sw = ((uint32_t)op->string.len + 4) / 4; // incl. nul + pad
+				if (count + sw > 128) { eerr(e, op->loc, "spirv_asm instruction too long"); return 0; }
+				words[count + sw - 1] = 0;
+				memcpy(&words[count], op->string.ptr, (size_t)op->string.len);
+				count += sw;
+				continue;
+			}
 			uint32_t w = 0;
 			switch ((svsl_spv_operand_)op->kind) {
 			case svsl_spv_operand_local: {
@@ -489,6 +514,7 @@ static uint32_t emit_spirv_asm(emit_t *e, const svsl_ir_inst_t *inst) {
 			case svsl_spv_operand_type:    w = spv_type_for(e, op->type_id);                       break;
 			case svsl_spv_operand_literal: w = op->literal;                                         break;
 			case svsl_spv_operand_glsl450: w = e->spv.glsl450;                                      break;
+			case svsl_spv_operand_string:  break; // packed above
 			}
 			words[count++] = w;
 		}
@@ -1182,6 +1208,13 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 		uint32_t scalar_id = spv_scalar_type(e, elem->scalar);
 		uint32_t vec4_id   = svsl_spv_type(spv, SpvOpTypeVector, (uint32_t[]){ scalar_id, 4 }, 2);
 
+		// ordinary texturing marks its resources so QCOM-exclusive uses conflict
+		if (method != svsl_method_sample_weighted && method != svsl_method_box_filter &&
+		    method != svsl_method_block_match) {
+			qcom_classify(e, tex, svsl_qcom_use_plain, inst->loc);
+			if (sampler != SVSL_IR_NONE) qcom_classify(e, (int32_t)sampler, svsl_qcom_use_plain, inst->loc);
+		}
+
 		switch ((svsl_method_)method) {
 		case svsl_method_sample:
 		case svsl_method_sample_bias: {
@@ -1312,6 +1345,68 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 			uint32_t lods = emit_value_inst(e, fs, SpvOpImageQueryLod, v2, (uint32_t[]){ si, a0 }, 2);
 			result = emit_value_inst(e, fs, SpvOpCompositeExtract, type_id,
 			                         (uint32_t[]){ lods, channel == 1 ? 1u : 0u }, 2);
+			break;
+		}
+		case svsl_method_sample_weighted: { // QCOM: MxN weighted average
+			svsl_spv_cap(spv, SpvCapabilityTextureSampleWeightedQCOM);
+			svsl_spv_extension(spv, "SPV_QCOM_image_processing");
+			svsl_spv_require_version(spv, 0x00010400); // extension's SPIR-V floor
+			int32_t  weight = (int32_t)inst->args[3];
+			uint32_t si     = load_sampled_image(e, tex, sampler);
+			uint32_t wi     = load_sampled_image(e, weight, sampler);
+			qcom_classify(e, tex, svsl_qcom_use_plain, inst->loc);
+			qcom_classify(e, weight, svsl_qcom_use_weight, inst->loc);
+			qcom_classify(e, (int32_t)sampler, svsl_qcom_use_ip_sampler, inst->loc);
+			qcom_decorate_once(e, e->resource_vars[weight], SpvDecorationWeightTextureQCOM);
+			uint32_t raw = emit_value_inst(e, fs, SpvOpImageSampleWeightedQCOM, vec4_id,
+			                               (uint32_t[]){ si, a0, wi }, 3);
+			result = shrink_to(e, raw, 4, inst->type);
+			break;
+		}
+		case svsl_method_box_filter: { // QCOM: filter over an arbitrary box size
+			svsl_spv_cap(spv, SpvCapabilityTextureBoxFilterQCOM);
+			svsl_spv_extension(spv, "SPV_QCOM_image_processing");
+			svsl_spv_require_version(spv, 0x00010400);
+			uint32_t si = load_sampled_image(e, tex, sampler);
+			qcom_classify(e, tex, svsl_qcom_use_plain, inst->loc);
+			qcom_classify(e, (int32_t)sampler, svsl_qcom_use_ip_sampler, inst->loc);
+			uint32_t raw = emit_value_inst(e, fs, SpvOpImageBoxFilterQCOM, vec4_id,
+			                               (uint32_t[]){ si, a0, a1 }, 3);
+			result = shrink_to(e, raw, 4, inst->type);
+			break;
+		}
+		case svsl_method_block_match: { // QCOM: SAD/SSD block error metric
+			static const SpvOp bm_ops[6] = { // svsl_block_match_ order
+				SpvOpImageBlockMatchSADQCOM,       SpvOpImageBlockMatchSSDQCOM,
+				SpvOpImageBlockMatchWindowSADQCOM, SpvOpImageBlockMatchWindowSSDQCOM,
+				SpvOpImageBlockMatchGatherSADQCOM, SpvOpImageBlockMatchGatherSSDQCOM,
+			};
+			bool window = channel == svsl_block_match_window_sad ||
+			              channel == svsl_block_match_window_ssd;
+			svsl_spv_cap(spv, SpvCapabilityTextureBlockMatchQCOM);
+			svsl_spv_extension(spv, "SPV_QCOM_image_processing");
+			svsl_spv_require_version(spv, 0x00010400);
+			if (channel >= svsl_block_match_window_sad) { // Window/Gather forms
+				svsl_spv_cap(spv, SpvCapabilityTextureBlockMatch2QCOM);
+				svsl_spv_extension(spv, "SPV_QCOM_image_processing2");
+			}
+			int32_t  ref = (int32_t)inst->args[3];
+			uint32_t ti, ri;
+			if (window) { // classifies + decorates inside (combined-var handling)
+				ti = qcom_window_pair(e, tex, sampler, inst->loc);
+				ri = qcom_window_pair(e, ref, sampler, inst->loc);
+			} else {
+				ti = load_sampled_image(e, tex, sampler);
+				ri = load_sampled_image(e, ref, sampler);
+				qcom_classify(e, tex, svsl_qcom_use_block_match, inst->loc);
+				qcom_classify(e, ref, svsl_qcom_use_block_match, inst->loc);
+				qcom_classify(e, (int32_t)sampler, svsl_qcom_use_ip_sampler, inst->loc);
+				qcom_decorate_once(e, e->resource_vars[tex], SpvDecorationBlockMatchTextureQCOM);
+				qcom_decorate_once(e, e->resource_vars[ref], SpvDecorationBlockMatchTextureQCOM);
+			}
+			uint32_t raw = emit_value_inst(e, fs, bm_ops[channel], vec4_id,
+			                               (uint32_t[]){ ti, a0, ri, a1, a2 }, 5);
+			result = shrink_to(e, raw, 4, inst->type);
 			break;
 		}
 		default:

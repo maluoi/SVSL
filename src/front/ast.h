@@ -87,6 +87,7 @@ typedef enum svsl_spv_operand_ {
 	svsl_spv_operand_type,    // $$type       — an SVSL type; its SPIR-V type id is spliced in
 	svsl_spv_operand_literal, // 42           — a literal 32-bit word (enum values, immediates)
 	svsl_spv_operand_glsl450, // glsl450      — the GLSL.std.450 ext-instruction import id
+	svsl_spv_operand_string,  // "name"       — a string literal, packed as nul-terminated words
 } svsl_spv_operand_;
 
 typedef struct svsl_ast_spv_operand_t {
@@ -96,6 +97,7 @@ typedef struct svsl_ast_spv_operand_t {
 	svsl_ast_type_t *type;    // svsl_spv_operand_type
 	int32_t          type_id; // svsl_type_id_t, resolved by sema (svsl_spv_operand_type)
 	uint32_t         literal; // svsl_spv_operand_literal
+	svsl_str_t       string;  // svsl_spv_operand_string (without quotes)
 	svsl_loc_t       loc;
 } svsl_ast_spv_operand_t;
 

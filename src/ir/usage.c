@@ -50,6 +50,8 @@ static void mark_func_resources(const svsl_program_t *prog, const svsl_ir_func_t
 			mark_resource(prog, res_stages, buf_stages, inst->args[0], stage);
 			if (inst->args[1] != SVSL_IR_NONE)
 				mark_resource(prog, res_stages, buf_stages, inst->args[1], stage);
+			if (inst->args[3] != SVSL_IR_NONE) // QCOM weight/reference texture
+				mark_resource(prog, res_stages, buf_stages, inst->args[3], stage);
 			break;
 		case svsl_ir_image_load:
 		case svsl_ir_image_store:

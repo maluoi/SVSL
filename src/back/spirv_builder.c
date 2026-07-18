@@ -8,7 +8,11 @@
 #define SVSL_SPIRV_VERSION 0x00010300u
 
 void svsl_spv_init(svsl_spv_t *spv, svsl_arena_t *arena) {
-	*spv = (svsl_spv_t){ .arena = arena, .next_id = 1 };
+	*spv = (svsl_spv_t){ .arena = arena, .next_id = 1, .version = SVSL_SPIRV_VERSION };
+}
+
+void svsl_spv_require_version(svsl_spv_t *spv, uint32_t version) {
+	if (version > spv->version) spv->version = version;
 }
 
 uint32_t svsl_spv_id(svsl_spv_t *spv) {
@@ -138,7 +142,7 @@ uint32_t svsl_spv_const(svsl_spv_t *spv, uint32_t type_id, uint64_t bits, bool w
 const uint32_t *svsl_spv_finalize(svsl_spv_t *spv, int32_t *out_word_count) {
 	svsl_spv_stream_t out = {0};
 	svsl_array_push(spv->arena, &out, SpvMagicNumber);
-	svsl_array_push(spv->arena, &out, SVSL_SPIRV_VERSION);
+	svsl_array_push(spv->arena, &out, spv->version);
 	svsl_array_push(spv->arena, &out, 0);               // generator: none registered yet
 	svsl_array_push(spv->arena, &out, spv->next_id);    // bound
 	svsl_array_push(spv->arena, &out, 0);               // schema

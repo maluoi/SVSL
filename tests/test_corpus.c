@@ -101,9 +101,12 @@ static bool corpus_check_file(const char *path) {
 			if (!f) continue;
 			fwrite(blob.words, 4, (size_t)blob.word_count, f);
 			fclose(f);
-			const char *val_cmd = program.needs_scalar_layout
-				? "spirv-val --target-env vulkan1.1 --scalar-block-layout svsl_corpus_tmp.spv"
-				: "spirv-val --target-env vulkan1.1 svsl_corpus_tmp.spv";
+			// the module's own header decides the target env (QCOM features emit 1.4)
+			bool v14 = blob.word_count > 1 && blob.words[1] >= 0x00010400u;
+			char val_cmd[160];
+			snprintf(val_cmd, sizeof(val_cmd), "spirv-val --target-env %s%s svsl_corpus_tmp.spv",
+			         v14 ? "vulkan1.1spv1.4" : "vulkan1.1",
+			         program.needs_scalar_layout ? " --scalar-block-layout" : "");
 			if (system(val_cmd) != 0) {
 				printf("  spirv-val failed: %s (entry %d)\n", path, i);
 				svsl_diag_add(&arena, &diags, svsl_severity_error,

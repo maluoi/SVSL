@@ -42,6 +42,9 @@ typedef struct emit_t {
 	uint32_t *buffer_vars;
 	uint32_t *resource_vars;    // combined-sampler/image/buffer variable per resource
 	uint32_t *resource_img_type;// image type id (for OpImage/etc.)
+	uint8_t  *qcom_res_use;     // QCOM image-processing use class per resource
+	                            // (a conflicting later use is an error)
+	svsl_array_t(uint64_t) qcom_decorated; // (var id << 32 | decoration) emitted so far
 	uint32_t *workgroup_ids;
 	uint32_t *const_global_ids;
 	uint32_t *param_shadow;     // entry params → function-local shadow vars
@@ -427,6 +430,17 @@ static uint32_t emit_resource_var(emit_t *e, SpvStorageClass class_, uint32_t ty
 	return var;
 }
 
+// [tile_attachment] (VK_QCOM_tile_shading): the variable keeps its set/binding
+// descriptor but lives in the TileAttachmentQCOM storage class
+static SpvStorageClass tile_or_uniform_class(emit_t *e, const svsl_resource_t *res) {
+	if (!res->tile_attachment) return SpvStorageClassUniformConstant;
+	if (e->fn->entry->stage == svsl_stage_vertex)
+		eerr(e, res->loc, "tile attachments need a pixel or compute shader");
+	svsl_spv_cap(&e->spv, SpvCapabilityTileShadingQCOM);
+	svsl_spv_extension(&e->spv, "SPV_QCOM_tile_shading");
+	return SpvStorageClassTileAttachmentQCOM;
+}
+
 // numeric constant folding for initializers: literals, +-*/, negation, and
 // references to other constant globals
 static bool const_eval_num(emit_t *e, const svsl_ast_expr_t *v, double *out) {
@@ -663,7 +677,7 @@ static void create_globals(emit_t *e) {
 			uint32_t type = res->sampler_slot >= 0
 			              ? svsl_spv_type(spv, SpvOpTypeSampledImage, (uint32_t[]){ img }, 1)
 			              : img;
-			e->resource_vars[i] = emit_resource_var(e, SpvStorageClassUniformConstant, type,
+			e->resource_vars[i] = emit_resource_var(e, tile_or_uniform_class(e, res), type,
 			                                        &res->bind, res->name);
 			continue;
 		}
@@ -701,7 +715,7 @@ static void create_globals(emit_t *e) {
 		if (res->kind == svsl_res_image) {
 			uint32_t img = spv_image_type(e, t);
 			e->resource_img_type[i] = img;
-			e->resource_vars[i] = emit_resource_var(e, SpvStorageClassUniformConstant, img,
+			e->resource_vars[i] = emit_resource_var(e, tile_or_uniform_class(e, res), img,
 			                                        &res->bind, res->name);
 			continue;
 		}
@@ -969,24 +983,110 @@ static uint32_t load_sampled_image(emit_t *e, int32_t tex, uint32_t sampler_res)
 	return emit_value_inst(e, fs, SpvOpSampledImage, si_type, (uint32_t[]){ image, sampler }, 2);
 }
 
+// QCOM image processing (VK_QCOM_image_processing[2]): decorations are inferred
+// from use, and a decorated resource is exclusive to its op family — the runtime
+// binds it through a dedicated descriptor type / sampler create flag, so mixing
+// uses cannot be satisfied by any binding. First use classifies and decorates;
+// a conflicting later use is a compile error. Classes: svsl_qcom_use_
+// (emit_spirv.h — the SKS writer consumes the recorded array).
+static const char *qcom_use_names[] = { "", "ordinary texturing", "a weight texture",
+	"a block-match texture", "an image-processing sampler", "a window block-match sampler" };
+
+// conflict tracking only — decorations are per *variable* (qcom_decorate_once),
+// since one sampler resource can be reached through a combined variable in one
+// use and its own variable in another
+static void qcom_classify(emit_t *e, int32_t res_index, uint8_t use, svsl_loc_t loc) {
+	uint8_t *cur = &e->qcom_res_use[res_index];
+	if (*cur == use) return;
+	if (*cur == 0) { *cur = use; return; }
+	const svsl_resource_t *res = &e->prog->resources.items[res_index];
+	svsl_diag_add(e->arena, e->diags, svsl_severity_error, loc,
+	              "'%.*s' is used both as %s and %s — QCOM image-processing resources are exclusive to one use",
+	              res->name.len, res->name.ptr, qcom_use_names[*cur], qcom_use_names[use]);
+}
+
+static void qcom_decorate_once(emit_t *e, uint32_t var, uint32_t dec) {
+	uint64_t key = (uint64_t)var << 32 | dec;
+	for (int32_t i = 0; i < e->qcom_decorated.count; i++)
+		if (e->qcom_decorated.items[i] == key) return;
+	svsl_array_push(e->arena, &e->qcom_decorated, key);
+	svsl_spv_inst2(&e->spv, &e->spv.decor, SpvOpDecorate, var, dec);
+}
+
+// window block-match sampled image. The validator traces the QCOM decorations
+// through *direct* OpLoads, so the pair is either the texture's own combined
+// variable (both decorations land on it) or separate image + sampler variable
+// loads — a texture fused with a different sampler cannot be expressed.
+static uint32_t qcom_window_pair(emit_t *e, int32_t tex, uint32_t sampler_res, svsl_loc_t loc) {
+	const svsl_resource_t *res = &e->prog->resources.items[tex];
+	svsl_spv_stream_t     *fs  = &e->spv.funcs;
+	uint32_t img_type = e->resource_img_type[tex];
+	uint32_t si_type  = svsl_spv_type(&e->spv, SpvOpTypeSampledImage, (uint32_t[]){ img_type }, 1);
+
+	qcom_classify(e, tex, svsl_qcom_use_block_match, loc);
+	qcom_classify(e, (int32_t)sampler_res, svsl_qcom_use_bm_window_sampler, loc);
+
+	if (res->sampler_slot >= 0) { // fused: combined variable, both decorations
+		const svsl_resource_t *smp = &e->prog->resources.items[sampler_res];
+		if (smp->bind.slot != res->sampler_slot || smp->bind.space != res->bind.space) {
+			eerr(e, loc, "a window block-match texture fused with one sampler cannot be used with another");
+			return 0;
+		}
+		qcom_decorate_once(e, e->resource_vars[tex], SpvDecorationBlockMatchTextureQCOM);
+		qcom_decorate_once(e, e->resource_vars[tex], SpvDecorationBlockMatchSamplerQCOM);
+		return emit_value_inst(e, fs, SpvOpLoad, si_type, (uint32_t[]){ e->resource_vars[tex] }, 1);
+	}
+	uint32_t svar = e->resource_vars[sampler_res] ? e->resource_vars[sampler_res]
+	                                              : sampler_var_for(e, sampler_res);
+	qcom_decorate_once(e, e->resource_vars[tex], SpvDecorationBlockMatchTextureQCOM);
+	qcom_decorate_once(e, svar, SpvDecorationBlockMatchSamplerQCOM);
+	uint32_t image   = emit_value_inst(e, fs, SpvOpLoad, img_type,
+	                                   (uint32_t[]){ e->resource_vars[tex] }, 1);
+	uint32_t sampler = emit_value_inst(e, fs, SpvOpLoad,
+	                                   svsl_spv_type(&e->spv, SpvOpTypeSampler, NULL, 0),
+	                                   (uint32_t[]){ svar }, 1);
+	return emit_value_inst(e, fs, SpvOpSampledImage, si_type, (uint32_t[]){ image, sampler }, 2);
+}
+
 // input variable for a subgroup builtin (SubgroupSize, SubgroupLocalInvocationId,
 // SubgroupId, NumSubgroups), created on demand and added to the interface
 static uint32_t builtin_input_var(emit_t *e, uint32_t index) {
 	index &= 7;
 	if (e->builtin_input[index]) return e->builtin_input[index];
-	static const SpvBuiltIn builtins[] = {
-		SpvBuiltInSubgroupSize, SpvBuiltInSubgroupLocalInvocationId,
-		SpvBuiltInSubgroupId, SpvBuiltInNumSubgroups };
-	svsl_spv_cap(&e->spv, SpvCapabilityGroupNonUniform);
-	uint32_t u32 = spv_scalar_type(e, svsl_scalar_uint32);
-	uint32_t ptr = spv_ptr_type(e, SpvStorageClassInput, u32);
+	// order matches builtin_vars[] in tables/intrinsics.c
+	static const struct { SpvBuiltIn builtin; uint8_t comps; } rows[] = {
+		{ SpvBuiltInSubgroupSize, 1 }, { SpvBuiltInSubgroupLocalInvocationId, 1 },
+		{ SpvBuiltInSubgroupId, 1 },   { SpvBuiltInNumSubgroups, 1 },
+		{ SpvBuiltInTileOffsetQCOM, 2 }, { SpvBuiltInTileDimensionQCOM, 3 },
+		{ SpvBuiltInTileApronSizeQCOM, 2 },
+	};
+	if (index >= sizeof(rows) / sizeof(rows[0])) index = 0;
+	if (rows[index].builtin >= SpvBuiltInTileOffsetQCOM &&
+	    rows[index].builtin <= SpvBuiltInTileApronSizeQCOM) {
+		svsl_spv_cap(&e->spv, SpvCapabilityTileShadingQCOM);
+		svsl_spv_extension(&e->spv, "SPV_QCOM_tile_shading");
+	} else {
+		svsl_spv_cap(&e->spv, SpvCapabilityGroupNonUniform);
+	}
+	uint32_t u32  = spv_scalar_type(e, svsl_scalar_uint32);
+	uint32_t type = rows[index].comps == 1 ? u32
+	              : svsl_spv_type(&e->spv, SpvOpTypeVector, (uint32_t[]){ u32, rows[index].comps }, 2);
+	uint32_t ptr = spv_ptr_type(e, SpvStorageClassInput, type);
 	uint32_t var = svsl_spv_id(&e->spv);
 	svsl_spv_inst3(&e->spv, &e->spv.types, SpvOpVariable, ptr, var, SpvStorageClassInput);
 	svsl_spv_inst3(&e->spv, &e->spv.decor, SpvOpDecorate, var, SpvDecorationBuiltIn,
-	               builtins[index < 4 ? index : 0]);
+	               rows[index].builtin);
+	if (e->fn->entry->stage == svsl_stage_pixel) // integer inputs must be Flat
+		svsl_spv_inst2(&e->spv, &e->spv.decor, SpvOpDecorate, var, SpvDecorationFlat);
 	svsl_array_push(e->arena, &e->interface, var);
 	e->builtin_input[index] = var;
 	return var;
+}
+
+// component count for a builtin_input_var index (the .inc load needs the type)
+static uint32_t builtin_input_comps(uint32_t index) {
+	static const uint8_t comps[] = { 1, 1, 1, 1, 2, 3, 2 };
+	return index < sizeof(comps) ? comps[index] : 1;
 }
 
 // Converts a raw vec4 sample result to the declared element type. Sampled
@@ -1417,6 +1517,7 @@ bool svsl_spirv_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 	e.buffer_vars       = svsl_arena_alloc(arena, (size_t)(prog->buffers.count > 0 ? prog->buffers.count : 1) * 4);
 	e.resource_vars     = svsl_arena_alloc(arena, (size_t)(prog->resources.count > 0 ? prog->resources.count : 1) * 4);
 	e.resource_img_type = svsl_arena_alloc(arena, (size_t)(prog->resources.count > 0 ? prog->resources.count : 1) * 4);
+	e.qcom_res_use      = svsl_arena_alloc(arena, (size_t)(prog->resources.count > 0 ? prog->resources.count : 1));
 	e.workgroup_ids     = svsl_arena_alloc(arena, (size_t)(prog->workgroup_vars.count > 0 ? prog->workgroup_vars.count : 1) * 4);
 	e.const_global_ids  = svsl_arena_alloc(arena, (size_t)(prog->const_globals.count > 0 ? prog->const_globals.count : 1) * 4);
 	int32_t pcount      = fn->entry->func->param_count > 0 ? fn->entry->func->param_count : 1;
@@ -1456,7 +1557,23 @@ bool svsl_spirv_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 	{
 		svsl_str_t name = fn->entry->name;
 		uint32_t str_words = ((uint32_t)name.len + 1 + 3) / 4;
-		uint32_t iface     = (uint32_t)e.interface.count;
+		// SPIR-V 1.4+ interfaces list every module-scope variable (a superset of
+		// what's referenced is explicitly allowed); pre-1.4 lists Input/Output
+		// only. Scan the globals stream so the 1.4 list can't drift from it.
+		uint32_t *iface_items = e.interface.items;
+		uint32_t  iface       = (uint32_t)e.interface.count;
+		if (e.spv.version >= 0x00010400u) {
+			svsl_spv_stream_t scan = {0};
+			for (int32_t w = 0; w < e.spv.types.count; ) {
+				uint32_t wc = e.spv.types.items[w] >> SpvWordCountShift;
+				if (wc == 0) break;
+				if ((e.spv.types.items[w] & SpvOpCodeMask) == SpvOpVariable)
+					svsl_array_push(arena, &scan, e.spv.types.items[w + 2]);
+				w += (int32_t)wc;
+			}
+			iface_items = scan.items;
+			iface       = (uint32_t)scan.count;
+		}
 		svsl_array_push(arena, &e.spv.entries,
 		                ((2 + str_words + iface + 1) << SpvWordCountShift) | SpvOpEntryPoint);
 		svsl_array_push(arena, &e.spv.entries, (uint32_t)model);
@@ -1470,7 +1587,7 @@ bool svsl_spirv_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 			svsl_array_push(arena, &e.spv.entries, word);
 		}
 		for (uint32_t i = 0; i < iface; i++)
-			svsl_array_push(arena, &e.spv.entries, e.interface.items[i]);
+			svsl_array_push(arena, &e.spv.entries, iface_items[i]);
 	}
 	if (fn->entry->stage == svsl_stage_pixel) {
 		svsl_spv_inst2(&e.spv, &e.spv.exec_modes, SpvOpExecutionMode, fn_id, SpvExecutionModeOriginUpperLeft);
@@ -1482,13 +1599,31 @@ bool svsl_spirv_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 			svsl_spv_inst2(&e.spv, &e.spv.exec_modes, SpvOpExecutionMode, fn_id, SpvExecutionModeDepthGreater);
 		if (e.depth_mode == 2)
 			svsl_spv_inst2(&e.spv, &e.spv.exec_modes, SpvOpExecutionMode, fn_id, SpvExecutionModeDepthLess);
+		if (fn->entry->non_coherent_tile_reads) { // [non_coherent_tile_reads_qcom]
+			svsl_spv_cap(&e.spv, SpvCapabilityTileShadingQCOM);
+			svsl_spv_extension(&e.spv, "SPV_QCOM_tile_shading");
+			svsl_spv_inst2(&e.spv, &e.spv.exec_modes, SpvOpExecutionMode, fn_id,
+			               SpvExecutionModeNonCoherentTileAttachmentReadQCOM);
+		}
 	}
 	if (fn->entry->stage == svsl_stage_compute) {
-		uint32_t ops[5] = { fn_id, SpvExecutionModeLocalSize,
-		                    (uint32_t)fn->entry->workgroup[0],
-		                    (uint32_t)fn->entry->workgroup[1],
-		                    (uint32_t)fn->entry->workgroup[2] };
-		svsl_spv_inst(&e.spv, &e.spv.exec_modes, SpvOpExecutionMode, ops, 5);
+		if (fn->entry->tile_rate[0] > 0) {
+			// [tile_shading_rate_qcom(x, y, z)] REPLACES LocalSize: the
+			// implementation derives the workgroup shape from the rate
+			svsl_spv_cap(&e.spv, SpvCapabilityTileShadingQCOM);
+			svsl_spv_extension(&e.spv, "SPV_QCOM_tile_shading");
+			uint32_t rate[5] = { fn_id, SpvExecutionModeTileShadingRateQCOM,
+			                     (uint32_t)fn->entry->tile_rate[0],
+			                     (uint32_t)fn->entry->tile_rate[1],
+			                     (uint32_t)fn->entry->tile_rate[2] };
+			svsl_spv_inst(&e.spv, &e.spv.exec_modes, SpvOpExecutionMode, rate, 5);
+		} else {
+			uint32_t ops[5] = { fn_id, SpvExecutionModeLocalSize,
+			                    (uint32_t)fn->entry->workgroup[0],
+			                    (uint32_t)fn->entry->workgroup[1],
+			                    (uint32_t)fn->entry->workgroup[2] };
+			svsl_spv_inst(&e.spv, &e.spv.exec_modes, SpvOpExecutionMode, ops, 5);
+		}
 	}
 	for (int32_t a = 0; a < fn->entry->func->attrs.count; a++)
 		if (svsl_str_eq_cstr(fn->entry->func->attrs.items[a].name, "early_depth_stencil") ||
@@ -1498,5 +1633,6 @@ bool svsl_spirv_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 
 	out_blob->words              = svsl_spv_finalize(&e.spv, &out_blob->word_count);
 	out_blob->vs_input_locations = e.vs_input_locations;
+	out_blob->qcom_res_use       = e.qcom_res_use;
 	return !e.failed;
 }

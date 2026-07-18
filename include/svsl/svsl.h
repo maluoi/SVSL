@@ -23,7 +23,7 @@ extern "C" {
 
 // The SKS container version this build reads and writes. One version at a time:
 // the field lets runtimes refuse foreign files, it is not a compatibility knob.
-#define SVSL_SKS_VERSION 10
+#define SVSL_SKS_VERSION 11
 
 // ============================================================================
 // Diagnostics
@@ -251,6 +251,7 @@ typedef struct svsl_sks_file_t {
 	const char                    *name;      // "" when the shader was unnamed
 	uint64_t                       features;  // device-feature mask
 	uint32_t                       wave_size;
+	uint32_t                       tile_apron[2]; // //--apron (VK_QCOM_tile_shading), (0,0) = none
 
 	const svsl_sks_buffer_t       *buffers;        int32_t buffer_count;
 	const svsl_sks_vertex_input_t *vertex_inputs;  int32_t vertex_input_count;

@@ -125,6 +125,10 @@ static const svsl_intrinsic_t intrinsic_table[] = {
 	{ "is_helper_invocation", {0}, svsl_ires_bool, EM(svsl_emit_is_helper) },
 	{ "tile_depth",   {0}, svsl_ires_float_shape, EM(svsl_emit_tile_depth) }, // SPV_EXT_shader_tile_image reads
 	{ "tile_stencil", {0}, svsl_ires_uint,        EM(svsl_emit_tile_stencil) },
+	// VK_QCOM_tile_shading builtin inputs (pixel + compute)
+	{ "tile_offset_qcom",     {0}, svsl_ires_uint2, EM(svsl_emit_builtin_var) },
+	{ "tile_dimension_qcom",  {0}, svsl_ires_uint3, EM(svsl_emit_builtin_var) },
+	{ "tile_apron_size_qcom", {0}, svsl_ires_uint2, EM(svsl_emit_builtin_var) },
 
 	// --- barriers (native + HLSL aliases) ----------------------------------------------
 	{ "workgroup_barrier",          {0}, svsl_ires_void, EM(svsl_emit_barrier_wg) },
@@ -240,8 +244,10 @@ const char *svsl_intrinsic_get_name(int32_t index) {
 
 // --- builtin read-only variables ----------------------------------------------------
 
+// order matches builtin_var_rows[] in emit (SpvBuiltIn + component count)
 static const char *builtin_vars[] = {
 	"subgroup_size", "subgroup_lane_id", "subgroup_id", "num_subgroups",
+	"tile_offset_qcom", "tile_dimension_qcom", "tile_apron_size_qcom",
 };
 
 int32_t svsl_builtin_var_find(svsl_str_t name) {
@@ -277,6 +283,15 @@ static const method_row_t method_table[] = {
 	{ "GetDimensions",      svsl_method_get_dimensions,        -1 },
 	{ "CalculateLevelOfDetail",          svsl_method_query_lod,  0 },
 	{ "CalculateLevelOfDetailUnclamped", svsl_method_query_lod,  1 },
+	// QCOM image processing (VK_QCOM_image_processing[2]); aux = svsl_block_match_
+	{ "SampleWeightedQCOM",      svsl_method_sample_weighted,   -1 },
+	{ "BoxFilterQCOM",           svsl_method_box_filter,        -1 },
+	{ "BlockMatchSADQCOM",       svsl_method_block_match, svsl_block_match_sad },
+	{ "BlockMatchSSDQCOM",       svsl_method_block_match, svsl_block_match_ssd },
+	{ "BlockMatchWindowSADQCOM", svsl_method_block_match, svsl_block_match_window_sad },
+	{ "BlockMatchWindowSSDQCOM", svsl_method_block_match, svsl_block_match_window_ssd },
+	{ "BlockMatchGatherSADQCOM", svsl_method_block_match, svsl_block_match_gather_sad },
+	{ "BlockMatchGatherSSDQCOM", svsl_method_block_match, svsl_block_match_gather_ssd },
 	// aux = the emit atomic op index (svsl_intr_atomic_ order: add,sub,min,max,and,or,xor,exchange);
 	// index 1 (sub) is skipped — images have no InterlockedSub — so the image-atomic path indexes
 	// signed_ops[]/unsigned_ops[] identically to buffer atomics.

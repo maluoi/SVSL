@@ -18,6 +18,7 @@ void test_sema  (void);
 void test_ir    (void);
 void test_sks   (void);
 void test_api   (void);
+void test_qcom  (void);
 void test_corpus(void);
 
 typedef struct {
@@ -35,6 +36,7 @@ static const test_suite_t suites[] = {
 	{ "ir",     test_ir     },
 	{ "sks",    test_sks    },
 	{ "api",    test_api    },
+	{ "qcom",   test_qcom   },
 	{ "corpus", test_corpus },
 };
 

@@ -270,6 +270,27 @@ uint32 s = tile_stencil();              //   ... and stencil
 Tile images are tile memory, not descriptors: `register()` or a binding on one is a
 compile error.
 
+**Tile attachments** (VK_QCOM_tile_shading) — attachments processed per-tile while the
+framebuffer content sits in on-die tile memory. Unlike tile images they keep ordinary
+set/binding descriptors; only their storage class changes (`TileAttachmentQCOM`).
+Declared with the `[tile_attachment]` attribute on a `Texture2D` or `RWTexture2D`
+(2D, single-layer, non-multisampled only). Fragment and compute stages only:
+
+```c
+[tile_attachment] Texture2D<float4>   lastFrame;  // sampled tile reads
+[tile_attachment] RWTexture2D<float4> color;      // storage read/write
+
+uint2 off   = tile_offset_qcom();      // framebuffer coords of the tile's top-left texel
+uint3 dim   = tile_dimension_qcom();   // tile size in pixels; z = layer count
+uint2 apron = tile_apron_size_qcom();  // active apron size (set by the render pass)
+```
+
+Per-tile compute dispatch uses `[tile_shading_rate_qcom(x, y, z)]` in place of
+`[numthreads]` (§6), and fragment entries may opt out of rasterization-order reads
+with `[non_coherent_tile_reads_qcom]`. The render pass apron size itself has no
+shader-side representation — it is renderer state, carried by the `//--apron`
+metadata key (§12).
+
 **Buffers** are declared as blocks (§4) or the HLSL-alias object forms
 `StructuredBuffer<T>` / `RWStructuredBuffer<T>` / `Buffer<T>`.
 
@@ -453,6 +474,13 @@ void my_cs() { ... }
 [early_depth_stencil]             // EarlyFragmentTests execution mode: depth/stencil
 [fragment]                        //   test runs before the shader; shader may not write depth
 float4 my_ps(PSIn i) : SV_Target { ... }
+
+[tile_shading_rate_qcom(2, 2, 1)] // VK_QCOM_tile_shading per-tile dispatch. REPLACES
+void my_tile_cs() { ... }         //   [numthreads] (the implementation derives the
+                                  //   workgroup shape); x/y must be powers of two
+
+[non_coherent_tile_reads_qcom]    // NonCoherentTileAttachmentReadQCOM: tile attachment
+float4 my_tile_ps() : SV_Target;  //   reads may ignore rasterization order (faster)
 ```
 
 ### Specialization constants
@@ -654,10 +682,24 @@ included; there is no `%r = Op` sugar) and terminated by `;`. Operands:
 - `%id` — a named local; first use allocates a fresh id. `%result` (required) carries the
   block's value.
 - an integer literal — a raw 32-bit word (enum values and immediates are numeric).
+- a `"string"` literal — packed as nul-terminated UTF-8 words.
 - `glsl450` — the `GLSL.std.450` ext-instruction import id.
 
+A block can state its own prerequisites: `OpCapability <int>;` and
+`OpExtension "<name>";` instructions are routed to the module's capability/extension
+declaration streams (deduplicated) instead of the function body, so a block using an
+opcode the language has no syntax for is self-contained:
+
+```c
+uint2 t = spirv_asm(uint2) {
+    OpCapability 5055;                    // ShaderClockKHR
+    OpExtension "SPV_KHR_shader_clock";
+    OpReadClockKHR $$uint2 %result $(3u); // Scope Subgroup
+};
+```
+
 The block must define `%result`; its type `T` is asserted (verified downstream by
-`spirv-val`). Operands are SSA values and types only — resources, pointers, string and
+`spirv-val`). Operands are SSA values and types only — resources, pointers,
 64-bit-literal operands, and named enumerants are not yet expressible. A `spirv_asm` block
 is opaque to the optimizer: never merged, reordered, or eliminated. It is SVSL-dialect
 (no glslang equivalent).
@@ -697,7 +739,24 @@ uint32 old = imgU32.InterlockedAdd(coord, 1);   // image atomics (r32u/r32i form
 // Buffers
 Vertex v = vertices[i];
 counts[i] += 1;
+
+// QCOM image processing (VK_QCOM_image_processing / _processing2; Texture2D only)
+float4 w = tex.SampleWeightedQCOM(smp, uv, weights);        // weights: Texture2DArray
+float4 b = tex.BoxFilterQCOM     (smp, uv, boxSize);        // boxSize: float2, in texels
+float4 e = target.BlockMatchSADQCOM(smp, targetCoord, reference, refCoord, blockSize);
+float4 e = target.BlockMatchSSDQCOM(...);                   // coords/blockSize: uint2 texel coords
+float4 e = target.BlockMatchWindowSADQCOM(...);  // + WindowSSD, GatherSAD, GatherSSD
 ```
+
+The QCOM operations infer their SPIR-V decorations from use, like glslang: the
+weights argument becomes a `WeightTextureQCOM`, block-match targets/references become
+`BlockMatchTextureQCOM`, and Window-form samplers become `BlockMatchSamplerQCOM`.
+Decorated resources are **exclusive to their op family** — the runtime binds them
+through dedicated descriptor types and `VK_SAMPLER_CREATE_IMAGE_PROCESSING_BIT_QCOM`
+samplers, so mixing (e.g. `Sample` on a block-match texture, or one sampler used by
+both Window and non-Window forms) is a compile error. A shared sampler serves both
+sampled images of a block match. These methods raise the module to SPIR-V 1.4 (the
+extension's floor); everything else stays 1.3.
 
 ---
 
@@ -840,10 +899,19 @@ Comment annotations attach reflection metadata consumed by StereoKit; format
 //--color:color = 1,1,1,1         // 'color' tag + default value
 //--uv_scale: range(0, 2) = 0.5   // UI hint, stored in the member's `extra` field
 //--wave_size = 32                // required subgroup size (alias of [wave_size(32)])
+//--apron = 2                     // VK_QCOM_tile_shading render-pass apron, W or W, H
 ```
 
 Bare-global initializers (§4.3) provide numeric defaults; `//--` values override and
 extend them. Both are baked into the `.sks` container.
+
+`name`, `wave_size`, and `apron` are the reserved program-level keys; every other key
+must match a parameter or resource. `//--apron` is purely renderer-facing: the apron
+has no shader-side representation (it is `VkRenderPassTileShadingCreateInfoQCOM::
+tileApronSize`, set at render pass creation), so the shader that needs neighborhood
+reads near tile edges declares the size it expects and the renderer applies it.
+Shaders read the active size back via `tile_apron_size_qcom()` (§3.5). Setting it in
+a shader with no tile-shading usage warns.
 
 ---
 
@@ -903,11 +971,18 @@ attribute aliases, and legacy semantics are accepted silently (their hints are b
 | `TileImage`, `tile_depth`, `tile_stencil` | TileImageColorReadAccessEXT / DepthReadAccessEXT / StencilReadAccessEXT + SPV_EXT_shader_tile_image |
 | `[wave_size(N)]` / `//--wave_size` | *(not in SPIR-V — carried in `.sks` reflection, applied via VK_EXT_subgroup_size_control at pipeline creation)* |
 | `[early_depth_stencil]`, `SV_Depth*Equal`, `invariant` | (none — execution modes / decorations) |
+| `SampleWeightedQCOM`, `BoxFilterQCOM`, `BlockMatchSAD/SSDQCOM` | TextureSampleWeightedQCOM / TextureBoxFilterQCOM / TextureBlockMatchQCOM + SPV_QCOM_image_processing (module → SPIR-V 1.4) |
+| `BlockMatchWindow*` / `BlockMatchGather*` | + TextureBlockMatch2QCOM + SPV_QCOM_image_processing2 |
+| `[tile_attachment]`, `tile_*_qcom()` builtins, `[tile_shading_rate_qcom]`, `[non_coherent_tile_reads_qcom]` | TileShadingQCOM + SPV_QCOM_tile_shading |
+| `//--apron` | *(not in SPIR-V — renderer state: VkRenderPassTileShadingCreateInfoQCOM::tileApronSize)* |
 
-Target environment: Vulkan 1.1 / SPIR-V 1.3, fixed. The `.sks` container additionally
+Target environment: Vulkan 1.1 / SPIR-V 1.3, fixed — except QCOM image processing,
+whose SPIR-V extension requires 1.4: those modules are emitted as SPIR-V 1.4 with the
+full-interface entry point 1.4 mandates (runtimes need Vulkan 1.2+ or VK_KHR_spirv_1_4,
+which every VK_QCOM_image_processing device has). The `.sks` container additionally
 carries a 64-bit device-feature mask derived from the emitted SPIR-V, so runtimes can
 answer "can this device run this shader?" before parsing the blob — see
-docs/DECISIONS.md (SKS v9 additions).
+docs/DECISIONS.md (SKS v9 additions). QCOM features map to bits 17–19.
 
 ---
 

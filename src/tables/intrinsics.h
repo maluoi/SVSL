@@ -31,6 +31,8 @@ typedef enum svsl_ires_ {
 	svsl_ires_int_shape,  // int with G's shape
 	svsl_ires_float_shape,// float32 with G's shape
 	svsl_ires_uint,       // uint scalar
+	svsl_ires_uint2,
+	svsl_ires_uint3,
 	svsl_ires_uint4,
 	svsl_ires_float2,
 	svsl_ires_float4,
@@ -135,6 +137,20 @@ typedef enum svsl_method_ {
 	svsl_method_get_dimensions,
 	svsl_method_atomic,       // image atomics: b = atomic op
 	svsl_method_query_lod,    // CalculateLevelOfDetail: b = 1 for the unclamped variant
+	svsl_method_sample_weighted, // QCOM: tex.SampleWeightedQCOM(smp, uv, weights)
+	svsl_method_box_filter,      // QCOM: tex.BoxFilterQCOM(smp, uv, boxSize)
+	svsl_method_block_match,     // QCOM block-match family: b = svsl_block_match_
 } svsl_method_;
+
+// block-match variant (the aux of svsl_method_block_match); the Window and
+// Gather forms come from SPV_QCOM_image_processing2
+typedef enum svsl_block_match_ {
+	svsl_block_match_sad = 0,
+	svsl_block_match_ssd,
+	svsl_block_match_window_sad,
+	svsl_block_match_window_ssd,
+	svsl_block_match_gather_sad,
+	svsl_block_match_gather_ssd,
+} svsl_block_match_;
 
 int32_t svsl_method_find(svsl_str_t name, int32_t *out_channel_or_op); // svsl_method_ or -1

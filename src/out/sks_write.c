@@ -42,7 +42,9 @@ static void wbind(sks_t *w, uint16_t slot, uint8_t stage_bits, uint8_t register_
 
 // skr_register_ values (sksc_file.h)
 enum { reg_default = 0, reg_vertex, reg_index, reg_constant, reg_texture,
-       reg_read_buffer, reg_readwrite, reg_readwrite_tex, reg_input_attachment };
+       reg_read_buffer, reg_readwrite, reg_readwrite_tex, reg_input_attachment,
+       // v11: QCOM descriptor forms (image processing + tile shading)
+       reg_sample_weight, reg_block_match, reg_tile_sampled, reg_tile_storage };
 // sksc_shader_var_ values
 enum { var_none = 0, var_int, var_uint, var_uint8, var_float, var_double };
 // skr_vertex_fmt_ values
@@ -174,6 +176,14 @@ enum {
 	sks_feat_scalar_layout    = 16, // VK_EXT_scalar_block_layout: a pack1/pack8 buffer
 	                                // layout breaks core relaxed rules. Not derivable
 	                                // from the SPIR-V (no capability) — sema flags it.
+	// VK_QCOM_image_processing carries one Vulkan feature per op family, so
+	// each gets its own bit — a runtime that only enables textureBoxFilter can
+	// still pass box-filter shaders
+	sks_feat_qcom_sample_weighted = 17, // TextureSampleWeightedQCOM
+	sks_feat_qcom_box_filter      = 18, // TextureBoxFilterQCOM
+	sks_feat_qcom_block_match     = 19, // TextureBlockMatchQCOM
+	sks_feat_qcom_image_proc2     = 20, // VK_QCOM_image_processing2 (+SPV_QCOM_image_processing2)
+	sks_feat_qcom_tile_shading    = 21, // VK_QCOM_tile_shading (+SPV_QCOM_tile_shading)
 	sks_feat_unknown          = 63, // capability/extension with no assigned bit
 };
 
@@ -208,18 +218,28 @@ static const feat_row_t feature_caps[] = {
 	{ SpvCapabilityTileImageStencilReadAccessEXT,    sks_feat_tile_image },
 	{ SpvCapabilityAtomicFloat32AddEXT,              sks_feat_float_atomics },
 	{ SpvCapabilityAtomicFloat32MinMaxEXT,           sks_feat_float_atomics },
+	{ SpvCapabilityTextureSampleWeightedQCOM,        sks_feat_qcom_sample_weighted },
+	{ SpvCapabilityTextureBoxFilterQCOM,             sks_feat_qcom_box_filter },
+	{ SpvCapabilityTextureBlockMatchQCOM,            sks_feat_qcom_block_match },
+	{ SpvCapabilityTextureBlockMatch2QCOM,           sks_feat_qcom_image_proc2 },
+	{ SpvCapabilityTileShadingQCOM,                  sks_feat_qcom_tile_shading },
 };
 // capabilities every Vulkan 1.1 runtime satisfies — no bit, never unknown
 static const uint32_t baseline_caps[] = {
 	SpvCapabilityShader, SpvCapabilityImageQuery, SpvCapabilitySampled1D,
 	SpvCapabilityImage1D, SpvCapabilityInputAttachment, SpvCapabilityDerivativeControl,
 };
+// bit 0xFF = the extension is known but sets no bit itself: its capabilities
+// carry the precise per-op bits (image processing splits into three)
 static const struct { const char *name; uint8_t bit; } feature_exts[] = {
 	{ "SPV_KHR_8bit_storage",               sks_feat_storage8 },
 	{ "SPV_EXT_demote_to_helper_invocation", sks_feat_demote },
 	{ "SPV_EXT_shader_tile_image",          sks_feat_tile_image },
 	{ "SPV_EXT_shader_atomic_float_add",    sks_feat_float_atomics },
 	{ "SPV_EXT_shader_atomic_float_min_max", sks_feat_float_atomics },
+	{ "SPV_QCOM_image_processing",          0xFF },
+	{ "SPV_QCOM_image_processing2",         sks_feat_qcom_image_proc2 },
+	{ "SPV_QCOM_tile_shading",              sks_feat_qcom_tile_shading },
 };
 
 // Writes one stage's size + SPIR-V. The runtime loads entry points by fixed
@@ -281,7 +301,7 @@ static uint64_t feature_bits(const svsl_spirv_blob_t *blob) {
 			bool        known = false;
 			for (size_t k = 0; k < sizeof(feature_exts) / sizeof(feature_exts[0]); k++)
 				if (strncmp(name, feature_exts[k].name, (size_t)(word_count - 1) * 4) == 0) {
-					bits |= 1ull << feature_exts[k].bit;
+					if (feature_exts[k].bit != 0xFF) bits |= 1ull << feature_exts[k].bit;
 					known = true;
 				}
 			if (!known) bits |= 1ull << sks_feat_unknown;
@@ -420,6 +440,18 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 	wi32(&w, ops_v[0]); wi32(&w, ops_v[1]); wi32(&w, ops_v[2]);
 	wi32(&w, ops_p[0]); wi32(&w, ops_p[1]); wi32(&w, ops_p[2]);
 	wu32(&w, (uint32_t)prog->wave_size);
+	wu32(&w, (uint32_t)prog->tile_apron[0]); // v11: //--apron → render pass tileApronSize
+	wu32(&w, (uint32_t)prog->tile_apron[1]);
+
+	// QCOM image-processing classification, recorded per stage by the emitters;
+	// any stage's classified use decides the resource's register form
+	uint8_t *qcom_use = svsl_arena_alloc(arena, (size_t)(prog->resources.count > 0 ? prog->resources.count : 1));
+	for (int32_t f = 0; f < module->func_count; f++)
+		if (blobs[f].qcom_res_use)
+			for (int32_t r = 0; r < prog->resources.count; r++)
+				if (blobs[f].qcom_res_use[r] != svsl_qcom_use_none &&
+				    (qcom_use[r] == svsl_qcom_use_none || qcom_use[r] == svsl_qcom_use_plain))
+					qcom_use[r] = blobs[f].qcom_res_use[r];
 
 	for (int32_t bi = 0; bi < buffer_count; bi++) {
 		const svsl_buffer_t *buf = &prog->buffers.items[buffer_indices[bi]];
@@ -470,6 +502,11 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 			res->kind == svsl_res_structured    ? reg_read_buffer :
 			res->kind == svsl_res_rw_structured ? reg_readwrite :
 			res->kind == svsl_res_image         ? reg_readwrite_tex : reg_input_attachment;
+		// v11 QCOM forms: dedicated descriptor types / tile-attachment binding
+		if (res->tile_attachment)
+			reg = res->kind == svsl_res_image ? reg_tile_storage : reg_tile_sampled;
+		else if (qcom_use[index] == svsl_qcom_use_weight)      reg = reg_sample_weight;
+		else if (qcom_use[index] == svsl_qcom_use_block_match) reg = reg_block_match;
 		wstr(&w, res->name, 32);
 		wstr(&w, res->value, 64);
 		wstr(&w, res->tags, 64);
@@ -477,15 +514,25 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 		wu32(&w, res->element_size);
 		{
 			uint8_t shape = resource_shape(&prog->types, res);
-			// textures fused with a comparison sampler mark bit 5 themselves
+			// textures fused with a comparison sampler mark bit 5 themselves;
+			// a fused QCOM image-processing sampler marks bit 6 the same way
 			if (res->kind == svsl_res_texture && res->sampler_slot >= 0)
 				for (int32_t k = 0; k < prog->resources.count; k++) {
 					const svsl_resource_t *smp = &prog->resources.items[k];
-					if (smp->kind == svsl_res_sampler && smp->bind.slot == res->sampler_slot &&
-					    smp->bind.space == res->bind.space &&
-					    svsl_type_get(&prog->types, smp->type)->is_comparison)
+					if (smp->kind != svsl_res_sampler || smp->bind.slot != res->sampler_slot ||
+					    smp->bind.space != res->bind.space) continue;
+					if (svsl_type_get(&prog->types, smp->type)->is_comparison)
 						shape |= 1 << 5;
+					if (qcom_use[k] == svsl_qcom_use_ip_sampler ||
+					    qcom_use[k] == svsl_qcom_use_bm_window_sampler)
+						shape |= 1 << 6;
 				}
+			// standalone samplers used by QCOM image-processing ops need the
+			// IMAGE_PROCESSING create flag
+			if (res->kind == svsl_res_sampler &&
+			    (qcom_use[index] == svsl_qcom_use_ip_sampler ||
+			     qcom_use[index] == svsl_qcom_use_bm_window_sampler))
+				shape |= 1 << 6;
 			const svsl_type_t *rt = svsl_type_get(&prog->types, res->type);
 			if (rt->kind == svsl_type_array) rt = svsl_type_get(&prog->types, rt->elem);
 			uint8_t format = rt->kind == svsl_type_image
