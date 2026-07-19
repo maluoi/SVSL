@@ -93,13 +93,15 @@ Image2D     <float4>        img;  // format inferred from the element type
 Image2D     <float4, rgba8> img8; // explicit format
 Image3D     <float4, r32f>  density;
 ImageCube   <float4>        cubeStore;
-Image2DArray<uint32, r32u>  counters;
+Image2DArray<uint32, r32ui> counters;
 ```
 
-`Image1D/2D/3D/Cube` plus the `*Array` variants exist. Valid format tokens (from the format
-table): `rgba32f rgba16f rg32f rg16f r32f r16f rgba8 rgba8_snorm r11g11b10f rgba16 rgb10a2
-rg16 rg8 r16 r8 rgba32i rgba16i rgba8i r32i rgba32u rgba16u rgba8u r32u`. Formats outside
-the core set infer `StorageImageExtendedFormats` automatically.
+`Image1D/2D/3D/Cube` plus the `*Array` variants exist. Format tokens are glslang's canonical
+layout-format names — the exact spellings `skshaderc` accepts in `[[vk::image_format]]`:
+`rgba32f rgba16f rg32f rg16f r11f_g11f_b10f r32f r16f rgba16 rgb10_a2 rgba8 rg16 rg8 r16 r8
+rgba16_snorm rgba8_snorm rg16_snorm rg8_snorm r16_snorm r8_snorm rgba32i rgba16i rgba8i rg32i
+rg16i rg8i r32i r16i r8i rgba32ui rgba16ui rgba8ui rg32ui rg16ui rgb10_a2ui rg8ui r32ui r16ui
+r8ui`. Formats outside the core set infer `StorageImageExtendedFormats` automatically.
 
 The HLSL spelling is `RWTexture2D<T>` plus a `[[vk::image_format("rgba8")]]` attribute:
 

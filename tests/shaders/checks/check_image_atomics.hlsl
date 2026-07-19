@@ -1,7 +1,7 @@
 // Image atomics: every op must map to the right OpAtomic* (regression for the
 // method-table aux vs signed_ops off-by-one that miscompiled all ops but Add).
 Image2D<int,  r32i>  imgS;
-Image2D<uint, r32u> imgU;
+Image2D<uint, r32ui> imgU;
 
 [numthreads(1, 1, 1)]
 void cs(uint3 id : SV_DispatchThreadID) {

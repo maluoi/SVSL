@@ -237,8 +237,9 @@ Image2D<float4>         img;            // format inferred/unknown
 Image2D<float4, rgba8>  img8;           // explicit format
 Image3D<T,F>  ImageCube<T,F>  Image1DArray<T,F>  Image2DArray<T,F>  ImageCubeArray<T,F>
 ```
-Format names follow SPIR-V image formats, lowercase: `rgba32f rgba16f rg32f r32f rgba8
-rgba8_snorm r11g11b10f rgba16 rgba32i rgba32u r32i r32u ...`. `RWTexture*<T>` = HLSL
+Format names are glslang's canonical layout-format spellings — what `skshaderc` accepts:
+`rgba32f rgba16f rg32f r32f rgba8 rgba8_snorm r11f_g11f_b10f rgb10_a2 rgba16 rgba32i rgba32ui
+r32i r32ui r16ui r8ui ...` (full set in `src/tables/formats.c`). `RWTexture*<T>` = HLSL
 aliases of `Image*<T>`.
 
 **Subpass inputs** (input attachments) — tile-local reads of a previous render-pass
@@ -734,7 +735,7 @@ verts.GetDimensions(count, stride);        // structured buffers: element count 
 float4 v = img.Load(int2(x, y));
 img.Store(int2(x, y), v);
 img[int2(x, y)] = v;                       // Store shorthand
-uint32 old = imgU32.InterlockedAdd(coord, 1);   // image atomics (r32u/r32i formats)
+uint32 old = imgU32.InterlockedAdd(coord, 1);   // image atomics (r32ui/r32i formats)
 
 // Buffers
 Vertex v = vertices[i];

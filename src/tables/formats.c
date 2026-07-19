@@ -7,19 +7,38 @@ typedef struct format_row_t {
 	uint32_t    format;
 } format_row_t;
 
+// Names are glslang's canonical layout-format strings (getLayoutFormatString),
+// the exact spellings skshaderc accepts in [[vk::image_format("...")]]. r64ui/
+// r64i are omitted: they need SpvCapabilityInt64ImageEXT, which emit doesn't
+// yet produce, and accepting the name without the capability would silently
+// emit invalid SPIR-V.
 static const format_row_t rows[] = {
-	{ "rgba32f", SpvImageFormatRgba32f },  { "rgba16f", SpvImageFormatRgba16f },
-	{ "rg32f", SpvImageFormatRg32f },      { "rg16f", SpvImageFormatRg16f },
-	{ "r32f", SpvImageFormatR32f },        { "r16f", SpvImageFormatR16f },
-	{ "rgba8", SpvImageFormatRgba8 },      { "rgba8_snorm", SpvImageFormatRgba8Snorm },
-	{ "r11g11b10f", SpvImageFormatR11fG11fB10f },
-	{ "rgba16", SpvImageFormatRgba16 },    { "rgb10a2", SpvImageFormatRgb10A2 },
-	{ "rg16", SpvImageFormatRg16 },        { "rg8", SpvImageFormatRg8 },
-	{ "r16", SpvImageFormatR16 },          { "r8", SpvImageFormatR8 },
-	{ "rgba32i", SpvImageFormatRgba32i },  { "rgba16i", SpvImageFormatRgba16i },
-	{ "rgba8i", SpvImageFormatRgba8i },    { "r32i", SpvImageFormatR32i },
-	{ "rgba32u", SpvImageFormatRgba32ui }, { "rgba16u", SpvImageFormatRgba16ui },
-	{ "rgba8u", SpvImageFormatRgba8ui },   { "r32u", SpvImageFormatR32ui },
+	// float
+	{ "rgba32f", SpvImageFormatRgba32f },       { "rgba16f", SpvImageFormatRgba16f },
+	{ "rg32f", SpvImageFormatRg32f },           { "rg16f", SpvImageFormatRg16f },
+	{ "r11f_g11f_b10f", SpvImageFormatR11fG11fB10f },
+	{ "r32f", SpvImageFormatR32f },             { "r16f", SpvImageFormatR16f },
+	// unorm
+	{ "rgba16", SpvImageFormatRgba16 },         { "rgb10_a2", SpvImageFormatRgb10A2 },
+	{ "rgba8", SpvImageFormatRgba8 },           { "rg16", SpvImageFormatRg16 },
+	{ "rg8", SpvImageFormatRg8 },               { "r16", SpvImageFormatR16 },
+	{ "r8", SpvImageFormatR8 },
+	// snorm
+	{ "rgba16_snorm", SpvImageFormatRgba16Snorm }, { "rgba8_snorm", SpvImageFormatRgba8Snorm },
+	{ "rg16_snorm", SpvImageFormatRg16Snorm },  { "rg8_snorm", SpvImageFormatRg8Snorm },
+	{ "r16_snorm", SpvImageFormatR16Snorm },    { "r8_snorm", SpvImageFormatR8Snorm },
+	// signed int
+	{ "rgba32i", SpvImageFormatRgba32i },       { "rgba16i", SpvImageFormatRgba16i },
+	{ "rgba8i", SpvImageFormatRgba8i },         { "rg32i", SpvImageFormatRg32i },
+	{ "rg16i", SpvImageFormatRg16i },           { "rg8i", SpvImageFormatRg8i },
+	{ "r32i", SpvImageFormatR32i },             { "r16i", SpvImageFormatR16i },
+	{ "r8i", SpvImageFormatR8i },
+	// unsigned int
+	{ "rgba32ui", SpvImageFormatRgba32ui },     { "rgba16ui", SpvImageFormatRgba16ui },
+	{ "rgba8ui", SpvImageFormatRgba8ui },       { "rg32ui", SpvImageFormatRg32ui },
+	{ "rg16ui", SpvImageFormatRg16ui },         { "rgb10_a2ui", SpvImageFormatRgb10a2ui },
+	{ "rg8ui", SpvImageFormatRg8ui },           { "r32ui", SpvImageFormatR32ui },
+	{ "r16ui", SpvImageFormatR16ui },           { "r8ui", SpvImageFormatR8ui },
 };
 
 bool svsl_image_format_find(svsl_str_t name, uint32_t *out_spv) {
