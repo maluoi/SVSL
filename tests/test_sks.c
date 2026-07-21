@@ -426,6 +426,9 @@ static bool compare_with_reference(svsl_arena_t *arena, const char *shader) {
 	CMP(ref.buffer_count == ours.buffer_count, "buffer_count");
 	CMP(ref.resource_count == ours.resource_count, "resource_count");
 	CMP(ref.vertex_input_count == ours.vertex_input_count, "vertex_input_count");
+	// the feature-classifier tables (sks_write.c vs sksc.cpp) must never drift:
+	// a divergence here is the bit-63 "unrecognized capability" bug class
+	CMP(ref.features == ours.features, "features");
 	for (int32_t v = 0; v < ref.vertex_input_count && v < 16; v++)
 		CMP(memcmp(ref.vins[v], ours.vins[v], 11) == 0, "vertex input");
 	for (uint32_t b = 0; b < ref.buffer_count && b < 8; b++) {

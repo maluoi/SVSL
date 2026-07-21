@@ -17,6 +17,7 @@
 #include "../tables/formats.h"
 #include "../sema/layout.h"
 #include "../sema/const_eval.h"
+#include "../ir/ir_operands.h"
 #include "../front/ast.h"
 #include "../util/array.h"
 #include "../../vendor/spirv.h"
@@ -51,6 +52,17 @@ typedef struct wgsl_t {
 	uint8_t *struct_used;    // per prog->types.structs entry
 	int32_t *sampler_pair;   // standalone sampler → first texture it samples, -1
 	const char **const_texts;// per const-global: materialized initializer, NULL = unused/int
+	// WGSL atomics are type-level: these mark the storage leaves that must
+	// declare atomic<T> (and whose plain loads/stores become atomicLoad/Store)
+	uint8_t  *res_atomic;    // object-form structured buffer: its elements
+	uint8_t  *wg_atomic;     // workgroup variable (scalar or array-of-scalar)
+	uint8_t **buf_atomic;    // per buffer → per member
+
+	// single-use inlining: a value referenced exactly once folds into its use
+	// site instead of a `let _N` (see inline_analyze) — inline_expr holds its
+	// expression text once emission reaches it
+	uint8_t     *inline_ok;
+	const char **inline_expr;
 	bool     uses_view_index;
 	bool     uses_f16;
 	bool     uses_derivatives;
@@ -65,13 +77,17 @@ typedef struct wgsl_t {
 // ---- text building ---------------------------------------------------------------
 
 static const char *sfmt(wgsl_t *e, const char *fmt, ...) {
+	// fast path: most expressions are short, so format once into a stack
+	// buffer and copy; only oversized results pay the measure+format double
+	char    stack[256];
 	va_list args, args2;
 	va_start(args, fmt);
 	va_copy(args2, args);
-	int32_t n = vsnprintf(NULL, 0, fmt, args);
+	int32_t n = vsnprintf(stack, sizeof(stack), fmt, args);
 	va_end(args);
 	char *buf = svsl_arena_alloc(e->arena, (size_t)n + 1);
-	vsnprintf(buf, (size_t)n + 1, fmt, args2);
+	if (n < (int32_t)sizeof(stack)) memcpy(buf, stack, (size_t)n + 1);
+	else                            vsnprintf(buf, (size_t)n + 1, fmt, args2);
 	va_end(args2);
 	return buf;
 }
@@ -171,6 +187,7 @@ static const char *struct_name_w(wgsl_t *e, int32_t struct_index) {
 }
 
 static const char *type_name_w(wgsl_t *e, svsl_type_id_t id, svsl_loc_t loc);
+static bool        ptr_is_atomic(wgsl_t *e, uint32_t id);
 
 // one folded scalar as a WGSL literal; false when the value can't be spelled
 static bool wgsl_scalar_literal(wgsl_t *e, svsl_scalar_ scalar, double v, const char **out) {
@@ -436,6 +453,16 @@ static const char *paired_sampler_name(wgsl_t *e, int32_t tex_res) {
 	return smp >= 0 ? res_name(e, smp) : sfmt(e, "%s_sampler", res_name(e, tex_res));
 }
 
+// Whether a texture binds as texture_depth_* — decided by its paired sampler's
+// DECLARED type, because the runtime derives the bind group layout from that
+// declaration (meta shape bit 5), never from per-stage usage. Usage that
+// contradicts the declaration skips the stage in the prescan.
+static bool tex_is_depth(wgsl_t *e, int32_t tex_res) {
+	int32_t smp = tex_paired_sampler(e, tex_res);
+	return smp >= 0 &&
+	       svsl_type_get(&e->prog->types, e->prog->resources.items[smp].type)->is_comparison;
+}
+
 // resolves the sampler operand of a tex op: an explicit sampler resource, or
 // the texture's paired sampler
 static const char *sampler_ref(wgsl_t *e, int32_t tex_res, uint32_t sampler_res) {
@@ -582,6 +609,7 @@ static const char *lvalue(wgsl_t *e, uint32_t id, svsl_type_id_t *out_type) {
 
 static const char *val(wgsl_t *e, uint32_t id) {
 	const svsl_ir_inst_t *in = &e->fn->insts.items[id];
+	if (e->inline_expr && e->inline_expr[id]) return e->inline_expr[id];
 	switch (in->op) {
 	case svsl_ir_const:      return const_str(e, in);
 	case svsl_ir_spec_const: return ident(e, e->prog->spec_consts.items[in->args[0]].name);
@@ -666,21 +694,69 @@ static void prescan(wgsl_t *e) {
 			break;
 		case svsl_ir_spirv_asm:
 			skip(e, in->loc, "inline SPIR-V assembly is inherently untranslatable"); break;
-		case svsl_ir_div: { // 0.0/0.0-style constant folds are WGSL creation errors
-			const svsl_ir_inst_t *da = &fn->insts.items[in->args[0]];
-			const svsl_ir_inst_t *db = &fn->insts.items[in->args[1]];
-			const svsl_type_t    *dt = svsl_type_get(&prog->types, in->type);
-			if (da->op == svsl_ir_const && db->op == svsl_ir_const &&
-			    (dt->scalar == svsl_scalar_float32 || dt->scalar == svsl_scalar_half) &&
-			    (db->args[0] & 0x7FFFFFFFu) == 0)
-				skip(e, in->loc, "a float division by constant zero, which WGSL rejects at "
-				     "shader-creation time — compute the NaN/Inf at runtime instead");
+		case svsl_ir_atomic: {
+			if ((in->args[3] >> 8) != 0) {
+				skip(e, in->loc, "explicit atomic memory orders beyond relaxed have no WGSL "
+				     "equivalent (WGSL atomics use a single implicit ordering)");
+				break;
+			}
+			const svsl_type_t *vt = svsl_type_get(&prog->types, in->type);
+			if (vt->kind != svsl_type_scalar ||
+			    (vt->scalar != svsl_scalar_int32 && vt->scalar != svsl_scalar_uint32)) {
+				skip(e, in->loc, "WGSL atomics only exist for 32-bit integers (no float atomics)");
+				break;
+			}
+			// resolve the pointer to its storage root and mark the leaf atomic
+			uint32_t p = in->args[0];
+			while (fn->insts.items[p].op == svsl_ir_chain) p = fn->insts.items[p].args[0];
+			const svsl_ir_inst_t *root = &fn->insts.items[p];
+			if (root->op != svsl_ir_ptr) {
+				skip(e, in->loc, "an atomic on function-local memory"); break;
+			}
+			switch ((svsl_ref_)root->args[0]) {
+			case svsl_ref_resource: {
+				const svsl_type_t *rt = svsl_type_get(&prog->types,
+				                                      prog->resources.items[root->args[1]].type);
+				const svsl_type_t *et = svsl_type_get(&prog->types, rt->elem);
+				if (et->kind != svsl_type_scalar) {
+					skip(e, in->loc, "atomics into structured-buffer struct members aren't "
+					     "supported yet — use a scalar element type");
+					break;
+				}
+				e->res_atomic[root->args[1]] = 1;
+				break;
+			}
+			case svsl_ref_buffer_member: {
+				const svsl_buffer_t *buf = &prog->buffers.items[root->args[1]];
+				const svsl_type_t   *mt  = svsl_type_get(&prog->types,
+				                                         buf->members.items[root->args[2]].type);
+				if (mt->kind == svsl_type_array) mt = svsl_type_get(&prog->types, mt->elem);
+				if (mt->kind != svsl_type_scalar) {
+					skip(e, in->loc, "atomics into nested struct members aren't supported yet");
+					break;
+				}
+				e->buf_atomic[root->args[1]][root->args[2]] = 1;
+				break;
+			}
+			case svsl_ref_workgroup: {
+				const svsl_type_t *wt = svsl_type_get(&prog->types,
+				                                      prog->workgroup_vars.items[root->args[1]].type);
+				if (wt->kind == svsl_type_array) wt = svsl_type_get(&prog->types, wt->elem);
+				if (wt->kind != svsl_type_scalar) {
+					skip(e, in->loc, "atomics into workgroup struct members aren't supported yet");
+					break;
+				}
+				e->wg_atomic[root->args[1]] = 1;
+				break;
+			}
+			default:
+				skip(e, in->loc, "an atomic on a storage kind the WGSL backend can't retype");
+				break;
+			}
 			break;
 		}
-		case svsl_ir_atomic:
 		case svsl_ir_image_atomic:
-			skip(e, in->loc, "atomics aren't in the WGSL backend yet (WGSL needs atomic<T> "
-			     "declarations; planned)"); break;
+			skip(e, in->loc, "image atomics aren't in core WebGPU"); break;
 		case svsl_ir_ptr:
 			if ((svsl_ref_)in->args[0] == svsl_ref_buffer_member) {
 				const svsl_buffer_t *buf = &prog->buffers.items[in->args[1]];
@@ -760,14 +836,25 @@ static void prescan(wgsl_t *e) {
 	}
 	if (e->skipped) return;
 
-	// a texture both compare-sampled and plainly sampled must be two WGSL types at once
-	for (int32_t r = 0; r < prog->resources.count; r++)
-		if (e->res_cmp[r] == 3) {
-			skip(e, prog->resources.items[r].loc, "texture '%.*s' is used with both SampleCmp and "
-			     "regular sampling; WGSL depth textures can't do both — split it into two textures",
+	// depth-ness is a declaration (the runtime builds layouts from the paired
+	// sampler's type), so per-stage usage must agree with it
+	for (int32_t r = 0; r < prog->resources.count; r++) {
+		if (!e->res_used[r] || prog->resources.items[r].kind != svsl_res_texture) continue;
+		bool depth = tex_is_depth(e, r);
+		if ((e->res_cmp[r] & 1) && !depth) {
+			skip(e, prog->resources.items[r].loc, "texture '%.*s' is compare-sampled but has no "
+			     "paired comparison sampler (same s-register); the WebGPU runtime binds depth "
+			     "views by that pairing", prog->resources.items[r].name.len,
+			     prog->resources.items[r].name.ptr);
+			return;
+		}
+		if ((e->res_cmp[r] & 2) && depth) {
+			skip(e, prog->resources.items[r].loc, "texture '%.*s' is paired with a comparison "
+			     "sampler but also plain-sampled; a WGSL depth texture can't do both",
 			     prog->resources.items[r].name.len, prog->resources.items[r].name.ptr);
 			return;
 		}
+	}
 
 	// buffers: layout gauge + used-resource types
 	for (int32_t b = 0; b < prog->buffers.count && !e->skipped; b++)
@@ -885,12 +972,17 @@ static const char *splat(wgsl_t *e, svsl_type_id_t type, const char *scalar, svs
 	return sfmt(e, "%s(%s)", scalar_name(e, t->scalar, loc), scalar);
 }
 
-// argument list "a, b, c" from the instruction's aux operands
+// argument list "a, b, c" from the instruction's aux operands; built linearly —
+// re-formatting the accumulated prefix per operand was quadratic
 static const char *aux_args(wgsl_t *e, const svsl_ir_inst_t *in) {
-	const char *args = "";
-	for (uint32_t i = 0; i < in->aux_count; i++)
-		args = sfmt(e, "%s%s%s", args, i ? ", " : "", val(e, e->fn->aux.items[in->aux + i]));
-	return args;
+	svsl_array_t(char) buf = {0};
+	for (uint32_t i = 0; i < in->aux_count; i++) {
+		if (i) { svsl_array_push(e->arena, &buf, ','); svsl_array_push(e->arena, &buf, ' '); }
+		for (const char *c = val(e, e->fn->aux.items[in->aux + i]); *c; c++)
+			svsl_array_push(e->arena, &buf, *c);
+	}
+	svsl_array_push(e->arena, &buf, '\0');
+	return buf.items;
 }
 
 // returns the value expression for an intrinsic, or NULL when it emitted a
@@ -944,7 +1036,21 @@ static const char *intrinsic_expr(wgsl_t *e, const svsl_ir_inst_t *in) {
 	case svsl_emit_frexp_exp:  return sfmt(e, "%s(frexp(%s).exp)", type_name_w(e, in->type, in->loc), a0);
 	case svsl_emit_any:        return sfmt(e, "any(%s)", a0);
 	case svsl_emit_all:        return sfmt(e, "all(%s)", a0);
-	case svsl_emit_bitcast:    return sfmt(e, "bitcast<%s>(%s)", type_name_w(e, in->type, in->loc), a0);
+	case svsl_emit_bitcast: {
+		// asfloat of constant NaN/Inf bits is a WGSL shader-creation error when
+		// const-evaluated; routing the bits through a var defers the bitcast to
+		// runtime, where the value is legal — exactly what the source intends
+		const svsl_type_t    *rt  = svsl_type_get(&e->prog->types, in->type);
+		const svsl_ir_inst_t *src = a_count > 0 ? &e->fn->insts.items[e->fn->aux.items[in->aux]] : NULL;
+		if (src && src->op == svsl_ir_const && rt->kind == svsl_type_scalar &&
+		    (rt->scalar == svsl_scalar_float32 || rt->scalar == svsl_scalar_half) &&
+		    (src->args[0] & 0x7F800000u) == 0x7F800000u) {
+			int32_t idx = (int32_t)(in - e->fn->insts.items);
+			wln(e, "var _bc%d : %s = %s;", idx, type_name_w(e, src->type, in->loc), a0);
+			return sfmt(e, "bitcast<%s>(_bc%d)", type_name_w(e, in->type, in->loc), idx);
+		}
+		return sfmt(e, "bitcast<%s>(%s)", type_name_w(e, in->type, in->loc), a0);
+	}
 	case svsl_emit_f16tof32: {
 		const svsl_type_t *t = svsl_type_get(&e->prog->types, in->type);
 		if (t->kind == svsl_type_vector) { skip(e, in->loc, "vector f16tof32 isn't mapped yet"); return "0"; }
@@ -999,6 +1105,8 @@ static const char *tex_expr(wgsl_t *e, const svsl_ir_inst_t *in) {
 	if (ot->kind == svsl_type_buffer) {
 		if (method == svsl_method_get_dimensions)
 			return sfmt(e, "arrayLength(&%s)", res_name(e, tex));
+		if (e->res_atomic[tex]) // atomic-retyped elements read through atomicLoad
+			return sfmt(e, "atomicLoad(&%s[%s])", res_name(e, tex), a0);
 		return sfmt(e, "%s[%s]", res_name(e, tex), a0);
 	}
 
@@ -1046,23 +1154,36 @@ static const char *tex_expr(wgsl_t *e, const svsl_ir_inst_t *in) {
 		if (channel == 4) // GatherCmp
 			return shrink4(e, sfmt(e, "textureGatherCompare(%s, %s, %s, %s)", t, s, uv, a1), in->type);
 		return shrink4(e, sfmt(e, "textureGather(%d, %s, %s, %s)", channel < 0 ? 0 : channel, t, s, uv), in->type);
-	case svsl_method_load: { // fetch: last coordinate component is the mip / sample
-		if (ot->arrayed) { skip(e, in->loc, "Load on array textures isn't mapped yet"); return "0"; }
-		if (ot->multisampled)
+	case svsl_method_load: { // fetch: coordinate packs [dims..., layer,] mip/sample
+		static const char *csw[4]  = { "", ".x", ".xy", ".xyz" };
+		static const char *comp[5] = { ".x", ".y", ".z", ".w", "" };
+		if (ot->multisampled) {
+			if (ot->arrayed) { skip(e, in->loc, "WGSL has no multisampled array textures"); return "0"; }
 			return shrink4(e, sfmt(e, "textureLoad(%s, %s, %s)", t, a0, a1), in->type);
+		}
 		int32_t n = ot->dim == svsl_texdim_1d ? 1 : ot->dim == svsl_texdim_3d ? 3 : 2;
-		static const char *coord_sw[4] = { "", ".x", ".xy", ".xyz" };
-		static const char *mip_sw[4]   = { "", ".y", ".z", ".w" };
-		return shrink4(e, sfmt(e, "textureLoad(%s, %s%s, %s%s)", t, a0, coord_sw[n], a0, mip_sw[n]), in->type);
+		if (ot->arrayed) // layer sits between the dims and the mip
+			return shrink4(e, sfmt(e, "textureLoad(%s, %s%s, %s%s, %s%s)",
+			               t, a0, csw[n], a0, comp[n], a0, comp[n + 1]), in->type);
+		return shrink4(e, sfmt(e, "textureLoad(%s, %s%s, %s%s)", t, a0, csw[n], a0, comp[n]), in->type);
 	}
 	case svsl_method_get_dimensions: {
-		if (ot->arrayed) { skip(e, in->loc, "GetDimensions on array textures isn't mapped yet"); return "0"; }
 		const char *tn = type_name_w(e, in->type, in->loc);
 		if (channel == 1) // trailing level/sample-count query
 			return sfmt(e, "%s(%s(%s))", tn, ot->multisampled ? "textureNumSamples" : "textureNumLevels", t);
-		if (ot->kind == svsl_type_image || ot->multisampled)
+		// SPIR-V's size query returns the layer count as the last component;
+		// WGSL splits it into textureNumLayers, so arrayed queries recompose
+		int32_t n = ot->dim == svsl_texdim_1d ? 1 : ot->dim == svsl_texdim_3d ? 3 : 2;
+		if (ot->kind == svsl_type_image || ot->multisampled) {
+			if (ot->arrayed)
+				return sfmt(e, "%s(vec%d<u32>(textureDimensions(%s), textureNumLayers(%s)))",
+				            tn, n + 1, t, t);
 			return sfmt(e, "%s(textureDimensions(%s))", tn, t);
+		}
 		const char *lod = in->aux_count > 0 ? sfmt(e, "i32(%s)", a0) : "0";
+		if (ot->arrayed)
+			return sfmt(e, "%s(vec%d<u32>(textureDimensions(%s, %s), textureNumLayers(%s)))",
+			            tn, n + 1, t, lod, t);
 		return sfmt(e, "%s(textureDimensions(%s, %s))", tn, t, lod);
 	}
 	default:
@@ -1274,6 +1395,99 @@ static const char *io_read(wgsl_t *e, const io_field_t *f) {
 
 // ---- statements ------------------------------------------------------------------
 
+// pure computations may inline anywhere their operand names stay in scope;
+// state-readers (loads, texture ops) additionally need a clear path to their
+// materialization point, checked in inline_analyze
+static bool pure_inlinable(wgsl_t *e, const svsl_ir_inst_t *in) {
+	switch ((svsl_ir_op_)in->op) {
+	case svsl_ir_add: case svsl_ir_sub: case svsl_ir_mul: case svsl_ir_div:
+	case svsl_ir_rem: case svsl_ir_neg: case svsl_ir_bit_not: case svsl_ir_log_not:
+	case svsl_ir_bit_and: case svsl_ir_bit_or: case svsl_ir_bit_xor:
+	case svsl_ir_shl: case svsl_ir_shr:
+	case svsl_ir_eq: case svsl_ir_ne: case svsl_ir_lt: case svsl_ir_le:
+	case svsl_ir_gt: case svsl_ir_ge: case svsl_ir_log_and: case svsl_ir_log_or:
+	case svsl_ir_convert: case svsl_ir_mat_mul:
+	case svsl_ir_construct: case svsl_ir_extract: case svsl_ir_shuffle:
+	case svsl_ir_extract_dynamic:
+	case svsl_ir_bitfield_extract: case svsl_ir_bitfield_insert:
+		return true;
+	case svsl_ir_select: { // the matrix/array/struct form emits statements
+		const svsl_type_t *t = svsl_type_get(&e->prog->types, in->type);
+		return t->kind == svsl_type_scalar || t->kind == svsl_type_vector;
+	}
+	case svsl_ir_intrinsic: { // barriers and clip are statements, the rest expressions
+		svsl_emit_ em = (svsl_emit_)svsl_intrinsic_get((int32_t)in->args[0])->emit;
+		return em != svsl_emit_barrier_wg && em != svsl_emit_barrier_wg_mem && em != svsl_emit_clip;
+	}
+	default:
+		return false;
+	}
+}
+
+// Decides which values fold into their (single) use site instead of becoming a
+// `let _N`. sink[i] = the statement where i's text is finally evaluated,
+// chased through inlined users and through chains (whose text materializes at
+// their user). State-readers only inline when no side-effecting or
+// control-flow instruction (svsl_ir_has_side_effects — the shared oracle)
+// separates their definition from that sink.
+static void inline_analyze(wgsl_t *e, bool struct_return) {
+	const svsl_ir_func_t *fn = e->fn;
+	int32_t n = fn->insts.count > 0 ? fn->insts.count : 1;
+	e->inline_ok   = svsl_arena_alloc(e->arena, (size_t)n);
+	e->inline_expr = svsl_arena_alloc(e->arena, (size_t)n * sizeof(const char *));
+	int32_t *use_count = svsl_arena_alloc(e->arena, (size_t)n * sizeof(int32_t));
+	int32_t *last_use  = svsl_arena_alloc(e->arena, (size_t)n * sizeof(int32_t));
+	int32_t *sink      = svsl_arena_alloc(e->arena, (size_t)n * sizeof(int32_t));
+	int32_t *cum       = svsl_arena_alloc(e->arena, (size_t)(n + 1) * sizeof(int32_t));
+	for (int32_t i = 0; i < n; i++) last_use[i] = -1;
+
+	for (int32_t i = 0; i < fn->insts.count; i++) {
+		const svsl_ir_inst_t *in = &fn->insts.items[i];
+		cum[i + 1] = cum[i] + (svsl_ir_has_side_effects(in, &e->prog->types) ? 1 : 0);
+		// struct returns and cmpxchg print an operand's text more than once —
+		// weight 2 forces those into lets so evaluation isn't duplicated
+		int32_t  w    = in->op == svsl_ir_atomic ||
+		                (in->op == svsl_ir_return && struct_return) ? 2 : 1;
+		uint32_t mask = svsl_ir_value_arg_mask(in);
+		for (int32_t a = 0; a < 4; a++) {
+			if (!(mask & (1u << a)) || in->args[a] == SVSL_IR_NONE) continue;
+			if (in->args[a] >= (uint32_t)fn->insts.count) continue;
+			use_count[in->args[a]] += w;
+			last_use [in->args[a]]  = i;
+		}
+		if (svsl_ir_aux_holds_values(in))
+			for (uint32_t k = 0; k < in->aux_count; k++) {
+				uint32_t v = fn->aux.items[in->aux + k];
+				if (v >= (uint32_t)fn->insts.count) continue;
+				use_count[v] += w;
+				last_use [v]  = i;
+			}
+	}
+
+	for (int32_t i = fn->insts.count - 1; i >= 0; i--) {
+		const svsl_ir_inst_t *in = &fn->insts.items[i];
+		sink[i] = i;
+		if (in->op == svsl_ir_chain || in->op == svsl_ir_ptr) {
+			// pointer text materializes wherever its user does; several users
+			// mean several materializations, which no scan can bound
+			sink[i] = (use_count[i] == 1 && last_use[i] >= 0) ? sink[last_use[i]] : -1;
+			continue;
+		}
+		if (use_count[i] != 1 || last_use[i] < 0) continue;
+		int32_t s = sink[last_use[i]];
+		if (s < 0) continue;
+		if (pure_inlinable(e, in)) {
+			e->inline_ok[i] = 1;
+			sink[i] = s;
+		} else if (in->op == svsl_ir_load || in->op == svsl_ir_tex || in->op == svsl_ir_image_load) {
+			if (cum[s] - cum[i + 1] == 0) { // nothing observable between def and sink
+				e->inline_ok[i] = 1;
+				sink[i] = s;
+			}
+		}
+	}
+}
+
 static const char *binop_token(svsl_ir_op_ op) {
 	switch (op) {
 	case svsl_ir_add: return "+";  case svsl_ir_sub: return "-";
@@ -1328,6 +1542,8 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 	bool    loop_cont[32];
 	int32_t loop_depth = 0;
 
+	inline_analyze(e, out_io->count > 1 || (out_io->count == 1 && out_io->fields[0].member >= 0));
+
 	// locals hoist to function scope like SPIR-V's OpVariables: pointers cross
 	// block boundaries (only pure values are block-local in this IR)
 	for (int32_t i = 0; i < fn->insts.count && !e->skipped; i++) {
@@ -1339,7 +1555,8 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 	for (int32_t i = 0; i < fn->insts.count && !e->skipped; i++) {
 		const svsl_ir_inst_t *in = &fn->insts.items[i];
 		svsl_ir_op_           op = (svsl_ir_op_)in->op;
-		const char *a = binop_token(op) && in->args[0] != SVSL_IR_NONE ? val(e, in->args[0]) : NULL;
+		const char *a  = binop_token(op) && in->args[0] != SVSL_IR_NONE ? val(e, in->args[0]) : NULL;
+		const char *ex = NULL; // value expression: inlines into its use, or becomes a let
 
 		switch (op) {
 		case svsl_ir_nop: case svsl_ir_const: case svsl_ir_spec_const: case svsl_ir_undef:
@@ -1359,32 +1576,58 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 		case svsl_ir_load: {
 			svsl_type_id_t pt;
 			const char *path = lvalue(e, in->args[0], &pt);
-			wln(e, "let _%d = %s;", i, path);
+			ex = ptr_is_atomic(e, in->args[0]) // atomic-retyped leaves have no plain loads
+			   ? sfmt(e, "atomicLoad(&%s)", path) : path;
 			break;
 		}
 		case svsl_ir_store: {
 			svsl_type_id_t pt;
 			const char *path = lvalue(e, in->args[0], &pt);
-			wln(e, "%s = %s;", path, val(e, in->args[1]));
+			if (ptr_is_atomic(e, in->args[0]))
+				wln(e, "atomicStore(&%s, %s);", path, val(e, in->args[1]));
+			else
+				wln(e, "%s = %s;", path, val(e, in->args[1]));
+			break;
+		}
+
+		case svsl_ir_atomic: { // args[3] low byte is the op, in svsl_intr_atomic_ order
+			static const char *ops[8] = { "atomicAdd", "atomicSub", "atomicMin", "atomicMax",
+			                              "atomicAnd", "atomicOr", "atomicXor", "atomicExchange" };
+			svsl_type_id_t pt;
+			const char    *path    = lvalue(e, in->args[0], &pt);
+			uint32_t       op_code = in->args[3] & 0xFF;
+			if (op_code < 8) {
+				wln(e, "let _%d = %s(&%s, %s);", i, ops[op_code], path, val(e, in->args[1]));
+				break;
+			}
+			// compare-exchange: WGSL only has the weak form, which may fail
+			// spuriously — retry until it either succeeds or genuinely mismatches
+			wln(e, "var _%d : %s;", i, type_name_w(e, in->type, in->loc));
+			wln(e, "loop {");
+			e->indent++;
+			wln(e, "let _r%d = atomicCompareExchangeWeak(&%s, %s, %s);", i, path,
+			    val(e, in->args[2]), val(e, in->args[1]));
+			wln(e, "if (_r%d.exchanged || _r%d.old_value != %s) { _%d = _r%d.old_value; break; }",
+			    i, i, val(e, in->args[2]), i, i);
+			e->indent--;
+			wln(e, "}");
 			break;
 		}
 
 		case svsl_ir_construct: {
 			const svsl_type_t *t = svsl_type_get(&e->prog->types, in->type);
-			if (t->kind == svsl_type_struct)
-				wln(e, "let _%d = %s(%s);", i, struct_name_w(e, t->struct_index), aux_args(e, in));
-			else
-				wln(e, "let _%d = %s(%s);", i, type_name_w(e, in->type, in->loc), aux_args(e, in));
+			ex = t->kind == svsl_type_struct
+			   ? sfmt(e, "%s(%s)", struct_name_w(e, t->struct_index), aux_args(e, in))
+			   : sfmt(e, "%s(%s)", type_name_w(e, in->type, in->loc), aux_args(e, in));
 			break;
 		}
 		case svsl_ir_extract: {
 			const svsl_ir_inst_t *src = &fn->insts.items[in->args[0]];
 			const svsl_type_t    *st  = svsl_type_get(&e->prog->types, src->type);
-			if (st->kind == svsl_type_struct)
-				wln(e, "let _%d = %s.%s;", i, val(e, in->args[0]),
-				    struct_member_name(e, st->struct_index, (int32_t)in->args[1]));
-			else
-				wln(e, "let _%d = %s[%u];", i, val(e, in->args[0]), in->args[1]);
+			ex = st->kind == svsl_type_struct
+			   ? sfmt(e, "%s.%s", val(e, in->args[0]),
+			          struct_member_name(e, st->struct_index, (int32_t)in->args[1]))
+			   : sfmt(e, "%s[%u]", val(e, in->args[0]), in->args[1]);
 			break;
 		}
 		case svsl_ir_insert: {
@@ -1404,44 +1647,58 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 			char sw_str[5] = {0};
 			for (uint32_t c = 0; c < in->args[2] && c < 4; c++)
 				sw_str[c] = comp[(in->args[1] >> (c * 4)) & 0xF];
-			wln(e, "let _%d = %s.%s;", i, val(e, in->args[0]), sw_str);
+			ex = sfmt(e, "%s.%s", val(e, in->args[0]), sw_str);
 			break;
 		}
 		case svsl_ir_extract_dynamic:
-			wln(e, "let _%d = %s[%s];", i, val(e, in->args[0]), val(e, in->args[1]));
+			ex = sfmt(e, "%s[%s]", val(e, in->args[0]), val(e, in->args[1]));
 			break;
 
 		case svsl_ir_neg: {
 			const svsl_type_t *t = svsl_type_get(&e->prog->types, in->type);
-			if (t->scalar == svsl_scalar_uint32) // WGSL has no unary minus on u32
-				wln(e, "let _%d = (%s - %s);", i, splat(e, in->type, "0", in->loc), val(e, in->args[0]));
-			else
-				wln(e, "let _%d = -(%s);", i, val(e, in->args[0]));
+			ex = t->scalar == svsl_scalar_uint32 // WGSL has no unary minus on u32
+			   ? sfmt(e, "(%s - %s)", splat(e, in->type, "0", in->loc), val(e, in->args[0]))
+			   : sfmt(e, "-(%s)", val(e, in->args[0]));
 			break;
 		}
 		case svsl_ir_bit_not:
-			wln(e, "let _%d = ~(%s);", i, val(e, in->args[0])); break;
+			ex = sfmt(e, "~(%s)", val(e, in->args[0])); break;
 		case svsl_ir_log_not:
-			wln(e, "let _%d = !(%s);", i, val(e, in->args[0])); break;
+			ex = sfmt(e, "!(%s)", val(e, in->args[0])); break;
 
 		case svsl_ir_shl: case svsl_ir_shr: {
 			const svsl_ir_inst_t *lhs = &fn->insts.items[in->args[0]];
-			wln(e, "let _%d = (%s %s %s);", i, val(e, in->args[0]), binop_token(op),
-			    shift_rhs(e, in->args[1], lhs->type));
+			ex = sfmt(e, "(%s %s %s)", val(e, in->args[0]), binop_token(op),
+			          shift_rhs(e, in->args[1], lhs->type));
 			break;
 		}
 		case svsl_ir_add: case svsl_ir_sub: case svsl_ir_mul: case svsl_ir_div:
 		case svsl_ir_rem: case svsl_ir_bit_and: case svsl_ir_bit_or: case svsl_ir_bit_xor:
 		case svsl_ir_eq: case svsl_ir_ne: case svsl_ir_lt: case svsl_ir_le:
-		case svsl_ir_gt: case svsl_ir_ge: case svsl_ir_log_and: case svsl_ir_log_or:
-			wln(e, "let _%d = (%s %s %s);", i, a, binop_token(op), val(e, in->args[1]));
+		case svsl_ir_gt: case svsl_ir_ge: case svsl_ir_log_and: case svsl_ir_log_or: {
+			// division by a constant zero (the 0.0/0.0 NaN idiom) const-evaluates
+			// to a shader-creation error; a var makes the divisor runtime instead
+			if (op == svsl_ir_div || op == svsl_ir_rem) {
+				const svsl_ir_inst_t *rhs = &fn->insts.items[in->args[1]];
+				const svsl_type_t    *rt  = rhs->op == svsl_ir_const
+				                          ? svsl_type_get(&e->prog->types, rhs->type) : NULL;
+				bool zero = rt && (rt->scalar == svsl_scalar_float32 || rt->scalar == svsl_scalar_half
+				                   ? (rhs->args[0] & 0x7FFFFFFFu) == 0 : rhs->args[0] == 0);
+				if (zero) {
+					wln(e, "var _dz%d : %s = %s;", i, type_name_w(e, rhs->type, in->loc), val(e, in->args[1]));
+					ex = sfmt(e, "(%s %s _dz%d)", a, binop_token(op), i);
+					break;
+				}
+			}
+			ex = sfmt(e, "(%s %s %s)", a, binop_token(op), val(e, in->args[1]));
 			break;
+		}
 
 		case svsl_ir_select: {
 			const svsl_type_t *t = svsl_type_get(&e->prog->types, in->type);
 			if (t->kind == svsl_type_scalar || t->kind == svsl_type_vector) {
-				wln(e, "let _%d = select(%s, %s, %s);", i, val(e, in->args[2]),
-				    val(e, in->args[1]), val(e, in->args[0]));
+				ex = sfmt(e, "select(%s, %s, %s)", val(e, in->args[2]),
+				          val(e, in->args[1]), val(e, in->args[0]));
 			} else { // WGSL select only takes scalars/vectors
 				wln(e, "var _%d : %s;", i, type_name_w(e, in->type, in->loc));
 				wln(e, "if (%s) { _%d = %s; } else { _%d = %s; }", val(e, in->args[0]),
@@ -1450,37 +1707,47 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 			break;
 		}
 		case svsl_ir_convert:
-			wln(e, "let _%d = %s(%s);", i, type_name_w(e, in->type, in->loc), val(e, in->args[0]));
+			ex = sfmt(e, "%s(%s)", type_name_w(e, in->type, in->loc), val(e, in->args[0]));
 			break;
 		case svsl_ir_mat_mul: // swapped operands, mirroring the SPIR-V backend
-			wln(e, "let _%d = (%s * %s);", i, val(e, in->args[1]), val(e, in->args[0]));
+			ex = sfmt(e, "(%s * %s)", val(e, in->args[1]), val(e, in->args[0]));
 			break;
 
-		case svsl_ir_intrinsic: {
-			const char *expr = intrinsic_expr(e, in);
-			if (expr) wln(e, "let _%d = %s;", i, expr);
+		case svsl_ir_intrinsic:
+			ex = intrinsic_expr(e, in); // NULL when it emitted a whole statement
+			break;
+		case svsl_ir_tex:
+			ex = tex_expr(e, in);
+			break;
+		case svsl_ir_image_load: { // arrayed images split the layer off the coord
+			const svsl_type_t *it = svsl_type_get(&e->prog->types,
+			                                      e->prog->resources.items[in->args[0]].type);
+			const char *c = val(e, in->args[1]);
+			ex = shrink4(e, it->arrayed
+			   ? sfmt(e, "textureLoad(%s, %s.xy, %s.z)", res_name(e, (int32_t)in->args[0]), c, c)
+			   : sfmt(e, "textureLoad(%s, %s)", res_name(e, (int32_t)in->args[0]), c), in->type);
 			break;
 		}
-		case svsl_ir_tex:
-			wln(e, "let _%d = %s;", i, tex_expr(e, in));
+		case svsl_ir_image_store: {
+			const svsl_type_t *it = svsl_type_get(&e->prog->types,
+			                                      e->prog->resources.items[in->args[0]].type);
+			const char *c = val(e, in->args[1]);
+			if (it->arrayed)
+				wln(e, "textureStore(%s, %s.xy, %s.z, %s);", res_name(e, (int32_t)in->args[0]),
+				    c, c, expand4(e, in->args[2], in->loc));
+			else
+				wln(e, "textureStore(%s, %s, %s);", res_name(e, (int32_t)in->args[0]),
+				    c, expand4(e, in->args[2], in->loc));
 			break;
-		case svsl_ir_image_load:
-			wln(e, "let _%d = %s;", i,
-			    shrink4(e, sfmt(e, "textureLoad(%s, %s)", res_name(e, (int32_t)in->args[0]),
-			                    val(e, in->args[1])), in->type));
-			break;
-		case svsl_ir_image_store:
-			wln(e, "textureStore(%s, %s, %s);", res_name(e, (int32_t)in->args[0]),
-			    val(e, in->args[1]), expand4(e, in->args[2], in->loc));
-			break;
+		}
 
 		case svsl_ir_bitfield_extract:
-			wln(e, "let _%d = extractBits(%s, u32(%s), u32(%s));", i,
-			    val(e, in->args[0]), val(e, in->args[1]), val(e, in->args[2]));
+			ex = sfmt(e, "extractBits(%s, u32(%s), u32(%s))",
+			          val(e, in->args[0]), val(e, in->args[1]), val(e, in->args[2]));
 			break;
 		case svsl_ir_bitfield_insert:
-			wln(e, "let _%d = insertBits(%s, %s, u32(%s), u32(%s));", i,
-			    val(e, in->args[0]), val(e, in->args[1]), val(e, in->args[2]), val(e, in->args[3]));
+			ex = sfmt(e, "insertBits(%s, %s, u32(%s), u32(%s))",
+			          val(e, in->args[0]), val(e, in->args[1]), val(e, in->args[2]), val(e, in->args[3]));
 			break;
 
 		// -------- structured control flow --------
@@ -1500,7 +1767,13 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 			wln(e, "continuing {"); e->indent++;
 			break;
 		case svsl_ir_end_loop:
-			if (loop_depth > 0 && loop_cont[--loop_depth]) { e->indent--; wln(e, "}"); }
+			if (loop_depth > 0 && loop_cont[--loop_depth]) {
+				// a do-while's condition rides on end_loop: the continuing block
+				// takes a conditional back-edge, which is WGSL's `break if`
+				if (in->args[0] != SVSL_IR_NONE)
+					wln(e, "break if !(%s);", val(e, in->args[0]));
+				e->indent--; wln(e, "}");
+			}
 			e->indent--; wln(e, "}");
 			break;
 		case svsl_ir_break:    wln(e, "break;");    break;
@@ -1563,6 +1836,11 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 			skip(e, in->loc, "an IR operation the WGSL backend doesn't handle yet (op %d)", op);
 			break;
 		}
+
+		if (ex) {
+			if (e->inline_ok[i]) e->inline_expr[i] = ex;
+			else                 wln(e, "let _%d = %s;", i, ex);
+		}
 	}
 }
 
@@ -1583,14 +1861,40 @@ static void emit_structs(wgsl_t *e) {
 	}
 }
 
-static void emit_buffer_struct(wgsl_t *e, const svsl_buffer_t *buf) {
+// scalar / array-of-scalar with the leaf wrapped in atomic<T>
+static const char *atomic_type_name(wgsl_t *e, svsl_type_id_t id, svsl_loc_t loc) {
+	const svsl_type_t *t = svsl_type_get(&e->prog->types, id);
+	if (t->kind == svsl_type_array)
+		return sfmt(e, "array<%s%s>", atomic_type_name(e, t->elem, loc),
+		            t->array_count > 0 ? sfmt(e, ", %d", t->array_count) : "");
+	return sfmt(e, "atomic<%s>", scalar_name(e, t->scalar, loc));
+}
+
+// opt_atomic: per-member marks from the prescan (NULL for uniform buffers)
+static void emit_buffer_struct(wgsl_t *e, const svsl_buffer_t *buf, const uint8_t *opt_atomic) {
 	wln(e, "struct %s_t {", ident(e, buf->name));
 	e->indent++;
 	for (int32_t m = 0; m < buf->members.count; m++)
 		wln(e, "%s : %s,", ident(e, buf->members.items[m].name),
-		    type_name_w(e, buf->members.items[m].type, buf->members.items[m].loc));
+		    opt_atomic && opt_atomic[m]
+		        ? atomic_type_name(e, buf->members.items[m].type, buf->members.items[m].loc)
+		        : type_name_w(e, buf->members.items[m].type, buf->members.items[m].loc));
 	e->indent--;
 	wln(e, "}");
+}
+
+// true when this pointer instruction lands on an atomic-retyped leaf, so plain
+// accesses must go through atomicLoad/atomicStore
+static bool ptr_is_atomic(wgsl_t *e, uint32_t id) {
+	while (e->fn->insts.items[id].op == svsl_ir_chain) id = e->fn->insts.items[id].args[0];
+	const svsl_ir_inst_t *root = &e->fn->insts.items[id];
+	if (root->op != svsl_ir_ptr) return false;
+	switch ((svsl_ref_)root->args[0]) {
+	case svsl_ref_resource:      return e->res_atomic[root->args[1]] != 0;
+	case svsl_ref_buffer_member: return e->buf_atomic[root->args[1]][root->args[2]] != 0;
+	case svsl_ref_workgroup:     return e->wg_atomic[root->args[1]] != 0;
+	default:                     return false;
+	}
 }
 
 static void add_sampler(wgsl_t *e, const char *name, uint16_t slot, uint16_t paired) {
@@ -1632,13 +1936,15 @@ static void emit_globals(wgsl_t *e) {
 
 	for (int32_t i = 0; i < prog->workgroup_vars.count; i++)
 		wln(e, "var<workgroup> %s : %s;", ident(e, prog->workgroup_vars.items[i].name),
-		    type_name_w(e, prog->workgroup_vars.items[i].type, prog->workgroup_vars.items[i].var->loc));
+		    e->wg_atomic[i]
+		        ? atomic_type_name(e, prog->workgroup_vars.items[i].type, prog->workgroup_vars.items[i].var->loc)
+		        : type_name_w(e, prog->workgroup_vars.items[i].type, prog->workgroup_vars.items[i].var->loc));
 
 	// uniform buffers
 	for (int32_t b = 0; b < prog->buffers.count; b++) {
 		const svsl_buffer_t *buf = &prog->buffers.items[b];
 		if (!e->buffer_used[b] || buf->kind != svsl_block_uniform) continue;
-		emit_buffer_struct(e, buf);
+		emit_buffer_struct(e, buf, NULL);
 		wln(e, "@group(0) @binding(%d) var<uniform> %s : %s_t;",
 		    buf->bind.slot, ident(e, buf->name), ident(e, buf->name));
 		wln(e, "");
@@ -1656,7 +1962,7 @@ static void emit_globals(wgsl_t *e) {
 			const char *dim = t->dim == svsl_texdim_1d ? "1d" : t->dim == svsl_texdim_3d ? "3d" :
 			                  t->dim == svsl_texdim_cube ? "cube" : "2d";
 			const char *ty;
-			if (e->res_cmp[r] == 1)
+			if (tex_is_depth(e, r))
 				ty = t->multisampled ? "texture_depth_multisampled_2d"
 				   : sfmt(e, "texture_depth_%s%s", dim, t->arrayed ? "_array" : "");
 			else if (t->multisampled)
@@ -1667,7 +1973,7 @@ static void emit_globals(wgsl_t *e) {
 			if (res->sampler_slot >= 0) { // paired sampler splits off to s+400
 				const char *sn = paired_sampler_name(e, r);
 				wln(e, "@group(0) @binding(%d) var %s : %s;", SLOT_SAMPLER + res->bind.slot, sn,
-				    e->res_cmp[r] == 1 ? "sampler_comparison" : "sampler");
+				    tex_is_depth(e, r) ? "sampler_comparison" : "sampler");
 				add_sampler(e, sn, (uint16_t)(SLOT_SAMPLER + res->bind.slot),
 				            (uint16_t)(SLOT_TEXTURE + res->bind.slot));
 			}
@@ -1688,9 +1994,13 @@ static void emit_globals(wgsl_t *e) {
 			int32_t     slot   = (rw ? SLOT_READWRITE : SLOT_TEXTURE) + res->bind.slot;
 			const char *access = rw ? "read_write" : "read";
 			if (res->buffer_index >= 0) { // block form: struct with the block's members
-				emit_buffer_struct(e, &prog->buffers.items[res->buffer_index]);
+				emit_buffer_struct(e, &prog->buffers.items[res->buffer_index],
+				                   e->buf_atomic[res->buffer_index]);
 				wln(e, "@group(0) @binding(%d) var<storage, %s> %s : %s_t;", slot, access, n,
 				    ident(e, prog->buffers.items[res->buffer_index].name));
+			} else if (e->res_atomic[r]) {
+				wln(e, "@group(0) @binding(%d) var<storage, %s> %s : array<%s>;", slot, access, n,
+				    atomic_type_name(e, t->elem, res->loc));
 			} else {
 				wln(e, "@group(0) @binding(%d) var<storage, %s> %s : array<%s>;", slot, access, n,
 				    type_name_w(e, t->elem, res->loc));
@@ -1702,8 +2012,13 @@ static void emit_globals(wgsl_t *e) {
 			const char *dim    = t->dim == svsl_texdim_1d ? "1d" : t->dim == svsl_texdim_3d ? "3d" : "2d";
 			const char *access = e->res_access[r] == 3 ? "read_write" :
 			                     e->res_access[r] == 1 ? "read" : "write";
-			wln(e, "@group(0) @binding(%d) var %s : texture_storage_%s<%s, %s>;",
-			    SLOT_READWRITE + res->bind.slot, n, dim, wgsl_texel_format(fmt), access);
+			if (t->arrayed && t->dim != svsl_texdim_2d) {
+				skip(e, res->loc, "WGSL storage textures only array in 2D");
+				break;
+			}
+			wln(e, "@group(0) @binding(%d) var %s : texture_storage_%s%s<%s, %s>;",
+			    SLOT_READWRITE + res->bind.slot, n, dim, t->arrayed ? "_array" : "",
+			    wgsl_texel_format(fmt), access);
 			break;
 		}
 		case svsl_res_subpass: { // lowered to a plain sampled texture (same meta slot)
@@ -1738,6 +2053,13 @@ bool svsl_wgsl_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 	for (int32_t i = 0; i < res_n; i++) e.sampler_pair[i] = -1;
 	int32_t cg_n  = prog->const_globals.count > 0 ? prog->const_globals.count : 1;
 	e.const_texts = svsl_arena_alloc(arena, (size_t)cg_n * sizeof(const char *));
+	int32_t wg_n  = prog->workgroup_vars.count > 0 ? prog->workgroup_vars.count : 1;
+	e.res_atomic  = svsl_arena_alloc(arena, (size_t)res_n);
+	e.wg_atomic   = svsl_arena_alloc(arena, (size_t)wg_n);
+	e.buf_atomic  = svsl_arena_alloc(arena, (size_t)buf_n * sizeof(uint8_t *));
+	for (int32_t i = 0; i < prog->buffers.count; i++)
+		e.buf_atomic[i] = svsl_arena_alloc(arena,
+			(size_t)(prog->buffers.items[i].members.count > 0 ? prog->buffers.items[i].members.count : 1));
 
 	int32_t errors_before = ref_diags->error_count;
 	prescan(&e);

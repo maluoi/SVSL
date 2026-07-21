@@ -92,6 +92,9 @@ typedef struct svsl_types_t {
 	svsl_array_t(svsl_type_t)        types;
 	svsl_array_t(svsl_struct_info_t) structs;
 	bool          half_strict16; // --half=strict16: every `half` interns as float16
+	// private to types.c (svsl_type_scalar_id): scalar interning runs in every
+	// chain walk, so the id is looked up once per scalar; 0 = unset, else id+1
+	int16_t       scalar_cache[svsl_scalar_half + 1];
 } svsl_types_t;
 
 // interning — returns existing id when an equal type is already present

@@ -224,6 +224,29 @@ static bool compile_file(const cli_t *cli, const char *path) {
 				if (!write_bytes(wgsl_path, st->wgsl, (size_t)st->wgsl_length)) ok = false;
 			}
 
+			// WGSL stages validate through naga when it's on PATH — optional,
+			// like the corpus tests, since naga is a cargo tool not a SDK one
+			if (cli->validate && st->wgsl) {
+				static int32_t has_naga = -1;
+				if (has_naga < 0) {
+					has_naga = system("naga --version > /dev/null 2>&1") == 0 ? 1 : 0;
+					if (!has_naga)
+						fprintf(stderr, "svslc: naga not on PATH; WGSL stages not validated\n");
+				}
+				if (has_naga) {
+					char wgsl_path[1040], cmd[1200];
+					snprintf(wgsl_path, sizeof(wgsl_path), "%.*s.wgsl", (int32_t)strlen(out_path) - 4, out_path);
+					bool have_file = cli->spv && (cli->targets & svsl_target_wgsl);
+					if (!have_file && !write_bytes(wgsl_path, st->wgsl, (size_t)st->wgsl_length)) continue;
+					snprintf(cmd, sizeof(cmd), "naga %s", wgsl_path);
+					if (system(cmd) != 0) {
+						fprintf(stderr, "svslc: WGSL validation failed for '%s'\n", wgsl_path);
+						ok = false;
+					}
+					if (!have_file) remove(wgsl_path);
+				}
+			}
+
 			if (cli->validate) {
 				char cmd[1200];
 				snprintf(cmd, sizeof(cmd), "spirv-val --target-env vulkan1.1%s %s",

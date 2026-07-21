@@ -7,20 +7,6 @@ svsl_str_t svsl_str(const char *opt_cstr) {
 	return (svsl_str_t){ .ptr = opt_cstr, .len = (int32_t)strlen(opt_cstr) };
 }
 
-bool svsl_str_eq(svsl_str_t a, svsl_str_t b) {
-	if (a.len != b.len) return false;
-	return a.len == 0 || memcmp(a.ptr, b.ptr, (size_t)a.len) == 0;
-}
-
-bool svsl_str_eq_cstr(svsl_str_t s, const char *cstr) {
-	// compare against s.len and confirm cstr terminates there — avoids a strlen()
-	// of cstr, which matters in the table lookups that call this per entry (keyword,
-	// intrinsic, builtin-type name matching all run in the lexer/sema hot path)
-	for (int32_t i = 0; i < s.len; i++)
-		if (cstr[i] == '\0' || cstr[i] != s.ptr[i]) return false;
-	return cstr[s.len] == '\0';
-}
-
 bool svsl_str_starts_with(svsl_str_t s, const char *prefix) {
 	int32_t prefix_len = (int32_t)strlen(prefix);
 	if (s.len < prefix_len) return false;

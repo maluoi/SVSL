@@ -53,7 +53,11 @@ svsl_type_id_t svsl_type_intern(svsl_types_t *types, svsl_type_t type) {
 }
 
 svsl_type_id_t svsl_type_scalar_id(svsl_types_t *types, svsl_scalar_ scalar) {
-	return svsl_type_intern(types, (svsl_type_t){ .kind = svsl_type_scalar, .scalar = scalar });
+	if (types->scalar_cache[scalar])
+		return (svsl_type_id_t)(types->scalar_cache[scalar] - 1);
+	svsl_type_id_t id = svsl_type_intern(types, (svsl_type_t){ .kind = svsl_type_scalar, .scalar = scalar });
+	types->scalar_cache[scalar] = (int16_t)(id + 1);
+	return id;
 }
 svsl_type_id_t svsl_type_vector_id(svsl_types_t *types, svsl_scalar_ scalar, int32_t count) {
 	return svsl_type_intern(types, (svsl_type_t){

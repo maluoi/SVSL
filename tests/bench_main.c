@@ -13,6 +13,9 @@
 #include "front/parser.h"
 #include "front/pp.h"
 #include "back/emit_spirv.h"
+#ifdef SVSL_HAS_WGSL
+#include "back/emit_wgsl.h"
+#endif
 #include "ir/ir.h"
 #include "sema/sema.h"
 #include "util/arena.h"
@@ -97,7 +100,9 @@ static double now_ms(void) {
 
 typedef struct {
 	double front_ms, ir_ms, emit_ms; // best-of phase times over all shaders, one iteration
+	double wgsl_ms;                  // WGSL text emission (0 unless built with SVSL_ENABLE_WGSL)
 	int64_t live_insts, spirv_words; // payoff metrics (deterministic, measured once)
+	int64_t wgsl_bytes;
 } run_t;
 
 // Compile every shader once, accumulating per-phase time and output metrics.
@@ -133,9 +138,21 @@ static run_t compile_corpus(const shader_t *shaders, int32_t count, svsl_opt_lev
 		}
 		double t3 = now_ms();
 
+#ifdef SVSL_HAS_WGSL
+		if (diags.error_count == 0) {
+			for (int32_t i = 0; i < ir.func_count; i++) {
+				svsl_wgsl_blob_t blob = {0};
+				svsl_wgsl_emit(&arena, &program, &ir.funcs[i], &blob, &diags);
+				if (measure_metrics && blob.text) r.wgsl_bytes += blob.length;
+			}
+		}
+#endif
+		double t4 = now_ms();
+
 		r.front_ms += t1 - t0;
 		r.ir_ms    += t2 - t1;
 		r.emit_ms  += t3 - t2;
+		r.wgsl_ms  += t4 - t3;
 
 		if (measure_metrics && diags.error_count == 0) {
 			for (int32_t i = 0; i < ir.func_count; i++) {
@@ -156,16 +173,17 @@ static run_t best_of(const shader_t *shaders, int32_t count, svsl_opt_level_ lev
 		if (r.front_ms < best.front_ms) best.front_ms = r.front_ms;
 		if (r.ir_ms    < best.ir_ms)    best.ir_ms    = r.ir_ms;
 		if (r.emit_ms  < best.emit_ms)  best.emit_ms  = r.emit_ms;
+		if (r.wgsl_ms  < best.wgsl_ms)  best.wgsl_ms  = r.wgsl_ms;
 	}
 	return best;
 }
 
 static void report(const char *label, run_t r) {
-	double total = r.front_ms + r.ir_ms + r.emit_ms;
-	printf("  %-4s | front %6.2f  ir %6.2f  emit %6.2f  total %6.2f ms | "
-	       "live_insts %6lld  spirv_words %7lld\n",
-	       label, r.front_ms, r.ir_ms, r.emit_ms, total,
-	       (long long)r.live_insts, (long long)r.spirv_words);
+	double total = r.front_ms + r.ir_ms + r.emit_ms + r.wgsl_ms;
+	printf("  %-4s | front %6.2f  ir %6.2f  emit %6.2f  wgsl %6.2f  total %6.2f ms | "
+	       "live_insts %6lld  spirv_words %7lld  wgsl_bytes %7lld\n",
+	       label, r.front_ms, r.ir_ms, r.emit_ms, r.wgsl_ms, total,
+	       (long long)r.live_insts, (long long)r.spirv_words, (long long)r.wgsl_bytes);
 }
 
 int main(int argc, char **argv) {

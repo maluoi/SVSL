@@ -10,6 +10,7 @@ add_executable(svsl_tests
 	test_sks.c
 	test_api.c
 	test_qcom.c
+	test_wgsl.c
 	test_corpus.c
 )
 target_link_libraries     (svsl_tests PRIVATE svsl)
@@ -28,6 +29,9 @@ add_executable            (svsl_bench bench_main.c)
 target_link_libraries     (svsl_bench PRIVATE svsl)
 target_include_directories(svsl_bench PRIVATE ../src)
 target_compile_definitions(svsl_bench PRIVATE SVSL_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+if (SVSL_ENABLE_WGSL) # bench times the WGSL phase too when the backend exists
+	target_compile_definitions(svsl_bench PRIVATE SVSL_HAS_WGSL)
+endif()
 
 add_test(NAME util   COMMAND svsl_tests util)
 add_test(NAME pp     COMMAND svsl_tests pp)
@@ -39,4 +43,5 @@ add_test(NAME ir     COMMAND svsl_tests ir)
 add_test(NAME sks    COMMAND svsl_tests sks)
 add_test(NAME api    COMMAND svsl_tests api)
 add_test(NAME qcom   COMMAND svsl_tests qcom)
+add_test(NAME wgsl   COMMAND svsl_tests wgsl)
 add_test(NAME corpus COMMAND svsl_tests corpus)

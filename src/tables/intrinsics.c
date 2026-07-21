@@ -229,8 +229,11 @@ static const svsl_intrinsic_t intrinsic_table[] = {
 };
 
 int32_t svsl_intrinsic_find(svsl_str_t name) {
+	// runs per call expression in sema: reject rows on the first character
+	char c0 = name.len > 0 ? name.ptr[0] : '\0';
 	for (int32_t i = 0; i < (int32_t)(sizeof(intrinsic_table) / sizeof(intrinsic_table[0])); i++)
-		if (svsl_str_eq_cstr(name, intrinsic_table[i].name)) return i;
+		if (intrinsic_table[i].name[0] == c0 && svsl_str_eq_cstr(name, intrinsic_table[i].name))
+			return i;
 	return -1;
 }
 

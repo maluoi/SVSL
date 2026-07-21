@@ -74,8 +74,12 @@ static bool pp_active(const pp_t *pp) {
 // --- macro table --------------------------------------------------------------
 
 static pp_macro_t *pp_macro_find(pp_t *pp, svsl_str_t name) {
+	// runs for every identifier in the source: reject on the first character
+	// before anything else so a miss costs one compare per macro
+	char c0 = name.len > 0 ? name.ptr[0] : '\0';
 	for (int32_t i = pp->macros.count - 1; i >= 0; i--) {
-		if (pp->macros.items[i].alive && svsl_str_eq(pp->macros.items[i].name, name))
+		const pp_macro_t *m = &pp->macros.items[i];
+		if (m->alive && m->name.len > 0 && m->name.ptr[0] == c0 && svsl_str_eq(m->name, name))
 			return &pp->macros.items[i];
 	}
 	return NULL;

@@ -56,7 +56,10 @@ static const keyword_row_t keyword_table[] = {
 };
 
 svsl_kw_ svsl_keyword_lookup(svsl_str_t ident) {
+	// runs per identifier token in the lexer: reject rows on the first character
+	char c0 = ident.len > 0 ? ident.ptr[0] : '\0';
 	for (int32_t i = 0; i < (int32_t)(sizeof(keyword_table) / sizeof(keyword_table[0])); i++)
-		if (svsl_str_eq_cstr(ident, keyword_table[i].name)) return keyword_table[i].kw;
+		if (keyword_table[i].name[0] == c0 && svsl_str_eq_cstr(ident, keyword_table[i].name))
+			return keyword_table[i].kw;
 	return svsl_kw_none;
 }

@@ -3,40 +3,31 @@
 
 #include "ir_operands.h"
 
+// Per-op arg mask as data; only three ops need a dynamic answer. Runs in
+// every optimizer pass loop, so it stays a table load, not a branch chain.
+static const uint8_t arg_mask_table[] = {
+	[svsl_ir_chain]   = 0x1, [svsl_ir_load]    = 0x1, [svsl_ir_extract] = 0x1,
+	[svsl_ir_shuffle] = 0x1, [svsl_ir_neg]     = 0x1, [svsl_ir_bit_not] = 0x1,
+	[svsl_ir_log_not] = 0x1, [svsl_ir_convert] = 0x1, [svsl_ir_if]      = 0x1,
+	[svsl_ir_switch]  = 0x1,
+	[svsl_ir_store]   = 0x3, [svsl_ir_extract_dynamic] = 0x3,
+	[svsl_ir_add] = 0x3, [svsl_ir_sub] = 0x3, [svsl_ir_mul] = 0x3,
+	[svsl_ir_div] = 0x3, [svsl_ir_rem] = 0x3,
+	[svsl_ir_bit_and] = 0x3, [svsl_ir_bit_or] = 0x3, [svsl_ir_bit_xor] = 0x3,
+	[svsl_ir_shl] = 0x3, [svsl_ir_shr] = 0x3,
+	[svsl_ir_eq] = 0x3, [svsl_ir_ne] = 0x3, [svsl_ir_lt] = 0x3, [svsl_ir_le] = 0x3,
+	[svsl_ir_gt] = 0x3, [svsl_ir_ge] = 0x3,
+	[svsl_ir_log_and] = 0x3, [svsl_ir_log_or] = 0x3, [svsl_ir_mat_mul] = 0x3,
+	[svsl_ir_insert]           = 0x5,
+	[svsl_ir_bitfield_extract] = 0x7, [svsl_ir_select] = 0x7,
+	[svsl_ir_bitfield_insert]  = 0xF,
+	[svsl_ir_image_load]  = 0x2,
+	[svsl_ir_image_store] = 0x6, [svsl_ir_image_atomic] = 0x6,
+	[svsl_ir_demote] = 0x0, // highest op: sizes the table over the whole enum
+};
+
 uint32_t svsl_ir_value_arg_mask(const svsl_ir_inst_t *inst) {
 	switch ((svsl_ir_op_)inst->op) {
-	case svsl_ir_chain:
-	case svsl_ir_load:
-	case svsl_ir_extract:
-	case svsl_ir_shuffle:
-	case svsl_ir_neg: case svsl_ir_bit_not: case svsl_ir_log_not:
-	case svsl_ir_convert:
-	case svsl_ir_if:
-	case svsl_ir_switch:
-		return 0x1;
-	case svsl_ir_store:
-	case svsl_ir_extract_dynamic: // args[0] = vector value, args[1] = index value
-	case svsl_ir_add: case svsl_ir_sub: case svsl_ir_mul:
-	case svsl_ir_div: case svsl_ir_rem:
-	case svsl_ir_bit_and: case svsl_ir_bit_or: case svsl_ir_bit_xor:
-	case svsl_ir_shl: case svsl_ir_shr:
-	case svsl_ir_eq: case svsl_ir_ne: case svsl_ir_lt: case svsl_ir_le:
-	case svsl_ir_gt: case svsl_ir_ge:
-	case svsl_ir_log_and: case svsl_ir_log_or:
-	case svsl_ir_mat_mul:
-		return 0x3;
-	case svsl_ir_insert:
-		return 0x5;
-	case svsl_ir_bitfield_extract: // value, offset id, width id
-	case svsl_ir_select:
-		return 0x7;
-	case svsl_ir_bitfield_insert: // base, insert, offset id, width id
-		return 0xF;
-	case svsl_ir_image_load:
-		return 0x2;
-	case svsl_ir_image_store:
-	case svsl_ir_image_atomic:
-		return 0x6;
 	case svsl_ir_atomic:
 		// cmpxchg (op 8 in args[3]'s low byte) also uses args[2]; the high byte
 		// carries the memory order, so mask it off before comparing
@@ -45,7 +36,7 @@ uint32_t svsl_ir_value_arg_mask(const svsl_ir_inst_t *inst) {
 	case svsl_ir_end_loop:
 		return inst->args[0] != SVSL_IR_NONE ? 0x1 : 0x0;
 	default:
-		return 0x0; // constants, vars, params, pointers, markers, aux-operand ops
+		return arg_mask_table[inst->op];
 	}
 }
 

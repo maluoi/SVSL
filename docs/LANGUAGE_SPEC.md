@@ -597,6 +597,7 @@ Case-insensitive (corpus uses both `SV_Position` and `SV_POSITION`).
 | `SV_VertexID` | VertexIndex | VS in |
 | `SV_InstanceID` | InstanceIndex | VS in |
 | `SV_ViewID` | ViewIndex (+`MultiView` capability) | VS/FS in |
+| `SV_RenderTargetArrayIndex` | Layer (+`ShaderViewportIndexLayerEXT` on VS out, `Geometry` on FS in) | VS out / FS in |
 | `SV_IsFrontFace` | FrontFacing | FS in |
 | `SV_SampleIndex` / `SV_Coverage` | SampleId / SampleMask | FS |
 | `SV_PrimitiveID` | PrimitiveId | FS in |
@@ -963,6 +964,8 @@ attribute aliases, and legacy semantics are accepted silently (their hints are b
 | `int8`/`uint8`, `int16`/`uint16`, `int64`, `float64` | Int8, Int16, Int64, Float64 (+ storage caps) |
 | `pack1`/`pack8` layout breaking core relaxed rules | *(no SPIR-V capability — VK_EXT_scalar_block_layout recorded as `.sks` feature-mask bit 16)* |
 | `SV_ViewID` | MultiView (core in SPIR-V 1.3 — no extension) |
+| `SV_RenderTargetArrayIndex` (VS out) | ShaderViewportIndexLayerEXT + SPV_EXT_shader_viewport_index_layer (legacy instanced stereo; invalid inside a multiview render pass) |
+| `SV_RenderTargetArrayIndex` (FS in) | Geometry (needs the geometryShader device feature) |
 | `demote` / `is_helper_invocation` | DemoteToHelperInvocation |
 | subgroup ops | GroupNonUniform + Vote/Ballot/Arithmetic/Shuffle/Clustered/Quad as used |
 | storage images | StorageImageExtendedFormats etc. as needed by format |
