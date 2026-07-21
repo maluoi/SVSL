@@ -284,10 +284,11 @@ static void test_wgsl_subpass(void) {
 	TEST_CHECK(ps != NULL);
 	if (ps) {
 		// lowered to a plain texture fetched at this fragment's own pixel,
-		// through a synthesized position input (the ps declares none itself)
+		// through a synthesized position parameter (the ps declares none itself;
+		// input builtins are standalone params, not IO-struct members)
 		TEST_CHECK(strstr(ps, "var prev : texture_2d<f32>;"));
-		TEST_CHECK(strstr(ps, "@builtin(position) sk_frag_pos"));
-		TEST_CHECK(strstr(ps, "textureLoad(prev, vec2<i32>(in.sk_frag_pos.xy), 0)"));
+		TEST_CHECK(strstr(ps, "@builtin(position) in_sk_frag_pos"));
+		TEST_CHECK(strstr(ps, "textureLoad(prev, vec2<i32>(in_sk_frag_pos.xy), 0)"));
 		TEST_CHECK(wgsl_validate(ps, "subpass ps"));
 	}
 	svsl_result_free(r);
@@ -312,6 +313,133 @@ static void test_wgsl_control_flow(void) {
 		TEST_CHECK(strstr(ps, "continue;"));
 		TEST_CHECK(wgsl_validate(ps, "control flow ps"));
 	}
+	svsl_result_free(r);
+}
+
+// Buffer memory holds matrices column-major HLSL (the D3D convention the CPU
+// writes); in-register values use the swapped representation. The boundary
+// must transpose — without it every buffer-loaded transform renders transposed
+// (triangle smears converging on the horizon, as found in the field).
+static void test_wgsl_matrix_majority(void) {
+	svsl_result_t *r = compile_wgsl(
+		"cbuffer C : register(b0) { float4x4 viewproj; };\n"
+		"struct Inst { float4x4 world; };\n"
+		"StructuredBuffer<Inst> inst : register(t1);\n"
+		"float4 vs(float3 p : POSITION, uint id : SV_InstanceID) : SV_Position {\n"
+		"	float4 world_pos = mul(float4(p, 1), inst[id].world);\n"
+		"	float  w33       = viewproj[3][3];\n"          // element: indices swap
+		"	float4 row2      = viewproj[2];\n"             // row: transpose-form read
+		"	return mul(world_pos, viewproj) * w33 + row2;\n"
+		"}\n");
+	TEST_CHECK(r->ok);
+	const char *vs = stage_text(r, svsl_stage_vertex);
+	TEST_CHECK(vs != NULL);
+	if (vs) {
+		// multiplies commute the boundary transpose away: source operand order
+		// on the raw buffer matrix, zero transposes on the hot transform path
+		TEST_CHECK(strstr(vs, " * inst["));
+		TEST_CHECK(!strstr(vs, "transpose(inst["));
+		TEST_CHECK(strstr(vs, " * C.viewproj)"));
+		TEST_CHECK(strstr(vs, "viewproj[3i][3i]"));          // element indices swap ([row][col] → [col][row])
+		TEST_CHECK(strstr(vs, "transpose(C.viewproj)[2i]")); // row read still transposes
+		TEST_CHECK(wgsl_validate(vs, "matrix majority vs"));
+	}
+	svsl_result_free(r);
+
+	// matrix stores convert back symmetrically (compute: vertex stages can't
+	// write storage at all on WebGPU)
+	r = compile_wgsl(
+		"cbuffer C : register(b0) { float4x4 viewproj; };\n"
+		"RWStructuredBuffer<float4x4> mats : register(u0);\n"
+		"[numthreads(64, 1, 1)]\n"
+		"void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	float4x4 m = viewproj;\n"
+		"	mats[id.x]  = m;\n"
+		"}\n");
+	TEST_CHECK(r->ok);
+	const char *cs = stage_text(r, svsl_stage_compute);
+	TEST_CHECK(cs != NULL);
+	if (cs) {
+		TEST_CHECK(strstr(cs, "= transpose(")); // store converts back to memory orientation
+		TEST_CHECK(wgsl_validate(cs, "matrix store cs"));
+	}
+	svsl_result_free(r);
+}
+
+// std140 strides scalar/vec2 arrays to 16 bytes; WGSL can't declare that
+// directly, so elements wrap in a @size(16) struct and accesses gain .v —
+// byte-identical layout, no skip (the cubemap_mipgen `uint _pad[2]` case)
+static void test_wgsl_std140_arrays(void) {
+	svsl_result_t *r = compile_wgsl(
+		"uint2 src_size;\n"
+		"uint  mip_max;\n"
+		"uint  _pad[2];\n"
+		"float weights[3];\n"
+		"float4 ps(float4 pos : SV_Position) : SV_Target {\n"
+		"	float w = weights[mip_max % 3] + float(_pad[0] + src_size.x);\n"
+		"	return float4(w.xxx, 1);\n"
+		"}\n");
+	TEST_CHECK(r->ok);
+	const char *ps = stage_text(r, svsl_stage_pixel);
+	TEST_CHECK(ps != NULL);
+	if (ps) {
+		TEST_CHECK(strstr(ps, "struct sk_pad_u32 { @size(16) v : u32 }"));
+		TEST_CHECK(strstr(ps, "struct sk_pad_f32 { @size(16) v : f32 }"));
+		TEST_CHECK(strstr(ps, "@align(16) _pad : array<sk_pad_u32, 2>,"));
+		TEST_CHECK(strstr(ps, "@align(16) weights : array<sk_pad_f32, 3>,"));
+		TEST_CHECK(strstr(ps, "].v"));                    // accesses route through the wrapper
+		TEST_CHECK(wgsl_validate(ps, "std140 arrays ps"));
+	}
+	svsl_result_free(r);
+}
+
+// Vertex attributes must match the SKS meta exactly: unused inputs are pruned
+// (Dawn requires every declared attribute to be fed), and survivors keep the
+// SPIR-V-recorded locations, gaps included — declaring all four here with only
+// pos+col used must yield locations 0 and 3, with norm/uv absent.
+static void test_wgsl_input_pruning(void) {
+	svsl_result_t *r = compile_wgsl(
+		"struct vsIn { float3 pos : POSITION; float3 norm : NORMAL0;\n"
+		"              float2 uv : TEXCOORD0; float4 col : COLOR0; };\n"
+		"float4 vs(vsIn input) : SV_Position {\n"
+		"	return float4(input.pos, 1) * input.col.a;\n"
+		"}\n");
+	TEST_CHECK(r->ok);
+	const char *vs = stage_text(r, svsl_stage_vertex);
+	TEST_CHECK(vs != NULL);
+	if (vs) {
+		TEST_CHECK(strstr(vs, "@location(0) pos"));
+		TEST_CHECK(strstr(vs, "@location(3) col")); // gap over pruned norm/uv preserved
+		TEST_CHECK(!strstr(vs, "@location(1)"));    // pruned attributes never declared
+		TEST_CHECK(!strstr(vs, "@location(2)"));    // (vsIn itself still lists them: local type)
+		TEST_CHECK(wgsl_validate(vs, "input pruning vs"));
+	}
+	svsl_result_free(r);
+}
+
+// WebGPU forbids vertex-stage storage writes (Vulkan allows them); the stage
+// skips with a diagnostic instead of emitting WGSL that fails validation at
+// runtime. [wave_size] merely warns: the hint can't be honored, the WGSL can.
+static void test_wgsl_stage_rules(void) {
+	svsl_result_t *r = compile_wgsl(
+		"RWStructuredBuffer<float4> particles : register(u0);\n"
+		"float4 vs(uint id : SV_VertexID) : SV_Position {\n"
+		"	float4 p = particles[id] + float4(0, 0.1, 0, 0);\n"
+		"	particles[id] = p;\n"
+		"	return p;\n"
+		"}\n");
+	TEST_CHECK(r->ok);
+	TEST_CHECK(stage_text(r, svsl_stage_vertex) == NULL);
+	TEST_CHECK(has_warning(r, "vertex stage writes a storage buffer"));
+	svsl_result_free(r);
+
+	r = compile_wgsl(
+		"RWStructuredBuffer<uint> data : register(u0);\n"
+		"[numthreads(64, 1, 1)] [wave_size(64)]\n"
+		"void cs(uint3 id : SV_DispatchThreadID) { data[id.x] = id.x; }\n");
+	TEST_CHECK(r->ok);
+	TEST_CHECK(stage_text(r, svsl_stage_compute) != NULL); // emits; the hint is ignored
+	TEST_CHECK(has_warning(r, "wave_size"));
 	svsl_result_free(r);
 }
 
@@ -498,6 +626,10 @@ void test_wgsl(void) {
 	test_wgsl_atomics();
 	test_wgsl_subpass();
 	test_wgsl_control_flow();
+	test_wgsl_matrix_majority();
+	test_wgsl_std140_arrays();
+	test_wgsl_input_pruning();
+	test_wgsl_stage_rules();
 	test_wgsl_const_traps();
 	test_wgsl_depth_pairing();
 	test_wgsl_skips();

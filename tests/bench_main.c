@@ -129,20 +129,21 @@ static run_t compile_corpus(const shader_t *shaders, int32_t count, svsl_opt_lev
 			svsl_ir_build(&arena, &program, level, &ir, &diags);
 		double t2 = now_ms();
 
+		svsl_spirv_blob_t blobs[16] = {0};
 		if (diags.error_count == 0) {
-			for (int32_t i = 0; i < ir.func_count; i++) {
-				svsl_spirv_blob_t blob = {0};
-				svsl_spirv_emit(&arena, &program, &ir.funcs[i], &blob, &diags);
-				if (measure_metrics) r.spirv_words += blob.word_count;
+			for (int32_t i = 0; i < ir.func_count && i < 16; i++) {
+				svsl_spirv_emit(&arena, &program, &ir.funcs[i], &blobs[i], &diags);
+				if (measure_metrics) r.spirv_words += blobs[i].word_count;
 			}
 		}
 		double t3 = now_ms();
 
 #ifdef SVSL_HAS_WGSL
 		if (diags.error_count == 0) {
-			for (int32_t i = 0; i < ir.func_count; i++) {
+			for (int32_t i = 0; i < ir.func_count && i < 16; i++) {
 				svsl_wgsl_blob_t blob = {0};
-				svsl_wgsl_emit(&arena, &program, &ir.funcs[i], &blob, &diags);
+				svsl_wgsl_emit(&arena, &program, &ir.funcs[i], blobs[i].vs_input_locations,
+				               &blob, &diags);
 				if (measure_metrics && blob.text) r.wgsl_bytes += blob.length;
 			}
 		}

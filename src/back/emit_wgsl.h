@@ -38,6 +38,13 @@ typedef struct svsl_wgsl_blob_t {
 // Emits WGSL for one entry point. Returns false only on hard errors (an error
 // diagnostic was added); an inexpressible stage returns true with text == NULL
 // and a warning diagnostic naming the offending feature and location.
+//
+// opt_vs_input_locations: the vertex stage's svsl_spirv_blob_t.vs_input_locations
+// (NULL otherwise). WGSL must declare exactly the vertex inputs the SKS meta
+// records — Dawn requires every declared attribute to be fed by the pipeline —
+// and the meta mirrors the SPIR-V module, so the SPIR-V emitter's recorded
+// locations are the single source of truth: -1 entries (inputs stripped as
+// unused) are pruned here too, survivors take the recorded location.
 bool svsl_wgsl_emit(svsl_arena_t *arena, const svsl_program_t *prog,
-                    const svsl_ir_func_t *fn, svsl_wgsl_blob_t *out_blob,
-                    svsl_diag_list_t *ref_diags);
+                    const svsl_ir_func_t *fn, const int32_t *opt_vs_input_locations,
+                    svsl_wgsl_blob_t *out_blob, svsl_diag_list_t *ref_diags);

@@ -97,7 +97,9 @@ svsl_result_t *svsl_compile(const svsl_source_t *source, const svsl_options_t *o
 		if ((impl->targets & svsl_target_wgsl) && impl->diags.error_count == 0) {
 			impl->wgsl_blobs = svsl_arena_alloc(arena, sizeof(svsl_wgsl_blob_t) * (impl->ir.func_count > 0 ? impl->ir.func_count : 1));
 			for (int32_t i = 0; i < impl->ir.func_count; i++)
-				svsl_wgsl_emit(arena, &impl->program, &impl->ir.funcs[i], &impl->wgsl_blobs[i], &impl->diags);
+				svsl_wgsl_emit(arena, &impl->program, &impl->ir.funcs[i],
+				               impl->blobs[i].vs_input_locations, // vertex-input truth
+				               &impl->wgsl_blobs[i], &impl->diags);
 		}
 #endif
 	}
