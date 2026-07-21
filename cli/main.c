@@ -30,6 +30,7 @@ typedef struct cli_t {
 	bool          sks;      // default when no output flag is given
 	bool          spv;
 	bool          header;
+	uint32_t      targets;  // svsl_target_ bits from -t (0 = spirv only)
 	bool          validate;
 	bool          force;
 	bool          half_strict16;
@@ -176,6 +177,7 @@ static bool compile_file(const cli_t *cli, const char *path) {
 		.include_cb = cli_include, .include_user = &ictx,
 		.entry_vertex = cli->entry_vs, .entry_pixel = cli->entry_ps, .entry_compute = cli->entry_cs,
 		.opt_level = cli->opt_level, .half_strict16 = cli->half_strict16,
+		.targets = cli->targets,
 		.porting_hints = cli->porting };
 	svsl_result_t *r = svsl_compile(&(svsl_source_t){ .text = source, .length = source_len,
 	                                                  .filename = path }, &opts);
@@ -215,6 +217,12 @@ static bool compile_file(const cli_t *cli, const char *path) {
 			}
 
 			if (!write_bytes(out_path, st->spirv, (size_t)st->spirv_word_count * 4)) { ok = false; continue; }
+
+			if (cli->spv && (cli->targets & svsl_target_wgsl) && st->wgsl) { // debugging aid: raw WGSL text beside the .spv
+				char wgsl_path[1040];
+				snprintf(wgsl_path, sizeof(wgsl_path), "%.*s.wgsl", (int32_t)strlen(out_path) - 4, out_path);
+				if (!write_bytes(wgsl_path, st->wgsl, (size_t)st->wgsl_length)) ok = false;
+			}
 
 			if (cli->validate) {
 				char cmd[1200];
@@ -270,6 +278,8 @@ static void usage(void) {
 		"usage: svslc [options] <files...>\n"
 		"  -o <path>          output file or directory\n"
 		"  -sks | -spv | -h   output format (default -sks)\n"
+		"  -t <s|w|sw>        container languages: SPIR-V, WGSL, or both (default s;\n"
+		"                     WGSL needs an SVSL_ENABLE_WGSL build)\n"
 		"  -vs/-ps/-cs <name> entry point names (default vs/ps/cs)\n"
 		"  -i <dir>           include search path\n"
 		"  -D NAME[=VALUE]    preprocessor define\n"
@@ -297,6 +307,14 @@ int main(int argc, char **argv) {
 		if (strcmp(arg, "-sks") == 0) { cli.sks = true; format_set = true; continue; }
 		if (strcmp(arg, "-spv") == 0) { cli.spv = true; format_set = true; continue; }
 		if (strcmp(arg, "-h") == 0) { cli.header = true; format_set = true; continue; }
+		if (strcmp(arg, "-t") == 0 && i + 1 < argc) { // skshaderc-style language set
+			for (const char *c = argv[++i]; *c; c++) {
+				if      (*c == 's') cli.targets |= svsl_target_spirv;
+				else if (*c == 'w') cli.targets |= svsl_target_wgsl;
+				else { fprintf(stderr, "svslc: unknown target '%c' in -t (use s and/or w)\n", *c); return 1; }
+			}
+			continue;
+		}
 		if (strcmp(arg, "--validate") == 0) { cli.validate = true; continue; }
 		if (strcmp(arg, "--half=strict16") == 0) { cli.half_strict16 = true; continue; }
 		if (strcmp(arg, "-Wporting") == 0)       { cli.porting = true;       continue; }

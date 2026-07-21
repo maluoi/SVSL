@@ -1,11 +1,12 @@
-// SKS container writer (StereoKit's SKSHADER format, version 9). One version
-// at a time, per the standing SKS policy — the version field lets runtimes
-// refuse old files, it is not a compatibility mechanism. Byte layout follows
+// SKS container writer (StereoKit's SKSHADER format). One version at a time,
+// per the standing SKS policy — the version field lets runtimes refuse old
+// files, it is not a compatibility mechanism. Byte layout follows
 // sksc.cpp::sksc_build_file / sksc_file.c exactly (the authoritative pair).
 
 #pragma once
 
 #include "../back/emit_spirv.h"
+#include "../back/emit_wgsl.h"
 #include "../ir/ir.h"
 #include "../sema/sema.h"
 
@@ -14,7 +15,12 @@ typedef struct svsl_sks_blob_t {
 	int32_t        size;
 } svsl_sks_blob_t;
 
-// blobs: one SPIR-V module per module->funcs entry, same order
+// blobs: one SPIR-V module per module->funcs entry, same order — always
+// required (metadata derives from them); `targets` decides which languages
+// the container carries (skshaderc -t style; 0 = spirv only). opt_wgsl adds
+// one WGSL stage record per entry whose blob has text, plus the v12 standalone
+// sampler records those stages bind.
 void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
                     const svsl_ir_module_t *module, const svsl_spirv_blob_t *blobs,
+                    const svsl_wgsl_blob_t *opt_wgsl, uint32_t targets,
                     svsl_sks_blob_t *out_blob);

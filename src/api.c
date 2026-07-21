@@ -11,6 +11,7 @@
 #include "sema/sema.h"
 #include "ir/ir.h"
 #include "back/emit_spirv.h"
+#include "back/emit_wgsl.h"
 #include "out/sks_write.h"
 #include "out/header_write.h"
 #include "out/reflect.h"
@@ -25,12 +26,22 @@ typedef struct impl_t {
 	svsl_diag_list_t   diags;
 	svsl_program_t     program;
 	svsl_ir_module_t   ir;
-	svsl_spirv_blob_t *blobs; // one per IR entry point (arena-sized after ir_build)
+	svsl_spirv_blob_t *blobs;      // one per IR entry point (arena-sized after ir_build)
+	svsl_wgsl_blob_t  *wgsl_blobs; // one per entry when targets include wgsl; else NULL
+	uint32_t           targets;    // svsl_target_ bits, normalized (0 → spirv)
 	svsl_sks_blob_t    sks;   // memoized container; .bytes stays NULL until first serialized
 	bool               have_program;
 	bool               have_ir;
 	svsl_result_t      result; // returned to the caller; _impl points back here
 } impl_t;
+
+bool svsl_supports_wgsl(void) {
+#ifdef SVSL_HAS_WGSL
+	return true;
+#else
+	return false;
+#endif
+}
 
 static const char *arena_cstr(svsl_arena_t *arena, svsl_str_t s) {
 	return svsl_arena_strndup(arena, s.ptr, (size_t)(s.len < 0 ? 0 : s.len));
@@ -65,13 +76,30 @@ svsl_result_t *svsl_compile(const svsl_source_t *source, const svsl_options_t *o
 	svsl_sema_run(arena, ast, &pp, filename, &sopt, &impl->program, &impl->diags);
 	impl->have_program = true;
 
+	impl->targets = opt.targets ? opt.targets : svsl_target_spirv;
+	if ((impl->targets & svsl_target_wgsl) && !svsl_supports_wgsl())
+		svsl_diag_add(arena, &impl->diags, svsl_severity_error, (svsl_loc_t){ .file = filename },
+		              "WGSL output requested, but this libsvsl was built without SVSL_ENABLE_WGSL");
+	if (impl->targets & ~(uint32_t)(svsl_target_spirv | svsl_target_wgsl))
+		svsl_diag_add(arena, &impl->diags, svsl_severity_error, (svsl_loc_t){ .file = filename },
+		              "options.targets holds an unknown target bit");
+
 	if (impl->diags.error_count == 0) {
 		svsl_ir_build(arena, &impl->program, opt.opt_level, &impl->ir, &impl->diags);
 		impl->have_ir = true;
+		// SPIR-V always compiles — reflection metadata (vertex locations, feature
+		// bits, op counts) derives from it; targets only govern serialization
 		impl->blobs = svsl_arena_alloc(arena, sizeof(svsl_spirv_blob_t) * (impl->ir.func_count > 0 ? impl->ir.func_count : 1));
 		if (impl->diags.error_count == 0)
 			for (int32_t i = 0; i < impl->ir.func_count; i++)
 				svsl_spirv_emit(arena, &impl->program, &impl->ir.funcs[i], &impl->blobs[i], &impl->diags);
+#ifdef SVSL_HAS_WGSL
+		if ((impl->targets & svsl_target_wgsl) && impl->diags.error_count == 0) {
+			impl->wgsl_blobs = svsl_arena_alloc(arena, sizeof(svsl_wgsl_blob_t) * (impl->ir.func_count > 0 ? impl->ir.func_count : 1));
+			for (int32_t i = 0; i < impl->ir.func_count; i++)
+				svsl_wgsl_emit(arena, &impl->program, &impl->ir.funcs[i], &impl->wgsl_blobs[i], &impl->diags);
+		}
+#endif
 	}
 
 	bool                 ok          = impl->diags.error_count == 0;
@@ -86,7 +114,9 @@ svsl_result_t *svsl_compile(const svsl_source_t *source, const svsl_options_t *o
 				.stage            = e->stage,
 				.entry            = arena_cstr(arena, e->name),
 				.spirv            = impl->blobs[i].words,
-				.spirv_word_count = impl->blobs[i].word_count };
+				.spirv_word_count = impl->blobs[i].word_count,
+				.wgsl             = impl->wgsl_blobs ? impl->wgsl_blobs[i].text   : NULL,
+				.wgsl_length      = impl->wgsl_blobs ? impl->wgsl_blobs[i].length : 0 };
 		}
 	}
 
@@ -123,7 +153,8 @@ svsl_bytes_t svsl_result_sks(svsl_result_t *result) {
 	impl_t *impl = result->_impl;
 	if (!result->ok || !impl->have_ir) return (svsl_bytes_t){0};
 	if (!impl->sks.bytes) // serialize once; -sks, -h, and reflection share the blob
-		svsl_sks_write(&impl->arena, &impl->program, &impl->ir, impl->blobs, &impl->sks);
+		svsl_sks_write(&impl->arena, &impl->program, &impl->ir, impl->blobs,
+		               impl->wgsl_blobs, impl->targets, &impl->sks);
 	return (svsl_bytes_t){ .data = impl->sks.bytes, .size = impl->sks.size };
 }
 

@@ -1,5 +1,5 @@
 // SKS container tests: our writer's metadata must match what skshaderc
-// produces for the same shader, record by record (both emit v11 — one version
+// produces for the same shader, record by record (both emit v12 — one version
 // at a time). The reference comparison runs when the local skshaderc build is
 // present; the structural checks always run.
 
@@ -60,6 +60,7 @@ typedef struct sks_file_t {
 	uint16_t   version;
 	uint64_t   features;
 	uint32_t   stage_count, buffer_count, resource_count, spec_count, wave_size;
+	uint32_t   sampler_count; // v12
 	uint32_t   tile_apron[2];
 	int32_t    vertex_input_count;
 	char       name[256];
@@ -81,9 +82,10 @@ static bool sks_read(const uint8_t *data, int32_t size, sks_file_t *out) {
 	TAKE(out->name, 256);
 	TAKE(&out->buffer_count, 4);
 	TAKE(&out->resource_count, 4);
-	if (out->version != 11) return false; // one version at a time
+	if (out->version != 12) return false; // one version at a time
 	TAKE(&out->vertex_input_count, 4);
 	TAKE(&out->spec_count, 4);
+	TAKE(&out->sampler_count, 4); // v12
 	TAKE(&out->features, 8);
 	p += 8;  // reserved features word
 	p += 24; // ops
@@ -124,6 +126,7 @@ static bool sks_read(const uint8_t *data, int32_t size, sks_file_t *out) {
 		TAKE(&spec->id, 4); TAKE(&spec->default_bits, 4);
 		TAKE(&spec->type, 2); TAKE(&spec->stage_bits, 1);
 	}
+	p += out->sampler_count * (32 + 2 + 1 + 2); // v12 sampler records (WGSL only)
 	#undef TAKE
 	return true;
 }
@@ -179,7 +182,7 @@ static bool compile_sks(svsl_arena_t *arena, const char *shader, svsl_sks_blob_t
 	svsl_spirv_blob_t blobs[8] = {0};
 	for (int32_t i = 0; i < ir.func_count && i < 8; i++)
 		if (!svsl_spirv_emit(arena, &prog, &ir.funcs[i], &blobs[i], &diags)) return false;
-	svsl_sks_write(arena, &prog, &ir, blobs, out_blob);
+	svsl_sks_write(arena, &prog, &ir, blobs, NULL, svsl_target_spirv, out_blob);
 	return true;
 }
 
@@ -193,7 +196,7 @@ static void test_sks_structure(void) {
 	sks_file_t f = {0};
 	TEST_CHECK(sks_read(blob.bytes, blob.size, &f));
 
-	TEST_CHECK(f.version == 11);
+	TEST_CHECK(f.version == 12);
 	TEST_CHECK(f.stage_count == 2);
 	TEST_CHECK(strcmp(f.name, "sk/unlit") == 0);
 	TEST_CHECK(f.buffer_count == 2);

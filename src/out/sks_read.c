@@ -81,6 +81,7 @@ svsl_sks_file_t *svsl_sks_parse(const void *bytes, int32_t size) {
 	int32_t resource_count= (int32_t)rd_u32(&r);
 	int32_t vin_count     = rd_i32(&r);
 	int32_t spec_count    = (int32_t)rd_u32(&r);
+	int32_t sampler_count = (int32_t)rd_u32(&r); // v12
 	file->features        = rd_u64(&r);
 	rd_u64(&r);            // reserved features word
 	rd_take(&r, 24);       // op counts (vertex/pixel total/tex/flow)
@@ -89,7 +90,8 @@ svsl_sks_file_t *svsl_sks_parse(const void *bytes, int32_t size) {
 	file->tile_apron[1]   = rd_u32(&r);
 	if (r.bad || file->version != SVSL_SKS_VERSION) goto fail;
 	if (!count_ok(&r, buffer_count) || !count_ok(&r, resource_count) ||
-	    !count_ok(&r, vin_count) || !count_ok(&r, spec_count) || !count_ok(&r, stage_count))
+	    !count_ok(&r, vin_count) || !count_ok(&r, spec_count) ||
+	    !count_ok(&r, sampler_count) || !count_ok(&r, stage_count))
 		goto fail;
 
 	// --- buffers ---
@@ -157,23 +159,43 @@ svsl_sks_file_t *svsl_sks_parse(const void *bytes, int32_t size) {
 		specs[i].stage_bits   = rd_u8(&r);
 	}
 
-	// --- stages (per-entry SPIR-V) ---
-	svsl_sks_stage_t *stages = ALLOC_N(svsl_sks_stage_t, stage_count);
-	for (int32_t i = 0; i < stage_count; i++) {
-		rd_i32(&r);                                   // language tag (skr_shader_lang_spirv)
-		stages[i].stage     = (svsl_stage_)rd_i32(&r);
-		stages[i].wave_size = rd_u32(&r);
-		int32_t spirv_bytes = (int32_t)rd_u32(&r);
-		if (r.bad || spirv_bytes < 0 || (spirv_bytes & 3) || spirv_bytes > r.size - r.pos) goto fail;
-		stages[i].spirv            = (const uint32_t *)rd_blob(&r, spirv_bytes);
-		stages[i].spirv_word_count = spirv_bytes / 4;
+	// --- standalone samplers (v12, WGSL stages only) ---
+	svsl_sks_sampler_t *samplers = ALLOC_N(svsl_sks_sampler_t, sampler_count);
+	for (int32_t i = 0; i < sampler_count; i++) {
+		samplers[i].name        = rd_str(&r, 32);
+		samplers[i].slot        = rd_u16(&r);
+		samplers[i].stage_bits  = rd_u8(&r);
+		samplers[i].paired_slot = rd_u16(&r);
 	}
+
+	// --- stages ---
+	// Only SPIR-V stages surface in the view for now; a v12 container may also
+	// carry WGSL text stages (skr_shader_lang_wgsl = 5), which are skipped here
+	// until the parse view grows a language field alongside the WGSL backend.
+	svsl_sks_stage_t *stages      = ALLOC_N(svsl_sks_stage_t, stage_count);
+	int32_t           spirv_count = 0;
+	for (int32_t i = 0; i < stage_count; i++) {
+		int32_t     lang       = rd_i32(&r);
+		svsl_stage_ stage      = (svsl_stage_)rd_i32(&r);
+		uint32_t    wave_size  = rd_u32(&r);
+		int32_t     code_bytes = (int32_t)rd_u32(&r);
+		if (r.bad || code_bytes < 0 || code_bytes > r.size - r.pos) goto fail;
+		if (lang != 1) { rd_take(&r, code_bytes); continue; } // not skr_shader_lang_spirv
+		if (code_bytes & 3) goto fail;
+		stages[spirv_count].stage            = stage;
+		stages[spirv_count].wave_size        = wave_size;
+		stages[spirv_count].spirv            = (const uint32_t *)rd_blob(&r, code_bytes);
+		stages[spirv_count].spirv_word_count = code_bytes / 4;
+		spirv_count++;
+	}
+	stage_count = spirv_count;
 	if (r.bad) goto fail;
 
 	file->buffers            = buffers;       file->buffer_count       = buffer_count;
 	file->vertex_inputs      = vins;          file->vertex_input_count = vin_count;
 	file->resources          = resources;     file->resource_count     = resource_count;
 	file->spec_consts        = specs;         file->spec_count         = spec_count;
+	file->samplers           = samplers;      file->sampler_count      = sampler_count;
 	file->stages             = stages;        file->stage_count        = stage_count;
 	file->_impl              = impl;
 	return file;

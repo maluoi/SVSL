@@ -23,7 +23,7 @@ extern "C" {
 
 // The SKS container version this build reads and writes. One version at a time:
 // the field lets runtimes refuse foreign files, it is not a compatibility knob.
-#define SVSL_SKS_VERSION 11
+#define SVSL_SKS_VERSION 12
 
 // ============================================================================
 // Diagnostics
@@ -83,6 +83,12 @@ typedef enum svsl_opt_level_ {
 	svsl_opt_aggressive, // -O2: adds float-algebraic identities
 } svsl_opt_level_;
 
+// Shader languages an SKS container can carry (bit flags; 0 = spirv only)
+typedef enum svsl_target_ {
+	svsl_target_spirv = 1 << 0, // Vulkan runtimes
+	svsl_target_wgsl  = 1 << 1, // the WebGPU runtime (SVSL_ENABLE_WGSL builds)
+} svsl_target_;
+
 typedef struct svsl_source_t {
 	const char *text;     // the SVSL source
 	int32_t     length;   // 0 or -1 = use strlen(text)
@@ -104,6 +110,14 @@ typedef struct svsl_options_t {
 	// code generation
 	svsl_opt_level_ opt_level;     // 0 == svsl_opt_default
 	bool            half_strict16; // treat every `half` as an exact 16-bit float
+	// Which shader languages the SKS container carries (skshaderc's -t s/w/sw).
+	// 0 = SPIR-V only. SPIR-V always compiles internally — reflection metadata
+	// derives from it — but is serialized only when requested, so WebGPU-only
+	// assets don't ship dead SPIR-V. WGSL needs a libsvsl built with
+	// SVSL_ENABLE_WGSL (see svsl_supports_wgsl) — a hard error otherwise; WGSL
+	// stages using features browser WebGPU can't express are skipped with a
+	// warning, and the SKS then carries no WGSL for them.
+	uint32_t        targets;       // svsl_target_ bits
 
 	// diagnostics
 	bool            porting_hints; // emit `porting` hints on legacy HLSL spellings (default off)
@@ -124,6 +138,9 @@ typedef struct svsl_stage_output_t {
 	const char     *entry;            // entry-point name
 	const uint32_t *spirv;            // SPIR-V module (words)
 	int32_t         spirv_word_count;
+	const char     *wgsl;             // WGSL text; NULL unless options.emit_wgsl
+	                                  // was set and the stage was expressible
+	int32_t         wgsl_length;
 } svsl_stage_output_t;
 
 // Returned by svsl_compile. Transparent for the fields you read; `_impl` owns all
@@ -142,6 +159,10 @@ typedef struct svsl_result_t {
 // Compiles source to SPIR-V. Never returns NULL except on allocation failure;
 // inspect `.ok` and `.diagnostics`. Free with svsl_result_free.
 svsl_result_t *svsl_compile(const svsl_source_t *source, const svsl_options_t *opt_options);
+
+// True when this libsvsl was built with SVSL_ENABLE_WGSL, i.e. options.emit_wgsl
+// is available.
+bool svsl_supports_wgsl(void);
 
 // Frees the result and everything reachable from it.
 void svsl_result_free(svsl_result_t *result);
@@ -219,7 +240,9 @@ typedef struct svsl_sks_resource_t {
 	uint8_t     stage_bits;    // svsl_stage_ mask
 	uint8_t     register_type; // svsl_sks_register_
 	uint32_t    element_size;  // structured buffers: element stride
-	uint8_t     shape;         // bits: 0-2 dim, 3 arrayed, 4 multisampled, 5 comparison
+	uint8_t     shape;         // bits: 0-2 dim, 3 arrayed, 4 multisampled, 5 comparison;
+	                           // sampled textures: 6 = QCOM image-processing sampler;
+	                           // storage images (v12): 6 = written, 7 = read
 	uint8_t     image_format;  // SpvImageFormat for storage images, else 0
 } svsl_sks_resource_t;
 
@@ -239,6 +262,17 @@ typedef struct svsl_sks_spec_t {
 	uint8_t     stage_bits;   // svsl_stage_ mask
 } svsl_sks_spec_t;
 
+// A standalone sampler binding (v12, WGSL stages only): WGSL keeps textures and
+// samplers separate, so split samplers bind on their own at s-register + 400.
+// paired_slot names the texture resource whose sampler settings apply
+// (0xFFFF = unpaired). Empty in containers without WGSL stages.
+typedef struct svsl_sks_sampler_t {
+	const char *name;
+	uint16_t    slot;        // WGSL binding (s register + 400)
+	uint8_t     stage_bits;  // svsl_stage_ mask
+	uint16_t    paired_slot; // texture resource bind slot, 0xFFFF = unpaired
+} svsl_sks_sampler_t;
+
 typedef struct svsl_sks_stage_t {
 	svsl_stage_     stage;
 	uint32_t        wave_size;        // 0 = unspecified
@@ -257,6 +291,7 @@ typedef struct svsl_sks_file_t {
 	const svsl_sks_vertex_input_t *vertex_inputs;  int32_t vertex_input_count;
 	const svsl_sks_resource_t     *resources;      int32_t resource_count;
 	const svsl_sks_spec_t         *spec_consts;    int32_t spec_count;
+	const svsl_sks_sampler_t      *samplers;       int32_t sampler_count; // v12
 	const svsl_sks_stage_t        *stages;         int32_t stage_count;
 
 	void *_impl; // internal; do not touch

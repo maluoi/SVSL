@@ -14,6 +14,7 @@ option(SVSL_BUILD_TESTS "Build and register the unit/corpus tests"     ${PROJECT
 option(SVSL_INSTALL     "Generate install rules"                       ${PROJECT_IS_TOP_LEVEL})
 option(SVSL_BUILD_VIEW  "Build the svsl_view visual test app"          OFF)
 option(SVSL_BUILD_ISA   "Build the svsl_isa RDNA ISA measurement tool" OFF)
+option(SVSL_ENABLE_WGSL "Compile the WGSL text backend (WebGPU)"       OFF)
 
 # Directory-scoped: applies to every target here, leaks nothing into a parent.
 set(CMAKE_C_STANDARD          11)
@@ -46,6 +47,7 @@ add_library(svsl STATIC
 	src/tables/types_builtin.c
 	src/sema/types.c
 	src/sema/layout.c
+	src/sema/const_eval.c
 	src/sema/sema.c
 	src/sema/check.c
 	src/tables/intrinsics.c
@@ -72,6 +74,13 @@ target_include_directories(svsl PUBLIC
 )
 target_include_directories(svsl PRIVATE src vendor)
 target_compile_options    (svsl PRIVATE ${SVSL_WARNINGS})
+
+# WGSL backend: pure C text emission, still zero-dependency — the option only
+# gates code size. svsl_options_t.emit_wgsl errors without it.
+if (SVSL_ENABLE_WGSL)
+	target_sources            (svsl PRIVATE src/back/emit_wgsl.c)
+	target_compile_definitions(svsl PRIVATE SVSL_HAS_WGSL)
+endif()
 
 # --- svslc: CLI compiler ----------------------------------------------------
 

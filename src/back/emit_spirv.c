@@ -8,6 +8,7 @@
 #include "spirv_builder.h"
 #include "../ir/usage.h"
 #include "../ir/ir_operands.h"
+#include "../sema/const_eval.h"
 #include "../tables/formats.h"
 #include "../tables/intrinsics.h"
 #include "../tables/semantics.h"
@@ -441,97 +442,6 @@ static SpvStorageClass tile_or_uniform_class(emit_t *e, const svsl_resource_t *r
 	return SpvStorageClassTileAttachmentQCOM;
 }
 
-// numeric constant folding for initializers: literals, +-*/, negation, and
-// references to other constant globals
-static bool const_eval_num(emit_t *e, const svsl_ast_expr_t *v, double *out) {
-	switch (v->kind) {
-	case svsl_expr_float_lit: *out = v->float_lit.value; return true;
-	case svsl_expr_int_lit:   *out = (double)(int64_t)v->int_lit.value; return true;
-	case svsl_expr_bool_lit:  *out = v->bool_lit ? 1 : 0; return true;
-	case svsl_expr_unary:
-		if (v->unary.op != svsl_tok_minus && v->unary.op != svsl_tok_plus) return false;
-		if (!const_eval_num(e, v->unary.operand, out)) return false;
-		if (v->unary.op == svsl_tok_minus) *out = -*out;
-		return true;
-	case svsl_expr_ident: {
-		// global initializers aren't body-checked, so resolve by name
-		for (int32_t i = 0; i < e->prog->const_globals.count; i++) {
-			const svsl_global_t *g = &e->prog->const_globals.items[i];
-			if (svsl_str_eq(g->name, v->ident) && g->var && g->var->init)
-				return const_eval_num(e, g->var->init, out);
-		}
-		return false;
-	}
-	case svsl_expr_binary: {
-		double a, b;
-		if (!const_eval_num(e, v->binary.lhs, &a) || !const_eval_num(e, v->binary.rhs, &b)) return false;
-		switch (v->binary.op) {
-		case svsl_tok_plus:  *out = a + b; return true;
-		case svsl_tok_minus: *out = a - b; return true;
-		case svsl_tok_star:  *out = a * b; return true;
-		case svsl_tok_slash: if (b == 0) return false; *out = a / b; return true;
-		default: return false;
-		}
-	}
-	case svsl_expr_cast:
-		return const_eval_num(e, v->cast.operand, out);
-	default:
-		return false;
-	}
-}
-
-// componentwise fold for vector-typed constant expressions: constructors and
-// init lists fill, scalars splat, and +-*/ combine (1.0 / float3(...) et al.)
-static bool const_eval_vec(emit_t *e, const svsl_ast_expr_t *v, int32_t n, double *out) {
-	switch (v->kind) {
-	case svsl_expr_init_list:
-	case svsl_expr_ctor: {
-		const svsl_ast_expr_t **items = v->kind == svsl_expr_init_list
-			? (const svsl_ast_expr_t **)v->init_list.items
-			: (const svsl_ast_expr_t **)v->ctor.args;
-		int32_t count = v->kind == svsl_expr_init_list ? v->init_list.count : v->ctor.arg_count;
-		if (count == 1) {
-			double s;
-			if (!const_eval_num(e, items[0], &s)) return false;
-			for (int32_t i = 0; i < n; i++) out[i] = s;
-			return true;
-		}
-		if (count != n) return false;
-		for (int32_t i = 0; i < n; i++)
-			if (!const_eval_num(e, items[i], &out[i])) return false;
-		return true;
-	}
-	case svsl_expr_binary: {
-		double a[4], b[4];
-		if (!const_eval_vec(e, v->binary.lhs, n, a) ||
-		    !const_eval_vec(e, v->binary.rhs, n, b)) return false;
-		for (int32_t i = 0; i < n; i++) {
-			switch (v->binary.op) {
-			case svsl_tok_plus:  out[i] = a[i] + b[i]; break;
-			case svsl_tok_minus: out[i] = a[i] - b[i]; break;
-			case svsl_tok_star:  out[i] = a[i] * b[i]; break;
-			case svsl_tok_slash: if (b[i] == 0) return false; out[i] = a[i] / b[i]; break;
-			default: return false;
-			}
-		}
-		return true;
-	}
-	case svsl_expr_ident: // another const global of vector type
-		for (int32_t i = 0; i < e->prog->const_globals.count; i++) {
-			const svsl_global_t *g = &e->prog->const_globals.items[i];
-			if (svsl_str_eq(g->name, v->ident) && g->var && g->var->init)
-				return const_eval_vec(e, g->var->init, n, out);
-		}
-		return false;
-	default: { // scalar expression splats across the vector
-		double s;
-		if (!const_eval_num(e, v, &s)) return false;
-		for (int32_t i = 0; i < n; i++) out[i] = s;
-		return true;
-	}
-	}
-}
-
 static uint32_t spv_const_scalar(emit_t *e, svsl_scalar_ scalar, double f) {
 	svsl_spv_t *spv = &e->spv;
 	uint32_t    st  = spv_scalar_type(e, scalar);
@@ -560,12 +470,12 @@ static uint32_t spv_const_expr(emit_t *e, const svsl_ast_expr_t *expr, svsl_type
 
 	if (t->kind == svsl_type_scalar) {
 		double f;
-		if (!const_eval_num(e, expr, &f)) return 0;
+		if (!svsl_const_eval_num(e->prog, expr, &f)) return 0;
 		return spv_const_scalar(e, t->scalar, f);
 	}
 	if (t->kind == svsl_type_vector) { // componentwise, including constant math
 		double vals[4];
-		if (!const_eval_vec(e, expr, t->count, vals)) return 0;
+		if (!svsl_const_eval_vec(e->prog, expr, t->count, vals)) return 0;
 		uint32_t parts[4];
 		for (int32_t i = 0; i < t->count; i++)
 			if (!(parts[i] = spv_const_scalar(e, t->scalar, vals[i]))) return 0;
@@ -833,6 +743,14 @@ static void io_decorate(emit_t *e, uint32_t var, svsl_str_t semantic, svsl_sem_i
 	if (svsl_semantic_lookup(semantic, io, &info) && info.is_builtin) {
 		svsl_spv_inst3(&e->spv, &e->spv.decor, SpvOpDecorate, var, SpvDecorationBuiltIn, info.builtin);
 		if (info.builtin == SpvBuiltInViewIndex) svsl_spv_cap(&e->spv, SpvCapabilityMultiView);
+		if (info.builtin == SpvBuiltInLayer) {
+			if (io == svsl_sem_vs_out) { // SV_RenderTargetArrayIndex from the vertex stage
+				svsl_spv_cap(&e->spv, SpvCapabilityShaderViewportIndexLayerEXT);
+				svsl_spv_extension(&e->spv, "SPV_EXT_shader_viewport_index_layer");
+			} else { // reading it back in the pixel stage takes the Geometry capability
+				svsl_spv_cap(&e->spv, SpvCapabilityGeometry);
+			}
+		}
 		if (info.builtin == SpvBuiltInFragDepth) {
 			e->needs_depth_replacing = true;
 			e->depth_mode            = info.depth_mode;

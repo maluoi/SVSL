@@ -61,6 +61,8 @@ bool svsl_semantic_lookup(svsl_str_t semantic, svsl_sem_io_ io, svsl_semantic_in
 		{ "SV_VERTEXID",         SpvBuiltInVertexIndex,          IO(svsl_sem_vs_in) },
 		{ "SV_INSTANCEID",       SpvBuiltInInstanceIndex,        IO(svsl_sem_vs_in) },
 		{ "SV_VIEWID",           SpvBuiltInViewIndex,            IO(svsl_sem_vs_in) | IO(svsl_sem_ps_in) },
+		// legacy instanced stereo: routes the primitive to a layered-target slice
+		{ "SV_RENDERTARGETARRAYINDEX", SpvBuiltInLayer,          IO(svsl_sem_vs_out) | IO(svsl_sem_ps_in) },
 		{ "SV_ISFRONTFACE",      SpvBuiltInFrontFacing,          IO(svsl_sem_ps_in) },
 		{ "SV_SAMPLEINDEX",      SpvBuiltInSampleId,             IO(svsl_sem_ps_in) },
 		{ "SV_COVERAGE",         SpvBuiltInSampleMask,           IO(svsl_sem_ps_in) | IO(svsl_sem_ps_out) },

@@ -184,6 +184,13 @@ enum {
 	sks_feat_qcom_block_match     = 19, // TextureBlockMatchQCOM
 	sks_feat_qcom_image_proc2     = 20, // VK_QCOM_image_processing2 (+SPV_QCOM_image_processing2)
 	sks_feat_qcom_tile_shading    = 21, // VK_QCOM_tile_shading (+SPV_QCOM_tile_shading)
+	// VK_EXT_shader_viewport_index_layer (extension presence is the feature;
+	// core-optional 1.2 shaderOutputLayer): SV_RenderTargetArrayIndex written
+	// from the vertex stage, the legacy instanced-stereo pattern
+	sks_feat_output_layer         = 22, // ShaderViewportIndexLayerEXT
+	// VkPhysicalDeviceFeatures.geometryShader — in practice a fragment stage
+	// *reading* SV_RenderTargetArrayIndex (SPIR-V 1.3 gates Layer input on it)
+	sks_feat_geometry             = 23, // Geometry
 	sks_feat_unknown          = 63, // capability/extension with no assigned bit
 };
 
@@ -223,6 +230,8 @@ static const feat_row_t feature_caps[] = {
 	{ SpvCapabilityTextureBlockMatchQCOM,            sks_feat_qcom_block_match },
 	{ SpvCapabilityTextureBlockMatch2QCOM,           sks_feat_qcom_image_proc2 },
 	{ SpvCapabilityTileShadingQCOM,                  sks_feat_qcom_tile_shading },
+	{ SpvCapabilityShaderViewportIndexLayerEXT,      sks_feat_output_layer },
+	{ SpvCapabilityGeometry,                         sks_feat_geometry },
 };
 // capabilities every Vulkan 1.1 runtime satisfies — no bit, never unknown
 static const uint32_t baseline_caps[] = {
@@ -240,6 +249,7 @@ static const struct { const char *name; uint8_t bit; } feature_exts[] = {
 	{ "SPV_QCOM_image_processing",          0xFF },
 	{ "SPV_QCOM_image_processing2",         sks_feat_qcom_image_proc2 },
 	{ "SPV_QCOM_tile_shading",              sks_feat_qcom_tile_shading },
+	{ "SPV_EXT_shader_viewport_index_layer", sks_feat_output_layer },
 };
 
 // Writes one stage's size + SPIR-V. The runtime loads entry points by fixed
@@ -357,9 +367,30 @@ static void count_ops(const svsl_spirv_blob_t *blob, int32_t *out_total,
 	}
 }
 
+// v12: storage-image read/write usage (shape bit 6 = written, bit 7 = read),
+// derived from the IR and merged across stages, so WebGPU bind group layouts
+// can declare exact access. The Vulkan runtime ignores the bits.
+static void image_access_bits(const svsl_ir_module_t *module, int32_t res_count,
+                              uint8_t *out_bits) {
+	for (int32_t f = 0; f < module->func_count; f++) {
+		const svsl_ir_func_t *fn = &module->funcs[f];
+		for (int32_t i = 0; i < fn->insts.count; i++) {
+			const svsl_ir_inst_t *inst = &fn->insts.items[i];
+			uint8_t bits = inst->op == svsl_ir_image_load   ? 0x80 :
+			               inst->op == svsl_ir_image_store  ? 0x40 :
+			               inst->op == svsl_ir_image_atomic ? 0xC0 : 0;
+			if (bits && inst->args[0] < (uint32_t)res_count)
+				out_bits[inst->args[0]] |= bits;
+		}
+	}
+}
+
 void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
                     const svsl_ir_module_t *module, const svsl_spirv_blob_t *blobs,
+                    const svsl_wgsl_blob_t *opt_wgsl, uint32_t targets,
                     svsl_sks_blob_t *out_blob) {
+	bool with_spirv = targets == 0 || (targets & svsl_target_spirv) != 0;
+	bool with_wgsl  = opt_wgsl != NULL && (targets & svsl_target_wgsl) != 0;
 	sks_t w = { .arena = arena };
 	svsl_usage_t usage;
 	svsl_ir_analyze_usage(arena, prog, module, &usage);
@@ -410,15 +441,43 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 	for (int32_t i = 0; i < prog->vertex_inputs.count; i++)
 		if (vs_locs && vs_locs[i] >= 0) used_inputs++;
 
+	int32_t stage_records = with_spirv ? module->func_count : 0;
+	if (with_wgsl)
+		for (int32_t i = 0; i < module->func_count; i++)
+			if (opt_wgsl[i].text) stage_records++;
+
 	const char tag[8] = { 'S', 'K', 'S', 'H', 'A', 'D', 'E', 'R' };
 	wbytes(&w, tag, 8);
 	wu16(&w, SVSL_SKS_VERSION); // one version at a time; runtimes refuse anything else
-	wu32(&w, (uint32_t)module->func_count);
+	wu32(&w, (uint32_t)stage_records);
 	wstr(&w, prog->name_from_meta ? prog->name : (svsl_str_t){0}, 256); // empty without //--name
 	wu32(&w, (uint32_t)buffer_count);
 	wu32(&w, (uint32_t)resource_count);
+	// v12: standalone-sampler records exist only for WGSL stages; dedup across
+	// stages by name (a sampler shared by vs+ps merges its stage bits)
+	struct { svsl_str_t name; uint16_t slot, paired; uint8_t stage_bits; } wgsl_samplers[32];
+	int32_t wgsl_sampler_count = 0;
+	if (with_wgsl)
+		for (int32_t i = 0; i < module->func_count; i++)
+			for (int32_t s = 0; s < opt_wgsl[i].sampler_count; s++) {
+				const svsl_wgsl_sampler_t *smp = &opt_wgsl[i].samplers[s];
+				int32_t found = -1;
+				for (int32_t k = 0; k < wgsl_sampler_count; k++)
+					if (svsl_str_eq(wgsl_samplers[k].name, smp->name)) found = k;
+				if (found < 0 && wgsl_sampler_count < 32) {
+					found = wgsl_sampler_count++;
+					wgsl_samplers[found].name       = smp->name;
+					wgsl_samplers[found].slot       = smp->slot;
+					wgsl_samplers[found].paired     = smp->paired_slot;
+					wgsl_samplers[found].stage_bits = 0;
+				}
+				if (found >= 0)
+					wgsl_samplers[found].stage_bits |= (uint8_t)module->funcs[i].entry->stage;
+			}
+
 	wi32(&w, used_inputs);
 	wu32(&w, (uint32_t)prog->spec_consts.count);
+	wu32(&w, (uint32_t)wgsl_sampler_count); // v12
 	uint64_t features = 0; // device-feature mask + reserved growth room
 	for (int32_t i = 0; i < module->func_count; i++) {
 		features |= feature_bits(&blobs[i]);
@@ -445,6 +504,9 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 
 	// QCOM image-processing classification, recorded per stage by the emitters;
 	// any stage's classified use decides the resource's register form
+	uint8_t *img_access = svsl_arena_alloc(arena, (size_t)(prog->resources.count > 0 ? prog->resources.count : 1));
+	image_access_bits(module, prog->resources.count, img_access);
+
 	uint8_t *qcom_use = svsl_arena_alloc(arena, (size_t)(prog->resources.count > 0 ? prog->resources.count : 1));
 	for (int32_t f = 0; f < module->func_count; f++)
 		if (blobs[f].qcom_res_use)
@@ -533,6 +595,9 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 			    (qcom_use[index] == svsl_qcom_use_ip_sampler ||
 			     qcom_use[index] == svsl_qcom_use_bm_window_sampler))
 				shape |= 1 << 6;
+			// v12: storage images carry written/read bits instead (6/7)
+			if (res->kind == svsl_res_image)
+				shape |= img_access[index];
 			const svsl_type_t *rt = svsl_type_get(&prog->types, res->type);
 			if (rt->kind == svsl_type_array) rt = svsl_type_get(&prog->types, rt->elem);
 			uint8_t format = rt->kind == svsl_type_image
@@ -556,12 +621,30 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 		}
 	}
 
-	for (int32_t i = 0; i < module->func_count; i++) {
-		wi32(&w, 1); // skr_shader_lang_spirv
-		wi32(&w, (int32_t)module->funcs[i].entry->stage);
-		wu32(&w, (uint32_t)module->funcs[i].entry->wave_size); // per-entry wave size
-		write_stage_spirv(&w, &blobs[i], module->funcs[i].entry->stage);
+	// v12: standalone-sampler records (WGSL stages only)
+	for (int32_t i = 0; i < wgsl_sampler_count; i++) {
+		wstr(&w, wgsl_samplers[i].name, 32);
+		wu16(&w, wgsl_samplers[i].slot);
+		wu8 (&w, wgsl_samplers[i].stage_bits);
+		wu16(&w, wgsl_samplers[i].paired);
 	}
+
+	if (with_spirv)
+		for (int32_t i = 0; i < module->func_count; i++) {
+			wi32(&w, 1); // skr_shader_lang_spirv
+			wi32(&w, (int32_t)module->funcs[i].entry->stage);
+			wu32(&w, (uint32_t)module->funcs[i].entry->wave_size); // per-entry wave size
+			write_stage_spirv(&w, &blobs[i], module->funcs[i].entry->stage);
+		}
+	if (with_wgsl)
+		for (int32_t i = 0; i < module->func_count; i++) {
+			if (!opt_wgsl[i].text) continue; // stage skipped: no WGSL blob
+			wi32(&w, 5); // skr_shader_lang_wgsl
+			wi32(&w, (int32_t)module->funcs[i].entry->stage);
+			wu32(&w, 0); // wave size is meaningless for WGSL
+			wu32(&w, (uint32_t)opt_wgsl[i].length + 1); // NUL included
+			wbytes(&w, opt_wgsl[i].text, opt_wgsl[i].length + 1);
+		}
 
 	out_blob->bytes = w.out.items;
 	out_blob->size  = w.out.count;

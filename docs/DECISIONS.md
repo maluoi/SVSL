@@ -30,7 +30,7 @@ prototype failure is addressed *structurally* here:
 | v1 scope | HLSL core + float16/layouts/pushconstant/multiview/spec-constants/demote/interp + subgroups/atomics/barriers + early-Z toolkit/`[wave_size]`/`SubpassInput` | Honest spec; the corpus needs most of it anyway; the additions are decoration-cheap except SubpassInput (runtime support landed in sk_renderer) |
 | Names over numbers | Bare `specialization` auto-ids; `register()` optional with deterministic auto-binding; locations by declaration order | Reflection is name-based, so numbers are an interop detail; auto-assignment never collides with explicit values |
 | Deferred | pointers/bindless, mesh/task, RT, coop-matrix, interlock | Big surface; the prototype proved the cost of promising them early |
-| Output | SKS container v11, plus `.spv`/headers; one version at a time, no back-compat | StereoKit is the target consumer; the version field exists to refuse old files, not to branch on |
+| Output | SKS container v12, plus `.spv`/headers; one version at a time, no back-compat | StereoKit is the target consumer; the version field exists to refuse old files, not to branch on |
 | Codegen | AST → small SSA-ish IR → SPIR-V, mandatory full inlining | Structurally fixes opaque-params and access-chain bugs; matches reference-compiler behavior |
 | Dependencies | Core lib + CLI: libc only; vendored `spirv.h`; `spirv-val` shelled out; app deps FetchContent, dev-only | Dependency-free/light core is a hard requirement |
 | Compat level | Corpus compiles (light porting acceptable); legacy forms porting-warn under `-Wporting` (opt-in, off by default) | User-selected; hints are opt-in so a clean corpus build stays quiet, and someone modernizing turns them on deliberately |

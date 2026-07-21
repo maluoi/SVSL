@@ -143,7 +143,7 @@ static bool compile_ours(svsl_arena_t *arena, const char *shader_path, const cha
 	for (int32_t i = 0; i < ir.func_count && i < 8; i++)
 		if (!svsl_spirv_emit(arena, &prog, &ir.funcs[i], &blobs[i], &diags)) return false;
 	svsl_sks_blob_t sks = {0};
-	svsl_sks_write(arena, &prog, &ir, blobs, &sks);
+	svsl_sks_write(arena, &prog, &ir, blobs, NULL, svsl_target_spirv, &sks);
 	*out_data = sks.bytes;
 	*out_size = sks.size;
 	return true;
@@ -182,15 +182,15 @@ typedef struct sks_info_t {
 	int32_t     buf_count, res_count, stage_count, var_count;
 } sks_info_t;
 
-// walks the SKS v10 byte layout (matches sksc_build_file / sksc_file.c)
+// walks the SKS v12 byte layout (matches sksc_build_file / sksc_file.c)
 static bool sks_parse(const uint8_t *sks, int32_t size, sks_info_t *out) {
 	memset(out, 0, sizeof(*out));
 	if (size < 300) return false;
 	int32_t  o = 8;
 	uint16_t version;
 	memcpy(&version, sks + o, 2); o += 2;
-	if (version != 11) return false; // one version at a time
-	uint32_t stage_count, bufc, resc, specc;
+	if (version != 12) return false; // one version at a time
+	uint32_t stage_count, bufc, resc, specc, samplerc;
 	int32_t  vinc;
 	memcpy(&stage_count, sks + o, 4); o += 4;
 	o += 256; // name
@@ -198,6 +198,7 @@ static bool sks_parse(const uint8_t *sks, int32_t size, sks_info_t *out) {
 	memcpy(&resc, sks + o, 4); o += 4;
 	memcpy(&vinc, sks + o, 4); o += 4;
 	memcpy(&specc, sks + o, 4); o += 4;
+	memcpy(&samplerc, sks + o, 4); o += 4; // v12
 	memcpy(&out->features, sks + o, 8); o += 16; // mask + reserved word
 	o += 24 + 4 + 8; // ops + wave + tile apron (v11)
 
@@ -235,6 +236,7 @@ static bool sks_parse(const uint8_t *sks, int32_t size, sks_info_t *out) {
 		o += 4; // shape, format, reserved pad
 	}
 	o += (int32_t)specc * (32 + 4 + 4 + 2 + 1);
+	o += (int32_t)samplerc * (32 + 2 + 1 + 2); // v12 sampler records (WGSL only)
 
 	for (uint32_t s = 0; s < stage_count && out->stage_count < 4; s++) {
 		if (o + 16 > size) return false;
