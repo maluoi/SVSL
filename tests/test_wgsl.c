@@ -518,6 +518,46 @@ static void test_wgsl_depth_pairing(void) {
 	svsl_result_free(r);
 }
 
+static int32_t count_substr(const char *text, const char *needle) {
+	int32_t n = 0;
+	for (const char *p = strstr(text, needle); p; p = strstr(p + 1, needle)) n++;
+	return n;
+}
+
+// vector f32tof16 packs lanes in pairs — two pack2x16floats for vec3/vec4, not
+// one zero-padded pack per lane — and vector f16tof32 unpacks per lane; both
+// bind a multiply-referenced argument to a let instead of duplicating it
+static void test_wgsl_pack_vectors(void) {
+	svsl_result_t *r = compile_wgsl(
+		"RWStructuredBuffer<uint> outp : register(u0);\n"
+		"[numthreads(1, 1, 1)]\n"
+		"void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	float2 a = float2(id.xy) * 0.5;\n"
+		"	float3 b = float3(id) * 0.25;\n"
+		"	float4 c = float4(b, 1.5);\n"
+		"	uint2  ha = f32tof16(a);\n"
+		"	uint3  hb = f32tof16(b);\n"
+		"	uint4  hc = f32tof16(c);\n"
+		"	float2 ua = f16tof32(ha);\n"
+		"	float3 ub = f16tof32(hb);\n"
+		"	float4 uc = f16tof32(hc);\n"
+		"	outp[0] = ha.x + hb.y + hc.z + asuint(ua.x + ub.y + uc.z);\n"
+		"}\n");
+	TEST_CHECK(r->ok);
+	TEST_CHECK(!has_warning(r, "isn't mapped"));
+	const char *cs = stage_text(r, svsl_stage_compute);
+	TEST_CHECK(cs != NULL);
+	if (cs) {
+		TEST_CHECK(count_substr(cs, "= pack2x16float(") == 5); // vec2:1 + vec3:2 + vec4:2
+		TEST_CHECK(count_substr(cs, "unpack2x16float(") == 9); // vec2:2 + vec3:3 + vec4:4
+		TEST_CHECK(strstr(cs, "& 0xffffu"));
+		TEST_CHECK(strstr(cs, ">> 16u"));
+		TEST_CHECK(strstr(cs, "_s.xy"));                       // arg bound once, then swizzled
+		TEST_CHECK(wgsl_validate(cs, "pack vectors cs"));
+	}
+	svsl_result_free(r);
+}
+
 // stages using inexpressible features skip with a located warning; the SPIR-V
 // stage still emits and the compile stays ok
 static void test_wgsl_skips(void) {
@@ -632,6 +672,7 @@ void test_wgsl(void) {
 	test_wgsl_stage_rules();
 	test_wgsl_const_traps();
 	test_wgsl_depth_pairing();
+	test_wgsl_pack_vectors();
 	test_wgsl_skips();
 	test_wgsl_only_target();
 

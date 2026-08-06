@@ -1153,14 +1153,39 @@ static const char *intrinsic_expr(wgsl_t *e, const svsl_ir_inst_t *in) {
 		return sfmt(e, "bitcast<%s>(%s)", type_name_w(e, in->type, in->loc), a0);
 	}
 	case svsl_emit_f16tof32: {
+		// each unpack reads only its lane's low 16 bits into .x; the high half
+		// of the input word being garbage is fine, matching the scalar form
 		const svsl_type_t *t = svsl_type_get(&e->prog->types, in->type);
-		if (t->kind == svsl_type_vector) { skip(e, in->loc, "vector f16tof32 isn't mapped yet"); return "0"; }
-		return sfmt(e, "unpack2x16float(%s).x", a0);
+		if (t->kind != svsl_type_vector)
+			return sfmt(e, "unpack2x16float(%s).x", a0);
+		int32_t     idx = (int32_t)(in - e->fn->insts.items);
+		wln(e, "let _up%d = %s;", idx, a0); // a0 may be an inlined expression: bind once
+		const char *ex  = sfmt(e, "vec%d<f32>(", t->count);
+		for (int32_t i = 0; i < t->count; i++)
+			ex = sfmt(e, "%s%sunpack2x16float(_up%d.%c).x", ex, i ? ", " : "", idx, "xyzw"[i]);
+		return sfmt(e, "%s)", ex);
 	}
 	case svsl_emit_f32tof16: {
+		// lanes pack in pairs — two pack2x16floats cover vec3/vec4, where the
+		// scalar form burns a whole pack (with a zeroed high lane) per value
 		const svsl_type_t *t = svsl_type_get(&e->prog->types, in->type);
-		if (t->kind == svsl_type_vector) { skip(e, in->loc, "vector f32tof16 isn't mapped yet"); return "0"; }
-		return sfmt(e, "(pack2x16float(vec2<f32>(%s, 0.0)) & 0xffffu)", a0);
+		if (t->kind != svsl_type_vector)
+			return sfmt(e, "(pack2x16float(vec2<f32>(%s, 0.0)) & 0xffffu)", a0);
+		int32_t idx = (int32_t)(in - e->fn->insts.items);
+		if (t->count == 2) {
+			wln(e, "let _pk%d_0 = pack2x16float(%s);", idx, a0);
+			return sfmt(e, "vec2<u32>(_pk%d_0 & 0xffffu, _pk%d_0 >> 16u)", idx, idx);
+		}
+		wln(e, "let _pk%d_s = %s;", idx, a0); // a0 may be an inlined expression: bind once
+		wln(e, "let _pk%d_0 = pack2x16float(_pk%d_s.xy);", idx, idx);
+		if (t->count == 3) {
+			wln(e, "let _pk%d_1 = pack2x16float(vec2<f32>(_pk%d_s.z, 0.0));", idx, idx);
+			return sfmt(e, "vec3<u32>(_pk%d_0 & 0xffffu, _pk%d_0 >> 16u, _pk%d_1 & 0xffffu)",
+			            idx, idx, idx);
+		}
+		wln(e, "let _pk%d_1 = pack2x16float(_pk%d_s.zw);", idx, idx);
+		return sfmt(e, "vec4<u32>(_pk%d_0 & 0xffffu, _pk%d_0 >> 16u, _pk%d_1 & 0xffffu, _pk%d_1 >> 16u)",
+		            idx, idx, idx, idx);
 	}
 	case svsl_emit_bitfield_extract:
 		return sfmt(e, "extractBits(%s, u32(%s), u32(%s))", a0, a1,

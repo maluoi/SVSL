@@ -143,7 +143,8 @@ static bool compile_ours(svsl_arena_t *arena, const char *shader_path, const cha
 	for (int32_t i = 0; i < ir.func_count && i < 8; i++)
 		if (!svsl_spirv_emit(arena, &prog, &ir.funcs[i], &blobs[i], &diags)) return false;
 	svsl_sks_blob_t sks = {0};
-	svsl_sks_write(arena, &prog, &ir, blobs, NULL, svsl_target_spirv, &sks);
+	svsl_sks_write(arena, &prog, &ir, blobs, NULL,
+	               &(svsl_sks_options_t){ .targets = svsl_target_spirv }, &sks);
 	*out_data = sks.bytes;
 	*out_size = sks.size;
 	return true;
@@ -189,7 +190,7 @@ static bool sks_parse(const uint8_t *sks, int32_t size, sks_info_t *out) {
 	int32_t  o = 8;
 	uint16_t version;
 	memcpy(&version, sks + o, 2); o += 2;
-	if (version != 12) return false; // one version at a time
+	if (version != 13) return false; // one version at a time
 	uint32_t stage_count, bufc, resc, specc, samplerc;
 	int32_t  vinc;
 	memcpy(&stage_count, sks + o, 4); o += 4;
@@ -552,6 +553,20 @@ static const compute_cfg_t compute_cfgs[] = {
 	               { 18, .value = 0, .eps = 0.1f }, // [4] flag: !(4>3) = 0
 	               { 29, 1 },                       // [7] pair.y: 7>5
 	               { 31, 0x40600000 } } },          // [7] v = 3.5f
+	{ .file    = "check_pack_half_vec", // vector f32tof16/f16tof32 lowering
+	  .passes  = { { .dispatch = { 1, 1, 1 } } },
+	  .buffers = { { "result", 9, fill_zero } },
+	  // half bits: 1.0=0x3C00 -2.0=0xC000 0.5=0x3800 4096=0x6C00 -0.25=0xB400
+	  //            65504=0x7BFF -65504=0xFBFF 1.5=0x3E00 (all exact in f16)
+	  .expect  = { { 0, 0xC0003C00 },   // h2: 1.0, -2.0
+	               { 1, 0x6C003800 },   // h3.xy: 0.5, 4096
+	               { 2, 0xB400 },       // h3.z: -0.25
+	               { 3, 0xFBFF7BFF },   // h4.xy: 65504, -65504
+	               { 4, 0x3E000000 },   // h4.zw: 0, 1.5
+	               { 5, 0xBF800000 },   // f2.x + f2.y = -1.0f
+	               { 6, 0x45000000 },   // f3.x * f3.y = 2048.0f
+	               { 7, 0xBE800000 },   // f3.z = -0.25f
+	               { 8, 0x3FC00000 } } }, // f4 sum = 1.5f
 	// SVSL-native checks (enums, bit fields, atomic orders): golden words.
 	// check_atomic_order only pins buf[0] — the other slots are racy by design.
 	{ .file    = "check_atomic_order",
