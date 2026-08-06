@@ -23,7 +23,7 @@ extern "C" {
 
 // The SKS container version this build reads and writes. One version at a time:
 // the field lets runtimes refuse foreign files, it is not a compatibility knob.
-#define SVSL_SKS_VERSION 12
+#define SVSL_SKS_VERSION 13
 
 // ============================================================================
 // Diagnostics
@@ -108,8 +108,15 @@ typedef struct svsl_options_t {
 	const char *entry_compute;
 
 	// code generation
-	svsl_opt_level_ opt_level;     // 0 == svsl_opt_default
+	// 0 == svsl_opt_none. -O0 also keeps OpName/OpMemberName in serialized
+	// SPIR-V stages, which are stripped at every other level: they run about 8%
+	// of a module and only ever serve debugging tools.
+	svsl_opt_level_ opt_level;
 	bool            half_strict16; // treat every `half` as an exact 16-bit float
+	// Stores SPIR-V stages raw instead of SMOL-V encoded. Bigger and far less
+	// compressible, but readable by anything that parses SPIR-V straight out of
+	// the container; runtimes accept either form.
+	bool            no_smolv;
 	// Which shader languages the SKS container carries (skshaderc's -t s/w/sw).
 	// 0 = SPIR-V only. SPIR-V always compiles internally — reflection metadata
 	// derives from it — but is serialized only when requested, so WebGPU-only

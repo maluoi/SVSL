@@ -6,6 +6,7 @@
 #include "../tables/semantics.h"
 #include "../util/array.h"
 #include "../../vendor/spirv.h"
+#include "../../vendor/smolv.h"
 
 #include <string.h>
 
@@ -256,7 +257,10 @@ static const struct { const char *name; uint8_t bit; } feature_exts[] = {
 // name (sk_renderer binds "vs"/"ps"/"cs"), so whatever the author called the
 // entry function, the blob's OpEntryPoint is renamed to the canonical stage
 // name on the way into the container. Raw .spv output keeps the source name.
-static void write_stage_spirv(sks_t *w, const svsl_spirv_blob_t *blob, svsl_stage_ stage) {
+// Rewrites the entry point name to the canonical vs/ps/cs, into an arena buffer.
+// SMOL-V encodes a whole module at a time, so this can't stream into the output
+// the way the rest of the writer does. Returns the module and its word count.
+static uint32_t *canon_spirv(svsl_arena_t *arena, const svsl_spirv_blob_t *blob, svsl_stage_ stage, int32_t *out_words) {
 	const char *canon = stage == svsl_stage_vertex ? "vs" :
 	                    stage == svsl_stage_pixel  ? "ps" : "cs";
 	const uint32_t *words = blob->words;
@@ -268,9 +272,8 @@ static void write_stage_spirv(sks_t *w, const svsl_spirv_blob_t *blob, svsl_stag
 		at += (int32_t)word_count;
 	}
 	if (at >= blob->word_count) { // no entry point: pass the blob through
-		wu32(w, (uint32_t)blob->word_count * 4);
-		wbytes(w, words, (size_t)blob->word_count * 4);
-		return;
+		*out_words = blob->word_count;
+		return (uint32_t *)blob->words;
 	}
 
 	uint32_t    old_count = words[at] >> 16;
@@ -278,14 +281,52 @@ static void write_stage_spirv(sks_t *w, const svsl_spirv_blob_t *blob, svsl_stag
 	uint32_t    old_words = ((uint32_t)strlen(old_name) + 1 + 3) / 4;
 	uint32_t    new_count = old_count - old_words + 1; // canonical names fit one word
 
-	wu32(w, (uint32_t)(blob->word_count - (int32_t)old_words + 1) * 4);
-	wbytes(w, words, (size_t)at * 4);
-	wu32(w, (new_count << 16) | SpvOpEntryPoint);
-	wu32(w, words[at + 1]); // execution model
-	wu32(w, words[at + 2]); // function id
-	wu32(w, (uint32_t)(uint8_t)canon[0] | ((uint32_t)(uint8_t)canon[1] << 8));
-	wbytes(w, &words[at + 3 + old_words], // interface ids + everything after
+	int32_t   total = blob->word_count - (int32_t)old_words + 1;
+	uint32_t *out   = svsl_arena_alloc(arena, (size_t)total * 4);
+	int32_t   n     = 0;
+	memcpy(out, words, (size_t)at * 4); n += at;
+	out[n++] = (new_count << 16) | SpvOpEntryPoint;
+	out[n++] = words[at + 1]; // execution model
+	out[n++] = words[at + 2]; // function id
+	out[n++] = (uint32_t)(uint8_t)canon[0] | ((uint32_t)(uint8_t)canon[1] << 8);
+	memcpy(out + n, &words[at + 3 + old_words], // interface ids + everything after
 	       (size_t)(blob->word_count - at - 3 - (int32_t)old_words) * 4);
+	*out_words = total;
+	return out;
+}
+
+static void write_stage_spirv(sks_t *w, const svsl_spirv_blob_t *blob, svsl_stage_ stage, const svsl_sks_options_t *opts) {
+	int32_t   word_count = 0;
+	uint32_t *words      = canon_spirv(w->arena, blob, stage, &word_count);
+
+	// Stages ship SMOL-V encoded; the runtime decodes on load from the blob's own
+	// magic, so a raw stage stays readable and this can fall back freely.
+	size_t   bound = smolv_encode_bound((size_t)word_count * 4);
+	uint8_t *enc   = svsl_arena_alloc(w->arena, bound);
+	size_t   size  = 0;
+	uint32_t flags = opts->keep_debug_names ? smolv_encode_none : smolv_encode_strip_debug_info;
+	if (!enc || !smolv_encode(words, (size_t)word_count * 4, enc, bound, &size, flags)) {
+		wu32(w, (uint32_t)word_count * 4); // encoder refused it: store what we have
+		wbytes(w, words, (size_t)word_count * 4);
+		return;
+	}
+	if (!opts->no_smolv) {
+		wu32(w, (uint32_t)size);
+		wbytes(w, enc, size);
+		return;
+	}
+
+	// A raw stage still goes through the encoder and back, so no_smolv changes
+	// only the storage form and debug stripping keeps one implementation.
+	size_t    raw_size = smolv_decoded_size(enc, size);
+	uint32_t *raw      = raw_size ? svsl_arena_alloc(w->arena, raw_size) : NULL;
+	if (raw && smolv_decode(enc, size, raw, raw_size)) {
+		wu32(w, (uint32_t)raw_size);
+		wbytes(w, raw, raw_size);
+	} else {
+		wu32(w, (uint32_t)word_count * 4);
+		wbytes(w, words, (size_t)word_count * 4);
+	}
 }
 
 // scans one SPIR-V blob's declarations (and one opcode with format-feature
@@ -387,8 +428,9 @@ static void image_access_bits(const svsl_ir_module_t *module, int32_t res_count,
 
 void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
                     const svsl_ir_module_t *module, const svsl_spirv_blob_t *blobs,
-                    const svsl_wgsl_blob_t *opt_wgsl, uint32_t targets,
+                    const svsl_wgsl_blob_t *opt_wgsl, const svsl_sks_options_t *opts,
                     svsl_sks_blob_t *out_blob) {
+	uint32_t targets = opts->targets;
 	bool with_spirv = targets == 0 || (targets & svsl_target_spirv) != 0;
 	bool with_wgsl  = opt_wgsl != NULL && (targets & svsl_target_wgsl) != 0;
 	sks_t w = { .arena = arena };
@@ -634,7 +676,7 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 			wi32(&w, 1); // skr_shader_lang_spirv
 			wi32(&w, (int32_t)module->funcs[i].entry->stage);
 			wu32(&w, (uint32_t)module->funcs[i].entry->wave_size); // per-entry wave size
-			write_stage_spirv(&w, &blobs[i], module->funcs[i].entry->stage);
+			write_stage_spirv(&w, &blobs[i], module->funcs[i].entry->stage, opts);
 		}
 	if (with_wgsl)
 		for (int32_t i = 0; i < module->func_count; i++) {

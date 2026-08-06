@@ -6,6 +6,7 @@
 #include <svsl/svsl.h>
 
 #include "../util/arena.h"
+#include "../../vendor/smolv.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -181,11 +182,23 @@ svsl_sks_file_t *svsl_sks_parse(const void *bytes, int32_t size) {
 		int32_t     code_bytes = (int32_t)rd_u32(&r);
 		if (r.bad || code_bytes < 0 || code_bytes > r.size - r.pos) goto fail;
 		if (lang != 1) { rd_take(&r, code_bytes); continue; } // not skr_shader_lang_spirv
-		if (code_bytes & 3) goto fail;
+
+		// SPIR-V stages are normally SMOL-V encoded; the blob's magic says which
+		if (smolv_is_smolv(r.data + r.pos, (size_t)code_bytes)) {
+			size_t spirv_bytes = smolv_decoded_size(r.data + r.pos, (size_t)code_bytes);
+			if (spirv_bytes == 0 || (spirv_bytes & 3)) goto fail;
+			uint32_t *spirv = svsl_arena_alloc(r.arena, spirv_bytes);
+			if (!spirv || !smolv_decode(r.data + r.pos, (size_t)code_bytes, spirv, spirv_bytes)) goto fail;
+			rd_take(&r, code_bytes);
+			stages[spirv_count].spirv            = spirv;
+			stages[spirv_count].spirv_word_count = (int32_t)(spirv_bytes / 4);
+		} else {
+			if (code_bytes & 3) goto fail;
+			stages[spirv_count].spirv            = (const uint32_t *)rd_blob(&r, code_bytes);
+			stages[spirv_count].spirv_word_count = code_bytes / 4;
+		}
 		stages[spirv_count].stage            = stage;
 		stages[spirv_count].wave_size        = wave_size;
-		stages[spirv_count].spirv            = (const uint32_t *)rd_blob(&r, code_bytes);
-		stages[spirv_count].spirv_word_count = code_bytes / 4;
 		spirv_count++;
 	}
 	stage_count = spirv_count;

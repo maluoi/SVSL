@@ -34,6 +34,7 @@ typedef struct cli_t {
 	bool          validate;
 	bool          force;
 	bool          half_strict16;
+	bool          no_smolv;
 	bool          porting;
 	svsl_opt_level_ opt_level;
 	const char   *out_path; // file or directory
@@ -177,6 +178,7 @@ static bool compile_file(const cli_t *cli, const char *path) {
 		.include_cb = cli_include, .include_user = &ictx,
 		.entry_vertex = cli->entry_vs, .entry_pixel = cli->entry_ps, .entry_compute = cli->entry_cs,
 		.opt_level = cli->opt_level, .half_strict16 = cli->half_strict16,
+		.no_smolv = cli->no_smolv,
 		.targets = cli->targets,
 		.porting_hints = cli->porting };
 	svsl_result_t *r = svsl_compile(&(svsl_source_t){ .text = source, .length = source_len,
@@ -310,8 +312,10 @@ static void usage(void) {
 		"  --dump-ir          print the IR\n"
 		"  --validate         run spirv-val on the output\n"
 		"  --half=strict16    treat every `half` as an exact float16\n"
+		"  --no-smolv         store SPIR-V stages raw, not SMOL-V encoded\n"
 		"  -Wporting          hint on legacy HLSL spellings (off by default)\n"
-		"  -O0/-O1/-O2        optimization level (default -O1; -O2 enables float algebra)\n"
+		"  -O0/-O1/-O2        optimization level (default -O1; -O2 enables float algebra,\n"
+		"                     -O0 also keeps OpName debug info in SPIR-V stages)\n"
 		"  -f                 recompile even when the output is newer\n");
 }
 
@@ -340,6 +344,7 @@ int main(int argc, char **argv) {
 		}
 		if (strcmp(arg, "--validate") == 0) { cli.validate = true; continue; }
 		if (strcmp(arg, "--half=strict16") == 0) { cli.half_strict16 = true; continue; }
+		if (strcmp(arg, "--no-smolv") == 0) { cli.no_smolv = true; continue; }
 		if (strcmp(arg, "-Wporting") == 0)       { cli.porting = true;       continue; }
 		if (strcmp(arg, "-O0") == 0) { cli.opt_level = svsl_opt_none;       continue; }
 		if (strcmp(arg, "-O1") == 0) { cli.opt_level = svsl_opt_default;    continue; }

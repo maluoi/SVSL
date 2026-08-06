@@ -29,6 +29,8 @@ typedef struct impl_t {
 	svsl_spirv_blob_t *blobs;      // one per IR entry point (arena-sized after ir_build)
 	svsl_wgsl_blob_t  *wgsl_blobs; // one per entry when targets include wgsl; else NULL
 	uint32_t           targets;    // svsl_target_ bits, normalized (0 → spirv)
+	bool               keep_debug_names;
+	bool               no_smolv;
 	svsl_sks_blob_t    sks;   // memoized container; .bytes stays NULL until first serialized
 	bool               have_program;
 	bool               have_ir;
@@ -76,7 +78,9 @@ svsl_result_t *svsl_compile(const svsl_source_t *source, const svsl_options_t *o
 	svsl_sema_run(arena, ast, &pp, filename, &sopt, &impl->program, &impl->diags);
 	impl->have_program = true;
 
-	impl->targets = opt.targets ? opt.targets : svsl_target_spirv;
+	impl->targets          = opt.targets ? opt.targets : svsl_target_spirv;
+	impl->keep_debug_names = opt.opt_level == svsl_opt_none;
+	impl->no_smolv         = opt.no_smolv;
 	if ((impl->targets & svsl_target_wgsl) && !svsl_supports_wgsl())
 		svsl_diag_add(arena, &impl->diags, svsl_severity_error, (svsl_loc_t){ .file = filename },
 		              "WGSL output requested, but this libsvsl was built without SVSL_ENABLE_WGSL");
@@ -154,9 +158,13 @@ bool svsl_result_needs_scalar_layout(svsl_result_t *result) {
 svsl_bytes_t svsl_result_sks(svsl_result_t *result) {
 	impl_t *impl = result->_impl;
 	if (!result->ok || !impl->have_ir) return (svsl_bytes_t){0};
-	if (!impl->sks.bytes) // serialize once; -sks, -h, and reflection share the blob
+	if (!impl->sks.bytes) { // serialize once; -sks, -h, and reflection share the blob
+		svsl_sks_options_t sopts = { .targets          = impl->targets,
+		                             .keep_debug_names = impl->keep_debug_names,
+		                             .no_smolv         = impl->no_smolv };
 		svsl_sks_write(&impl->arena, &impl->program, &impl->ir, impl->blobs,
-		               impl->wgsl_blobs, impl->targets, &impl->sks);
+		               impl->wgsl_blobs, &sopts, &impl->sks);
+	}
 	return (svsl_bytes_t){ .data = impl->sks.bytes, .size = impl->sks.size };
 }
 

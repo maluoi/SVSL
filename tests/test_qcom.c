@@ -147,7 +147,8 @@ void test_qcom(void) {
 	// 19 block_match, 20 image_processing2
 	{
 		svsl_sks_blob_t sks = {0};
-		svsl_sks_write(&c.arena, &c.program, &c.ir, c.blobs, NULL, svsl_target_spirv, &sks);
+		svsl_sks_write(&c.arena, &c.program, &c.ir, c.blobs, NULL,
+		               &(svsl_sks_options_t){ .targets = svsl_target_spirv }, &sks);
 		// features u64 sits after tag(8) + version(2) + count(4) + name(256) +
 		// buffers(4) + resources(4) + inputs(4) + spec consts(4) + samplers(4, v12)
 		uint64_t features;
@@ -202,7 +203,8 @@ void test_qcom(void) {
 	// sks feature bit 21 (tile shading)
 	{
 		svsl_sks_blob_t sks = {0};
-		svsl_sks_write(&c.arena, &c.program, &c.ir, c.blobs, NULL, svsl_target_spirv, &sks);
+		svsl_sks_write(&c.arena, &c.program, &c.ir, c.blobs, NULL,
+		               &(svsl_sks_options_t){ .targets = svsl_target_spirv }, &sks);
 		uint64_t features;
 		memcpy(&features, sks.bytes + 8 + 2 + 4 + 256 + 4 + 4 + 4 + 4 + 4, 8); // v12: + sampler_count
 		TEST_CHECK(features & (1ull << 21));

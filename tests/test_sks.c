@@ -4,6 +4,7 @@
 // present; the structural checks always run.
 
 #include "test.h"
+#include <svsl/svsl.h>
 
 #include "back/emit_spirv.h"
 #include "front/lexer.h"
@@ -82,7 +83,7 @@ static bool sks_read(const uint8_t *data, int32_t size, sks_file_t *out) {
 	TAKE(out->name, 256);
 	TAKE(&out->buffer_count, 4);
 	TAKE(&out->resource_count, 4);
-	if (out->version != 12) return false; // one version at a time
+	if (out->version != SVSL_SKS_VERSION) return false; // one version at a time
 	TAKE(&out->vertex_input_count, 4);
 	TAKE(&out->spec_count, 4);
 	TAKE(&out->sampler_count, 4); // v12
@@ -182,7 +183,8 @@ static bool compile_sks(svsl_arena_t *arena, const char *shader, svsl_sks_blob_t
 	svsl_spirv_blob_t blobs[8] = {0};
 	for (int32_t i = 0; i < ir.func_count && i < 8; i++)
 		if (!svsl_spirv_emit(arena, &prog, &ir.funcs[i], &blobs[i], &diags)) return false;
-	svsl_sks_write(arena, &prog, &ir, blobs, NULL, svsl_target_spirv, out_blob);
+	svsl_sks_write(arena, &prog, &ir, blobs, NULL,
+	               &(svsl_sks_options_t){ .targets = svsl_target_spirv }, out_blob);
 	return true;
 }
 
@@ -196,7 +198,7 @@ static void test_sks_structure(void) {
 	sks_file_t f = {0};
 	TEST_CHECK(sks_read(blob.bytes, blob.size, &f));
 
-	TEST_CHECK(f.version == 12);
+	TEST_CHECK(f.version == SVSL_SKS_VERSION);
 	TEST_CHECK(f.stage_count == 2);
 	TEST_CHECK(strcmp(f.name, "sk/unlit") == 0);
 	TEST_CHECK(f.buffer_count == 2);
@@ -276,13 +278,17 @@ static void test_sks_structure(void) {
 	TEST_CHECK(sks_read(fa.bytes, fa.size, &ffa));
 	TEST_CHECK((ffa.features & (1ull << 15)) != 0); // float atomics
 	TEST_CHECK((ffa.features & (1ull << 63)) == 0); // nothing unknown
-	bool has_spec_op = false;
-	for (int32_t b = 0; b + 4 <= fa.size; b += 4) {
-		uint32_t word;
-		memcpy(&word, fa.bytes + b, 4);
-		if ((word & 0xFFFF) == 52 && (word >> 16) >= 4) has_spec_op = true;
-	}
+	// stage payloads are SMOL-V encoded, so scan the decoded SPIR-V
+	bool             has_spec_op = false;
+	svsl_sks_file_t *fa_parsed   = svsl_sks_parse(fa.bytes, fa.size);
+	TEST_CHECK(fa_parsed != NULL);
+	for (int32_t st = 0; fa_parsed && st < fa_parsed->stage_count; st++)
+		for (int32_t at = 0; at < fa_parsed->stages[st].spirv_word_count; at++) {
+			uint32_t word = fa_parsed->stages[st].spirv[at];
+			if ((word & 0xFFFF) == 52 && (word >> 16) >= 4) has_spec_op = true;
+		}
 	TEST_CHECK(has_spec_op);
+	svsl_sks_free(fa_parsed);
 
 	// texture shapes: 1D, 3D, cube, and 2D-array from the texture-types corpus
 	svsl_sks_blob_t shapes = {0};
@@ -310,22 +316,25 @@ static void test_sks_structure(void) {
 		if (strcmp(fsb.res[r].name, "OutputData") == 0) found_out = true;
 	}
 	TEST_CHECK(found_in && found_out);
-	int32_t spv_at = -1; // the stage blob starts at the SPIR-V magic (unaligned)
-	for (int32_t b = 0; b + 4 <= sb.size && spv_at < 0; b++)
-		if (memcmp(sb.bytes + b, "\x03\x02\x23\x07", 4) == 0) spv_at = b;
-	TEST_CHECK(spv_at >= 0);
+	// Stage payloads are SMOL-V encoded, so go through the parser to get SPIR-V
+	svsl_sks_file_t *parsed = svsl_sks_parse(sb.bytes, sb.size);
+	TEST_CHECK(parsed != NULL && parsed->stage_count == 1);
 	bool entry_canon = false;
-	for (int32_t b = spv_at + 5 * 4; b + 16 <= sb.size; ) {
-		uint32_t word;
-		memcpy(&word, sb.bytes + b, 4);
-		if ((word >> 16) == 0) break;
-		if ((word & 0xFFFF) == 15) { // OpEntryPoint: name string is word 3
-			entry_canon = memcmp(sb.bytes + b + 12, "cs\0\0", 4) == 0;
-			break;
+	if (parsed && parsed->stage_count == 1) {
+		const uint32_t *words = parsed->stages[0].spirv;
+		int32_t         count = parsed->stages[0].spirv_word_count;
+		for (int32_t at = 5; at < count; ) {
+			uint32_t word = words[at];
+			if ((word >> 16) == 0) break;
+			if ((word & 0xFFFF) == 15) { // OpEntryPoint: name string is word 3
+				entry_canon = memcmp(&words[at + 3], "cs\0\0", 4) == 0;
+				break;
+			}
+			at += (int32_t)(word >> 16);
 		}
-		b += (int32_t)(word >> 16) * 4;
 	}
 	TEST_CHECK(entry_canon);
+	svsl_sks_free(parsed);
 
 	svsl_arena_free(&arena);
 }

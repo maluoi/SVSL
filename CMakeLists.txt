@@ -30,6 +30,7 @@ endif()
 # --- libsvsl: zero-dependency core library --------------------------------
 
 add_library(svsl STATIC
+	vendor/smolv.c
 	src/util/arena.c
 	src/util/array.c
 	src/util/str.c
