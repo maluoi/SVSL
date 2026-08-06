@@ -14,7 +14,7 @@ set(SKSHADERC_ENABLE_SVSL OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
 	sk_renderer
 	GIT_REPOSITORY https://github.com/StereoKit/sk_renderer.git
-	GIT_TAG        v2026.7.9
+	GIT_TAG        v2026.8.6
 )
 FetchContent_MakeAvailable(sk_renderer)
 
