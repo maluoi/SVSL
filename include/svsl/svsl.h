@@ -83,7 +83,8 @@ typedef enum svsl_opt_level_ {
 	svsl_opt_aggressive, // -O2: adds float-algebraic identities
 } svsl_opt_level_;
 
-// Shader languages an SKS container can carry (bit flags; 0 = spirv only)
+// The shader language an SKS container carries. Exactly one per container —
+// see svsl_options_t.targets.
 typedef enum svsl_target_ {
 	svsl_target_spirv = 1 << 0, // Vulkan runtimes
 	svsl_target_wgsl  = 1 << 1, // the WebGPU runtime (SVSL_ENABLE_WGSL builds)
@@ -117,14 +118,19 @@ typedef struct svsl_options_t {
 	// compressible, but readable by anything that parses SPIR-V straight out of
 	// the container; runtimes accept either form.
 	bool            no_smolv;
-	// Which shader languages the SKS container carries (skshaderc's -t s/w/sw).
-	// 0 = SPIR-V only. SPIR-V always compiles internally — reflection metadata
-	// derives from it — but is serialized only when requested, so WebGPU-only
-	// assets don't ship dead SPIR-V. WGSL needs a libsvsl built with
-	// SVSL_ENABLE_WGSL (see svsl_supports_wgsl) — a hard error otherwise; WGSL
-	// stages using features browser WebGPU can't express are skipped with a
-	// warning, and the SKS then carries no WGSL for them.
-	uint32_t        targets;       // svsl_target_ bits
+	// Which shader language the SKS container carries (skshaderc's -t s/w).
+	// 0 = SPIR-V. Exactly one bit: the target is fixed before the preprocessor
+	// runs so it can predefine TARGET_SPIRV or TARGET_WGSL, which lets source
+	// vary per target — and one container has one reflection table, which could
+	// not describe two sources that declare different resources. Setting both
+	// bits is an error; build the two containers separately.
+	// SPIR-V always compiles internally — reflection metadata derives from it —
+	// but is serialized only when requested, so WebGPU assets don't ship dead
+	// SPIR-V. WGSL needs a libsvsl built with SVSL_ENABLE_WGSL (see
+	// svsl_supports_wgsl) — a hard error otherwise; WGSL stages using features
+	// browser WebGPU can't express are skipped with a warning, and the SKS then
+	// carries no WGSL for them.
+	uint32_t        targets;       // svsl_target_ bits, exactly one
 
 	// diagnostics
 	bool            porting_hints; // emit `porting` hints on legacy HLSL spellings (default off)

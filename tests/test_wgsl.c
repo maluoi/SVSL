@@ -66,7 +66,7 @@ static svsl_include_src_t wgsl_include(void *user, const char *path, const char 
 static svsl_result_t *compile_wgsl(const char *src) {
 	return svsl_compile(
 		&(svsl_source_t){ .text = src, .filename = "test_wgsl.hlsl" },
-		&(svsl_options_t){ .targets    = svsl_target_spirv | svsl_target_wgsl,
+		&(svsl_options_t){ .targets    = svsl_target_wgsl,
 		                   .include_cb = wgsl_include });
 }
 
@@ -213,12 +213,12 @@ static void test_wgsl_bindings(void) {
 		TEST_CHECK(wgsl_validate(ps, "bindings ps"));
 	}
 
-	// the container carries both languages plus the split-sampler record
+	// one target per container: a -t w build carries WGSL only, no dead SPIR-V,
+	// plus the split-sampler record
 	wgsl_sks_info_t info;
 	TEST_CHECK(walk_sks(svsl_result_sks(r), &info));
-	TEST_CHECK(info.lang_count == 4); // spirv vs+ps, wgsl vs+ps
-	TEST_CHECK(info.langs[0] == 1 && info.langs[1] == 1);
-	TEST_CHECK(info.langs[2] == 5 && info.langs[3] == 5);
+	TEST_CHECK(info.lang_count == 2); // wgsl vs+ps
+	TEST_CHECK(info.langs[0] == 5 && info.langs[1] == 5);
 	TEST_CHECK(info.sampler_count == 1);
 	TEST_CHECK(info.sampler_slot == 403 && info.sampler_paired == 103);
 	svsl_result_free(r);
@@ -596,6 +596,48 @@ static void test_wgsl_only_target(void) {
 	svsl_result_free(r);
 }
 
+// The container's storage-image format byte must name the format the container's
+// own blob declares. WGSL has no formatless storage texture, so an undeclared
+// format resolves to the inferred one in the text — and a WebGPU runtime builds
+// its bind group layout from the record, where a mismatch fails pipeline creation.
+static void test_wgsl_storage_format_record(void) {
+	static const char *src =
+		"RWTexture2D<float4> dst  : register(u0);\n"
+		"[[vk::image_format(\"rgba8\")]] RWTexture2D<float4> tagged : register(u1);\n"
+		"[numthreads(8, 8, 1)]\n"
+		"void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	dst[id.xy] = float4(1, 0, 0, 1); tagged[id.xy] = float4(0, 1, 0, 1); }\n";
+
+	struct { uint32_t target; uint8_t undeclared; } cases[] = {
+		{ svsl_target_wgsl,  1 /* SpvImageFormatRgba32f: WGSL emits rgba32float */ },
+		{ svsl_target_spirv, 0 /* SpvImageFormatUnknown: SPIR-V is format-agnostic */ },
+	};
+	for (int32_t i = 0; i < 2; i++) {
+		svsl_result_t *r = svsl_compile(
+			&(svsl_source_t){ .text = src, .filename = "test_wgsl.hlsl" },
+			&(svsl_options_t){ .targets = cases[i].target });
+		TEST_CHECK(r->ok);
+		if (cases[i].target == svsl_target_wgsl) {
+			const char *cs = stage_text(r, svsl_stage_compute);
+			TEST_CHECK(cs && strstr(cs, "texture_storage_2d<rgba32float, write>"));
+		}
+		svsl_bytes_t     sks  = svsl_result_sks(r);
+		svsl_sks_file_t *file = svsl_sks_parse(sks.data, sks.size);
+		TEST_CHECK(file != NULL);
+		if (file) {
+			TEST_CHECK(file->resource_count == 2);
+			for (int32_t x = 0; x < file->resource_count; x++) {
+				bool tagged = strcmp(file->resources[x].name, "tagged") == 0;
+				// an explicit format reads the same whatever the target
+				TEST_CHECK(file->resources[x].image_format ==
+				           (tagged ? 4 /* SpvImageFormatRgba8 */ : cases[i].undeclared));
+			}
+			svsl_sks_free(file);
+		}
+		svsl_result_free(r);
+	}
+}
+
 // --- corpus sweep -----------------------------------------------------------------
 
 static int wgsl_compare_names(const void *a, const void *b) {
@@ -632,7 +674,7 @@ static void wgsl_sweep_dir(const char *subdir, int32_t *ref_emitted, int32_t *re
 		if (!src) continue;
 		svsl_result_t *r = svsl_compile(
 			&(svsl_source_t){ .text = src, .filename = path },
-			&(svsl_options_t){ .targets    = svsl_target_spirv | svsl_target_wgsl,
+			&(svsl_options_t){ .targets    = svsl_target_wgsl,
 			                   .include_cb = wgsl_include });
 		free(src);
 		// requesting WGSL must never *break* a shader that compiles for Vulkan
@@ -675,6 +717,7 @@ void test_wgsl(void) {
 	test_wgsl_pack_vectors();
 	test_wgsl_skips();
 	test_wgsl_only_target();
+	test_wgsl_storage_format_record();
 
 	int32_t emitted = 0, skipped = 0;
 	wgsl_sweep_dir("builtin",   &emitted, &skipped);

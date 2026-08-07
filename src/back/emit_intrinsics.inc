@@ -1419,7 +1419,7 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 		int32_t tex = (int32_t)inst->args[0];
 		const svsl_resource_t *res = &e->prog->resources.items[tex];
 		const svsl_type_t *ot = svsl_type_get(&e->prog->types, res->type);
-		if (svsl_image_format_for(&e->prog->types, ot) == SpvImageFormatUnknown)
+		if (svsl_image_format_for(ot) == SpvImageFormatUnknown)
 			svsl_spv_cap(spv, SpvCapabilityStorageImageReadWithoutFormat);
 		uint32_t img = emit_value_inst(e, fs, SpvOpLoad, e->resource_img_type[tex],
 		                               (uint32_t[]){ e->resource_vars[tex] }, 1);
@@ -1435,7 +1435,7 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 		int32_t tex = (int32_t)inst->args[0];
 		const svsl_resource_t *res = &e->prog->resources.items[tex];
 		const svsl_type_t *ot = svsl_type_get(&e->prog->types, res->type);
-		if (svsl_image_format_for(&e->prog->types, ot) == SpvImageFormatUnknown)
+		if (svsl_image_format_for(ot) == SpvImageFormatUnknown)
 			svsl_spv_cap(spv, SpvCapabilityStorageImageWriteWithoutFormat);
 		uint32_t img = emit_value_inst(e, fs, SpvOpLoad, e->resource_img_type[tex],
 		                               (uint32_t[]){ e->resource_vars[tex] }, 1);

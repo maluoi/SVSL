@@ -171,6 +171,13 @@ enum {
 	sks_feat_float64          = 10,
 	sks_feat_int16            = 11,
 	sks_feat_int8             = 12,
+	// joint, matching sksc_file.h and sk_renderer's single
+	// has_storage_without_format flag. Read and write are separate Vulkan
+	// features with different coverage (write is ~universal, read lags on older
+	// mobile), and now that an undeclared format means Unknown most compute
+	// shaders set this bit — so a write-only shader over-requires the read
+	// feature. Splitting the bit needs a matching sk_renderer change; see
+	// docs/BACKLOG.md.
 	sks_feat_formatless       = 13, // StorageImageRead/WriteWithoutFormat
 	sks_feat_tile_image       = 14, // (+SPV_EXT_shader_tile_image)
 	sks_feat_float_atomics    = 15, // (+SPV_EXT_shader_atomic_float[2])
@@ -642,8 +649,14 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 				shape |= img_access[index];
 			const svsl_type_t *rt = svsl_type_get(&prog->types, res->type);
 			if (rt->kind == svsl_type_array) rt = svsl_type_get(&prog->types, rt->elem);
-			uint8_t format = rt->kind == svsl_type_image
-			               ? (uint8_t)svsl_image_format_for(&prog->types, rt) : 0;
+			// the record has to name the format the container's own blob declares,
+			// not the SPIR-V rule: WGSL has no formatless storage texture, so an
+			// undeclared format resolves to the inferred one there. A WebGPU
+			// runtime builds its bind group layout from this byte and the layout
+			// format must equal the one in the shader text.
+			uint8_t format = rt->kind != svsl_type_image ? 0
+			               : (uint8_t)(with_wgsl ? svsl_image_format_inferred(&prog->types, rt)
+			                                     : svsl_image_format_for(rt));
 			wu8(&w, shape);
 			wu8(&w, format);
 			wu16(&w, 0); // reserved

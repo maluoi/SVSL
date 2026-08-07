@@ -689,8 +689,33 @@ static uint32_t lower_intrinsic(build_t *b, const svsl_ast_expr_t *e, int32_t in
 	if (SVSL_INTR_IS_ATOMIC(tag)) {
 		uint32_t atomic_op = SVSL_INTR_ATOMIC_OP(tag);
 		bool     cmpxchg   = tag == svsl_intr_atomic_cmpxchg;
+		// HLSL's subscript spelling on a storage image, InterlockedAdd(img[c], v):
+		// an image has no pointer, so this takes the same image-atomic path as the
+		// img.InterlockedAdd(c, v) method form. Sema rejected cmpxchg and an
+		// agnostic format here, and the two forms share one atomic op-code space.
+		const svsl_ast_expr_t *dst = e->call.args[0];
+		if (dst->kind == svsl_expr_index &&
+		    svsl_type_get(&b->prog->types, dst->index.object->sema_type)->kind == svsl_type_image) {
+			int32_t  res   = resolve_resource(b, dst->index.object);
+			uint32_t coord = lower_expr(b, dst->index.index);
+			uint32_t value = lower_expr(b, e->call.args[1]);
+			uint32_t prior = emit_op(b, svsl_ir_image_atomic, value_type(b, value),
+			                         (uint32_t)res, coord, value, e->loc);
+			// the third argument means different things per spelling, exactly as on
+			// the pointer path below: an out-param on the HLSL alias, a memory-order
+			// name on the native one. Sema rejected cmpxchg, so the value is args[1].
+			uint32_t order = 0;
+			if (!intr->opt_native && e->call.arg_count == 3) {
+				int32_t o = svsl_atomic_order(e->call.args[2]->ident);
+				if (o > 0) order = (uint32_t)o;
+			}
+			b->fn->insts.items[prior].args[3] = atomic_op | (order << 8);
+			if (intr->opt_native && e->call.arg_count == 3)
+				store_target(b, e->call.args[2], prior); // out-param form
+			return prior;
+		}
 		uint32_t ptr     = lower_lvalue(b, e->call.args[0]);
-		if (ptr == SVSL_IR_NONE) { berr(b, e->loc, "bad atomic destination"); return 0; }
+		if (ptr == SVSL_IR_NONE) { berr(b, e->loc, "bad atomic destination"); return SVSL_IR_NONE; }
 		uint32_t v1 = lower_expr(b, e->call.args[1]);
 		uint32_t v2 = cmpxchg ? lower_expr(b, e->call.args[2]) : 0;
 		svsl_type_id_t scalar = value_type(b, v1);

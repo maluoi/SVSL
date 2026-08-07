@@ -16,4 +16,11 @@ void cs(uint3 id : SV_DispatchThreadID) {
 	imgU.InterlockedXor(p, 0xFFu);    // OpAtomicXor
 	uint prev;
 	imgU.InterlockedExchange(p, 42u, prev); // OpAtomicExchange
+
+	// HLSL's subscript spelling reaches the same image-atomic path, and lowers
+	// byte-identically to the method form above
+	InterlockedAdd(imgS[p], 1);             // OpAtomicIAdd
+	InterlockedMin(imgU[p], 5u);            // OpAtomicUMin
+	uint prev2;
+	InterlockedExchange(imgU[p], 42u, prev2); // OpAtomicExchange, out-param form
 }

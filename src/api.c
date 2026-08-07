@@ -63,8 +63,30 @@ svsl_result_t *svsl_compile(const svsl_source_t *source, const svsl_options_t *o
 		text = svsl_arena_strndup(arena, source->text, (size_t)source->length);
 	const char *filename = source ? source->filename : NULL;
 
+	// the target settles before the preprocessor runs: it predefines TARGET_SPIRV
+	// or TARGET_WGSL, so source can vary per target. That only works with one
+	// target per compile — two would need two preprocessor runs, and the SKS
+	// carries a single reflection table that could not describe both.
+	impl->targets = opt.targets ? opt.targets : svsl_target_spirv;
+	if (impl->targets & ~(uint32_t)(svsl_target_spirv | svsl_target_wgsl))
+		svsl_diag_add(arena, &impl->diags, svsl_severity_error, (svsl_loc_t){ .file = filename },
+		              "options.targets holds an unknown target bit");
+	else if (impl->targets == (svsl_target_spirv | svsl_target_wgsl))
+		svsl_diag_add(arena, &impl->diags, svsl_severity_error, (svsl_loc_t){ .file = filename },
+		              "options.targets must select exactly one language; a .sks carries one target");
+	if ((impl->targets & svsl_target_wgsl) && !svsl_supports_wgsl())
+		svsl_diag_add(arena, &impl->diags, svsl_severity_error, (svsl_loc_t){ .file = filename },
+		              "WGSL output requested, but this libsvsl was built without SVSL_ENABLE_WGSL");
+
+	// predefines go in front of the caller's, so a -D of the same name wins
+	// (pp_macro_find scans in reverse) and #undef works normally
+	int32_t        user_defines = opt.defines && opt.define_count > 0 ? opt.define_count : 0;
+	svsl_define_t *defines      = svsl_arena_alloc(arena, sizeof(svsl_define_t) * (size_t)(user_defines + 1));
+	defines[0] = (svsl_define_t){ .name = (impl->targets & svsl_target_wgsl) ? "TARGET_WGSL" : "TARGET_SPIRV" };
+	for (int32_t i = 0; i < user_defines; i++) defines[i + 1] = opt.defines[i];
+
 	svsl_pp_options_t popt = { .include_cb = opt.include_cb, .include_user = opt.include_user,
-	                           .defines = opt.defines, .define_count = opt.define_count };
+	                           .defines = defines, .define_count = user_defines + 1 };
 	svsl_pp_result_t pp;
 	svsl_pp_run(arena, text, filename, &popt, &pp, &impl->diags);
 
@@ -78,15 +100,8 @@ svsl_result_t *svsl_compile(const svsl_source_t *source, const svsl_options_t *o
 	svsl_sema_run(arena, ast, &pp, filename, &sopt, &impl->program, &impl->diags);
 	impl->have_program = true;
 
-	impl->targets          = opt.targets ? opt.targets : svsl_target_spirv;
 	impl->keep_debug_names = opt.opt_level == svsl_opt_none;
 	impl->no_smolv         = opt.no_smolv;
-	if ((impl->targets & svsl_target_wgsl) && !svsl_supports_wgsl())
-		svsl_diag_add(arena, &impl->diags, svsl_severity_error, (svsl_loc_t){ .file = filename },
-		              "WGSL output requested, but this libsvsl was built without SVSL_ENABLE_WGSL");
-	if (impl->targets & ~(uint32_t)(svsl_target_spirv | svsl_target_wgsl))
-		svsl_diag_add(arena, &impl->diags, svsl_severity_error, (svsl_loc_t){ .file = filename },
-		              "options.targets holds an unknown target bit");
 
 	if (impl->diags.error_count == 0) {
 		svsl_ir_build(arena, &impl->program, opt.opt_level, &impl->ir, &impl->diags);

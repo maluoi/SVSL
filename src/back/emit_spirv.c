@@ -157,7 +157,7 @@ static uint32_t spv_image_type(emit_t *e, const svsl_type_t *t) {
 	const svsl_type_t *elem   = svsl_type_get(&e->prog->types, t->elem);
 	uint32_t           scalar = spv_scalar_type(e, elem->scalar); // sampled type is always scalar
 	bool     storage = t->kind == svsl_type_image;
-	uint32_t format  = storage ? svsl_image_format_for(&e->prog->types, t) : SpvImageFormatUnknown;
+	uint32_t format  = storage ? svsl_image_format_for(t) : SpvImageFormatUnknown;
 	if (storage && svsl_image_format_extended(format))
 		svsl_spv_cap(&e->spv, SpvCapabilityStorageImageExtendedFormats);
 	if (t->dim == svsl_texdim_1d) svsl_spv_cap(&e->spv, storage ? SpvCapabilityImage1D : SpvCapabilitySampled1D);

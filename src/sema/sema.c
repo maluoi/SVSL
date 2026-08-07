@@ -194,7 +194,7 @@ static svsl_type_id_t resolve_base_type(sema_t *s, const svsl_ast_type_t *ref) {
 		(void)ms; // storage images are never multisampled
 		if (elem == SVSL_TYPE_NONE) elem = svsl_type_vector_id(types, svsl_scalar_float32, 4);
 		if (ref->format.len > 0 && !svsl_image_format_find(ref->format, NULL))
-			err(s, ref->loc, "unknown image format '%.*s'", ref->format);
+			err(s, ref->loc, "unrecognized image format '%.*s'", ref->format);
 		return svsl_type_intern(types, (svsl_type_t){
 			.kind = svsl_type_image, .dim = dim, .arrayed = arrayed, .elem = elem,
 			.is_rw = true, .format = ref->format });
@@ -1227,7 +1227,7 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 					attr->arg_count == 1 && attr->args[0]->kind == svsl_expr_string_lit
 					? attr->args[0]->string_lit : (svsl_str_t){0};
 				if (!svsl_image_format_find(fmt_name, NULL)) {
-					err(&s, attr->loc, "unknown image format '%.*s'", fmt_name);
+					err(&s, attr->loc, "unrecognized image format '%.*s'", fmt_name);
 					continue;
 				}
 				svsl_type_t with_format = *base;

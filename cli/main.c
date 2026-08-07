@@ -303,8 +303,8 @@ static void usage(void) {
 		"usage: svslc [options] <files...>\n"
 		"  -o <path>          output file or directory\n"
 		"  -sks | -spv | -h   output format (default -sks)\n"
-		"  -t <s|w|sw>        container languages: SPIR-V, WGSL, or both (default s;\n"
-		"                     WGSL needs an SVSL_ENABLE_WGSL build)\n"
+		"  -t <s|w>           container language: SPIR-V or WGSL, one per container\n"
+		"                     (default s; WGSL needs an SVSL_ENABLE_WGSL build)\n"
 		"  -vs/-ps/-cs <name> entry point names (default vs/ps/cs)\n"
 		"  -i <dir>           include search path\n"
 		"  -D NAME[=VALUE]    preprocessor define\n"
@@ -334,11 +334,17 @@ int main(int argc, char **argv) {
 		if (strcmp(arg, "-sks") == 0) { cli.sks = true; format_set = true; continue; }
 		if (strcmp(arg, "-spv") == 0) { cli.spv = true; format_set = true; continue; }
 		if (strcmp(arg, "-h") == 0) { cli.header = true; format_set = true; continue; }
-		if (strcmp(arg, "-t") == 0 && i + 1 < argc) { // skshaderc-style language set
+		if (strcmp(arg, "-t") == 0 && i + 1 < argc) { // skshaderc-style language
 			for (const char *c = argv[++i]; *c; c++) {
 				if      (*c == 's') cli.targets |= svsl_target_spirv;
 				else if (*c == 'w') cli.targets |= svsl_target_wgsl;
-				else { fprintf(stderr, "svslc: unknown target '%c' in -t (use s and/or w)\n", *c); return 1; }
+				else { fprintf(stderr, "svslc: unknown target '%c' in -t (use s or w)\n", *c); return 1; }
+			}
+			// one target per container: the preprocessor predefines TARGET_SPIRV /
+			// TARGET_WGSL, so the two languages can compile from different source
+			if (cli.targets == (svsl_target_spirv | svsl_target_wgsl)) {
+				fprintf(stderr, "svslc: -t takes one language, not both; compile twice ('-t s' and '-t w')\n");
+				return 1;
 			}
 			continue;
 		}

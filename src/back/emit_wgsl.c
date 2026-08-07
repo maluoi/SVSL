@@ -985,9 +985,18 @@ static void prescan(wgsl_t *e) {
 			}
 		}
 		if (t->kind == svsl_type_image) {
-			uint32_t    fmt  = svsl_image_format_for(&prog->types, t);
+			uint32_t    fmt  = svsl_image_format_inferred(&prog->types, t);
 			const char *name = wgsl_texel_format(fmt);
 			uint8_t     acc  = e->res_access[r];
+			// an undeclared format infers above, so Unknown here means the shader
+			// asked for a format-agnostic image — WGSL makes the texel format part
+			// of the storage texture type, so there is nothing to emit
+			if (fmt == SpvImageFormatUnknown) {
+				skip(e, res->loc, "storage image '%.*s' is declared format-agnostic ('unknown'), which "
+				     "WebGPU has no storage texture for; declare an explicit format for WGSL targets",
+				     res->name.len, res->name.ptr);
+				break;
+			}
 			if (!name) { skip(e, res->loc, "storage image '%.*s' uses a texel format WebGPU has no "
 			                  "storage support for", res->name.len, res->name.ptr); break; }
 			if (acc == 3 && fmt != SpvImageFormatR32f && fmt != SpvImageFormatR32ui && fmt != SpvImageFormatR32i) {
@@ -2336,7 +2345,7 @@ static void emit_globals(wgsl_t *e) {
 			break;
 		}
 		case svsl_res_image: {
-			uint32_t    fmt    = svsl_image_format_for(&prog->types, t);
+			uint32_t    fmt    = svsl_image_format_inferred(&prog->types, t);
 			const char *dim    = t->dim == svsl_texdim_1d ? "1d" : t->dim == svsl_texdim_3d ? "3d" : "2d";
 			const char *access = e->res_access[r] == 3 ? "read_write" :
 			                     e->res_access[r] == 1 ? "read" : "write";

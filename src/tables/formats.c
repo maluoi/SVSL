@@ -2,6 +2,8 @@
 
 #include "../../vendor/spirv.h"
 
+#include <assert.h>
+
 typedef struct format_row_t {
 	const char *name;
 	uint32_t    format;
@@ -13,6 +15,9 @@ typedef struct format_row_t {
 // yet produce, and accepting the name without the capability would silently
 // emit invalid SPIR-V.
 static const format_row_t rows[] = {
+	// format-agnostic: the bound view's format drives the hardware's load/store
+	// conversion. Needs StorageImage*WithoutFormat, emitted per usage.
+	{ "unknown", SpvImageFormatUnknown },
 	// float
 	{ "rgba32f", SpvImageFormatRgba32f },       { "rgba16f", SpvImageFormatRgba16f },
 	{ "rg32f", SpvImageFormatRg32f },           { "rg16f", SpvImageFormatRg16f },
@@ -69,12 +74,20 @@ bool svsl_image_format_extended(uint32_t spv_format) {
 
 #include "../sema/types.h"
 
-uint32_t svsl_image_format_for(const svsl_types_t *types, const svsl_type_t *t) {
-	if (t->format.len > 0) {
-		uint32_t format = SpvImageFormatUnknown;
-		svsl_image_format_find(t->format, &format);
-		return format;
-	}
+uint32_t svsl_image_format_for(const svsl_type_t *t) {
+	// no declared format: agnostic, like DXC. Inferring a typed format would
+	// bind the shader to the one format it guessed.
+	if (t->format.len == 0) return SpvImageFormatUnknown;
+	uint32_t format = SpvImageFormatUnknown;
+	// sema validates the name at the declaration, so a miss here would silently
+	// downgrade a typed image to formatless
+	bool known = svsl_image_format_find(t->format, &format);
+	assert(known); (void)known;
+	return format;
+}
+
+uint32_t svsl_image_format_inferred(const svsl_types_t *types, const svsl_type_t *t) {
+	if (t->format.len > 0) return svsl_image_format_for(t);
 	const svsl_type_t *elem  = svsl_type_get(types, t->elem);
 	int32_t            count = elem->kind == svsl_type_vector ? elem->count : 1;
 	switch (elem->scalar) {

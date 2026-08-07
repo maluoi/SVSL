@@ -717,8 +717,12 @@ static void pp_directive(pp_t *pp, svsl_str_t line, const char *file, int32_t li
 	else if (svsl_str_eq_cstr(name, "undef")) {
 		int32_t n = 0;
 		while (n < rest.len && is_ident_char(rest.ptr[n])) n++;
-		pp_macro_t *macro = pp_macro_find(pp, svsl_str_slice(rest, 0, n));
-		if (macro) macro->alive = false;
+		// a redefinition pushes a second entry rather than replacing the first
+		// (lookup scans in reverse, so the last one wins), so #undef has to clear
+		// every entry with the name or an older definition resurfaces
+		svsl_str_t target = svsl_str_slice(rest, 0, n);
+		for (int32_t i = 0; i < pp->macros.count; i++)
+			if (svsl_str_eq(pp->macros.items[i].name, target)) pp->macros.items[i].alive = false;
 	}
 	else if (svsl_str_eq_cstr(name, "include")) pp_directive_include(pp, rest, file, loc, false);
 	else if (svsl_str_eq_cstr(name, "pragma")) {

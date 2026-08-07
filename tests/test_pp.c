@@ -59,6 +59,20 @@ static void test_pp_basics(void) {
 	TEST_CHECK(r.ok);
 	TEST_CHECK(text_is(&r, "x = 7;\ny = B;\n"));
 
+	// a redefinition pushes a second entry rather than replacing the first, so
+	// #undef has to clear them all — otherwise the older definition resurfaces
+	r = run_pp(&arena,
+		"#define N 1\n"
+		"#define N 2\n"
+		"x = N;\n"
+		"#undef N\n"
+		"#ifdef N\n"
+		"still defined;\n"
+		"#endif\n"
+		"y = N;\n", NULL);
+	TEST_CHECK(r.ok);
+	TEST_CHECK(text_is(&r, "x = 2;\ny = N;\n"));
+
 	// self-referential macro doesn't loop
 	r = run_pp(&arena, "#define R R+1\nx = R;\n", NULL);
 	TEST_CHECK(r.ok);

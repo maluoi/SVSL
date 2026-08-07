@@ -1,6 +1,7 @@
 #include "check.h"
 
 #include "../../vendor/spirv.h"
+#include "../tables/formats.h"
 #include "../tables/intrinsics.h"
 #include "../tables/spirv_opcodes.h"
 #include "../util/array.h"
@@ -376,6 +377,28 @@ static int32_t texdim_coord_count(const svsl_type_t *t) {
 	return n + (t->arrayed ? 1 : 0);
 }
 
+// The storage image an atomic addresses through HLSL's subscript spelling —
+// InterlockedAdd(img[coord], v) — or NULL for an ordinary pointer destination
+// (buffer, groupshared). Both spellings lower to the same image atomic.
+static const svsl_type_t *atomic_image_dest(const svsl_types_t *types, const svsl_ast_expr_t *dest) {
+	if (dest->kind != svsl_expr_index) return NULL;
+	const svsl_type_t *obj = svsl_type_get(types, dest->index.object->sema_type);
+	return obj->kind == svsl_type_image ? obj : NULL;
+}
+
+// Vulkan's standalone SPIR-V rules (VUID-StandaloneSpirv-OpImageTexelPointer-04658)
+// limit the image an atomic addresses to R32f/R32i/R32ui — so neither a
+// format-agnostic image nor a declared narrow format can take one. The 64-bit
+// halves of that rule need SpvCapabilityInt64ImageEXT, which formats.c omits.
+static bool check_atomic_image_format(check_t *c, const svsl_type_t *img, svsl_loc_t loc) {
+	uint32_t fmt = svsl_image_format_for(img);
+	if (fmt == SpvImageFormatR32f || fmt == SpvImageFormatR32i || fmt == SpvImageFormatR32ui)
+		return true;
+	cerr(c, loc, "image atomics need a declared r32f, r32i, or r32ui format, "
+	     "e.g. Image2D<uint, r32ui>%.*s", (svsl_str_t){0});
+	return false;
+}
+
 static svsl_type_id_t check_method_call(check_t *c, svsl_ast_expr_t *e) {
 	svsl_ast_expr_t *callee   = e->call.callee;
 	svsl_type_id_t   obj_type = check_expr(c, callee->member.object);
@@ -599,6 +622,7 @@ static svsl_type_id_t check_method_call(check_t *c, svsl_ast_expr_t *e) {
 	}
 	case svsl_method_atomic: {
 		if (obj->kind != svsl_type_image || arg_count < 2) { cerr(c, e->loc, "image atomics need coords and a value%.*s", (svsl_str_t){0}); return SVSL_TYPE_NONE; }
+		if (!check_atomic_image_format(c, obj, e->loc)) return SVSL_TYPE_NONE;
 		if (!convert_to(c, args[0], coord_i)) return SVSL_TYPE_NONE;
 		svsl_type_id_t scalar = svsl_type_scalar_id(types, elem_scal);
 		if (!convert_to(c, args[1], scalar)) return SVSL_TYPE_NONE;
@@ -756,6 +780,18 @@ static svsl_type_id_t check_special_intrinsic(check_t *c, svsl_ast_expr_t *e, co
 			cerr(c, args[arg_count - 1]->loc,
 			     "sequentially-consistent order isn't available on Vulkan; the strongest is acq_rel%.*s",
 			     (svsl_str_t){0});
+		// HLSL addresses a storage image atomic through a subscript. That lowers
+		// to an image atomic, whose IR carries (image, coord, value) with no room
+		// for a comparator — and needs a real format like the method spelling.
+		const svsl_type_t *img_dest = atomic_image_dest(types, args[0]);
+		if (img_dest) {
+			if (is_cmpxchg) {
+				cerr(c, e->loc, "compare-exchange has no storage image form; it is available on "
+				     "buffer and groupshared destinations%.*s", (svsl_str_t){0});
+				return SVSL_TYPE_NONE;
+			}
+			if (!check_atomic_image_format(c, img_dest, e->loc)) return SVSL_TYPE_NONE;
+		}
 		svsl_type_id_t     dest = args[0]->sema_type;
 		const svsl_type_t *td   = svsl_type_get(types, dest);
 		// float32 destinations: add/min/max/exchange only (SPV_EXT_shader_atomic_float

@@ -10,6 +10,7 @@ add_executable(svsl_tests
 	test_sks.c
 	test_api.c
 	test_qcom.c
+	test_formats.c
 	test_wgsl.c
 	test_corpus.c
 )
@@ -43,5 +44,6 @@ add_test(NAME ir     COMMAND svsl_tests ir)
 add_test(NAME sks    COMMAND svsl_tests sks)
 add_test(NAME api    COMMAND svsl_tests api)
 add_test(NAME qcom   COMMAND svsl_tests qcom)
+add_test(NAME formats COMMAND svsl_tests formats)
 add_test(NAME wgsl   COMMAND svsl_tests wgsl)
 add_test(NAME corpus COMMAND svsl_tests corpus)

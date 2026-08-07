@@ -399,6 +399,14 @@ static const compute_cfg_t compute_cfgs[] = {
 	  .buffers  = { { "sh_output", 27 } },
 	  .params   = { { "face_size", sksc_shader_var_uint, .value = { 16 } },
 	                { "mip_level", sksc_shader_var_uint, .value = { 0 } } } },
+	// format-agnostic storage images; goldens derive from the thread id, not the
+	// texture fill, so they hold for any view format the runtime binds
+	{ .file     = "check_unknown_format",
+	  .passes   = { { .dispatch = { 1, 1, 1 } } },
+	  .tex_size = 8, // one workgroup covers the whole 8x8 storage image
+	  .no_reference = true, // glslang has no 'unknown' layout format
+	  .buffers  = { { "result", 4, fill_zero } },
+	  .expect   = { { 0, 3 }, { 1, 10 }, { 2, 17 }, { 3, 24 } } }, // id.x * 7 + 3
 	{ .file     = "compute_reaction",
 	  .passes   = { { .dispatch = { 64 / 8, 64 / 8, 1 } } },
 	  .tex_size = 64,
