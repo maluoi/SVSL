@@ -3,7 +3,7 @@
 #include <string.h>
 
 // Scalar base type names. The trailing vector/matrix suffix is validated
-// separately (only 1-4 / NxN), so order here doesn't matter — "int8" can't
+// separately (only 1-4 / NxN), so order here doesn't matter - "int8" can't
 // mis-parse as "int" + "8".
 static const char *scalar_names[] = {
 	"min16float", // legacy alias of half

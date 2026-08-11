@@ -1,5 +1,5 @@
 // AST: tagged unions, arena-allocated, immutable after parse.
-// Types are unresolved name references at this stage — sema resolves them.
+// Types are unresolved name references at this stage - sema resolves them.
 
 #pragma once
 
@@ -35,7 +35,7 @@ typedef struct svsl_ast_attrs_t {
 
 typedef struct svsl_ast_reg_t {
 	bool       present;
-	bool       direct;  // register(binding, set) — SVSL native, no prefix letter/offset
+	bool       direct;  // register(binding, set) - SVSL native, no prefix letter/offset
 	char       cls;     // 'b','t','s','u' when prefixed, 0 otherwise
 	int32_t    slot;
 	int32_t    space;
@@ -48,8 +48,8 @@ struct svsl_ast_type_t {
 	svsl_str_t        name;         // "float4", "Texture2D", "inst_t", "void" (enum name if inline_enum)
 	svsl_loc_t        loc;
 	svsl_ast_type_t  *elem;         // Texture2D<float4> / StructuredBuffer<inst_t> element
-	svsl_str_t        format;       // Image2D<float4, rgba8> — image format name
-	svsl_ast_expr_t  *index;        // SubpassInput<T, N> — attachment index expression
+	svsl_str_t        format;       // Image2D<float4, rgba8> - image format name
+	svsl_ast_expr_t  *index;        // SubpassInput<T, N> - attachment index expression
 	svsl_ast_enum_t  *inline_enum;  // 'enum {...}' written in this type position; resolves to its int
 	svsl_ast_expr_t **array_dims;   // outer-to-inner; NULL entry = runtime-sized []
 	int32_t           array_dim_count;
@@ -67,13 +67,13 @@ typedef enum svsl_expr_ {
 	svsl_expr_unary,      // prefix: - ! ~ + ++ --
 	svsl_expr_post,       // postfix: ++ --
 	svsl_expr_ternary,
-	svsl_expr_call,       // callee(args) — callee is ident (function/intrinsic) or member (method)
-	svsl_expr_ctor,       // float4(...), float4x4(1) — type name used as function
+	svsl_expr_call,       // callee(args) - callee is ident (function/intrinsic) or member (method)
+	svsl_expr_ctor,       // float4(...), float4x4(1) - type name used as function
 	svsl_expr_cast,       // (float3x3)m
-	svsl_expr_member,     // expr.name — member, swizzle, or method name before a call
+	svsl_expr_member,     // expr.name - member, swizzle, or method name before a call
 	svsl_expr_index,      // expr[expr]
-	svsl_expr_init_list,  // {1, 1, 1, 1} — initializers only
-	svsl_expr_spirv_asm,  // spirv_asm(T) { OpXxx ... ; ... } — inline SPIR-V
+	svsl_expr_init_list,  // {1, 1, 1, 1} - initializers only
+	svsl_expr_spirv_asm,  // spirv_asm(T) { OpXxx ... ; ... } - inline SPIR-V
 } svsl_expr_;
 
 // --- inline SPIR-V (spirv_asm) --------------------------------------------------
@@ -82,12 +82,12 @@ typedef enum svsl_expr_ {
 // local carries the block's value (typed by the parenthesised result type).
 
 typedef enum svsl_spv_operand_ {
-	svsl_spv_operand_local,   // %name        — an id defined/used within the block
-	svsl_spv_operand_value,   // $expr        — an SVSL value; its SPIR-V id is spliced in
-	svsl_spv_operand_type,    // $$type       — an SVSL type; its SPIR-V type id is spliced in
-	svsl_spv_operand_literal, // 42           — a literal 32-bit word (enum values, immediates)
-	svsl_spv_operand_glsl450, // glsl450      — the GLSL.std.450 ext-instruction import id
-	svsl_spv_operand_string,  // "name"       — a string literal, packed as nul-terminated words
+	svsl_spv_operand_local,   // %name        - an id defined/used within the block
+	svsl_spv_operand_value,   // $expr        - an SVSL value; its SPIR-V id is spliced in
+	svsl_spv_operand_type,    // $$type       - an SVSL type; its SPIR-V type id is spliced in
+	svsl_spv_operand_literal, // 42           - a literal 32-bit word (enum values, immediates)
+	svsl_spv_operand_glsl450, // glsl450      - the GLSL.std.450 ext-instruction import id
+	svsl_spv_operand_string,  // "name"       - a string literal, packed as nul-terminated words
 } svsl_spv_operand_;
 
 typedef struct svsl_ast_spv_operand_t {
@@ -205,7 +205,7 @@ struct svsl_ast_var_t {
 	uint32_t         flags;    // svsl_var_flag_
 	uint8_t          interp;   // svsl_interp_
 	uint8_t          dir;      // svsl_dir_ (params)
-	uint8_t          pack;     // svsl_pack_ — layout keyword; buffer resources only
+	uint8_t          pack;     // svsl_pack_ - layout keyword; buffer resources only
 	int16_t          bit_width;  // packed-struct bit field width; -1 = not a bit field
 	uint8_t          bit_format; // svsl_bitfmt_
 	svsl_ast_attrs_t attrs;
@@ -264,10 +264,10 @@ typedef enum svsl_block_kind_ {
 
 typedef enum svsl_pack_ {
 	svsl_pack_default = 0,
-	svsl_pack_1,   // 'pack1' / 'scalar' — C layout (scalarBlockLayout when members straddle)
-	svsl_pack_8,   // 'pack8' / 'relaxed' — vectors align to min(natural, 8)
+	svsl_pack_1,   // 'pack1' / 'scalar' - C layout (scalarBlockLayout when members straddle)
+	svsl_pack_8,   // 'pack8' / 'relaxed' - vectors align to min(natural, 8)
 	svsl_pack_16,  // 'pack16' / 'std140'
-	svsl_pack_430, // 'std430' — the explicit spelling of the storage-buffer block default
+	svsl_pack_430, // 'std430' - the explicit spelling of the storage-buffer block default
 } svsl_pack_;
 
 typedef struct svsl_ast_struct_t {

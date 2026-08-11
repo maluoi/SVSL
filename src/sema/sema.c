@@ -66,7 +66,7 @@ void svsl_attrs_check(svsl_arena_t *arena, svsl_diag_list_t *diags,
 			// prefer-native hint for the [[vk::*]] escape spellings
 			if (porting && svsl_str_starts_with(attr->name, "vk::"))
 				svsl_diag_add(arena, diags, svsl_severity_porting, attr->loc,
-				              "legacy [[%.*s]] -> spec §6", attr->name.len, attr->name.ptr);
+				              "legacy [[%.*s]] -> spec section 6", attr->name.len, attr->name.ptr);
 			continue;
 		}
 		if (known)
@@ -120,7 +120,7 @@ static const char *legacy_type_native(svsl_str_t name) {
 }
 
 // A legacy type name resolves on more than one path (a bare global is also a $Global
-// member), so dedupe by location+message — one source spelling earns one hint.
+// member), so dedupe by location+message - one source spelling earns one hint.
 static void porting_type_hint(sema_t *s, svsl_loc_t loc, svsl_str_t legacy, const char *native) {
 	char msg[128];
 	snprintf(msg, sizeof msg, "legacy '%.*s' -> '%s'", (int)legacy.len, legacy.ptr, native);
@@ -221,7 +221,7 @@ static svsl_type_id_t resolve_base_type(sema_t *s, const svsl_ast_type_t *ref) {
 	return SVSL_TYPE_NONE;
 }
 
-// constant expression → int (array sizes); very small on purpose
+// constant expression -> int (array sizes); very small on purpose
 static bool const_eval_int(sema_t *s, const svsl_ast_expr_t *e, int64_t *out) {
 	switch (e->kind) {
 	case svsl_expr_int_lit:  *out = (int64_t)e->int_lit.value; return true;
@@ -272,12 +272,12 @@ static bool const_eval_int(sema_t *s, const svsl_ast_expr_t *e, int64_t *out) {
 	}
 }
 
-// [[attr(N)]] with exactly one constant-integer argument → *out (false otherwise)
+// [[attr(N)]] with exactly one constant-integer argument -> *out (false otherwise)
 static bool attr_int1(sema_t *s, const svsl_ast_attr_t *attr, int64_t *out) {
 	return attr->arg_count == 1 && const_eval_int(s, attr->args[0], out);
 }
 
-// [[vk::binding(slot[, set])]] → a direct descriptor binding; false if the args
+// [[vk::binding(slot[, set])]] -> a direct descriptor binding; false if the args
 // aren't (constant[, constant]). The caller owns the error (it knows the name).
 static bool attr_binding(sema_t *s, const svsl_ast_attr_t *attr, svsl_ast_reg_t *out) {
 	int64_t slot = 0, set = 0;
@@ -306,7 +306,7 @@ static svsl_type_id_t resolve_type(sema_t *s, const svsl_ast_type_t *ref) {
 }
 
 // Unsized arrays take their length from the initializer: float3 x[] = {...}.
-// Only the outermost dimension may be unsized, and only with an init list —
+// Only the outermost dimension may be unsized, and only with an init list -
 // used for const globals and locals; runtime-sized buffer members keep their
 // count-0 spelling and never come through here.
 static svsl_type_id_t infer_array_size(sema_t *s, svsl_type_id_t type, const svsl_ast_var_t *var) {
@@ -509,7 +509,7 @@ static void register_stmt_enums(sema_t *s, const svsl_ast_stmt_t *st) {
 	}
 }
 
-// Registers every enum in the program — top-level and inline — before structs and
+// Registers every enum in the program - top-level and inline - before structs and
 // globals, so their types/array-sizes can reference either. Constants are global.
 static void register_enums(sema_t *s) {
 	for (int32_t i = 0; i < s->ast->decl_count; i++) {
@@ -576,7 +576,7 @@ static void register_structs(sema_t *s) {
 			int32_t               explicit_location = -1;
 			svsl_attrs_check(s->arena, s->diags, &mv->attrs, svsl_attr_ctx_member, s->prog->porting);
 			for (int32_t a = 0; a < mv->attrs.count; a++) {
-				int64_t v;
+				int64_t v = 0; // has_int gates every read; the init is for compilers that can't see that
 				bool has_int = mv->attrs.items[a].arg_count == 1 &&
 				               const_eval_int(s, mv->attrs.items[a].args[0], &v);
 				if (svsl_str_eq_cstr(mv->attrs.items[a].name, "offset") ||
@@ -725,7 +725,7 @@ static bool slot_taken(sema_t *s, char cls, int32_t slot, int32_t space) {
 }
 
 // slots never free during assignment, so per (cls, space) the lowest free slot
-// is monotone — the hint skips re-probing filled territory (degenerate inputs
+// is monotone - the hint skips re-probing filled territory (degenerate inputs
 // with thousands of resources made the from-zero scan cubic)
 typedef struct slot_hint_t {
 	char    cls;
@@ -868,7 +868,7 @@ static void add_buffer_block(sema_t *s, const svsl_ast_block_t *block_in) {
 		err(s, members.items[bad].loc, "[offset] on '%.*s' moves backwards or breaks alignment", members.items[bad].name);
 
 	// explicit pack1/pack8 layouts may break the core relaxed rules; that's legal
-	// but requires the scalarBlockLayout device feature — record it
+	// but requires the scalarBlockLayout device feature - record it
 	if (layout == svsl_layout_pack1 || layout == svsl_layout_pack8)
 		for (int32_t i = 0; i < members.count; i++)
 			if (svsl_layout_needs_scalar(&s->prog->types, members.items[i].type, layout, offsets[i], NULL)) {
@@ -964,9 +964,9 @@ static void add_spec_const(sema_t *s, const svsl_ast_var_t *var) {
 		.name = var->name, .id = id, .default_bits = bits, .type = type, .loc = var->loc });
 }
 
-// True for SV_-prefixed semantics other than SV_Position — the system-value
+// True for SV_-prefixed semantics other than SV_Position - the system-value
 // spellings. SV_Position on a *vertex input* is a regular attribute (StereoKit's
-// pos field — skshaderc reflects it as Position0), so SV_* alone doesn't
+// pos field - skshaderc reflects it as Position0), so SV_* alone doesn't
 // disqualify. Syntactic only: whether the spelling names a real system value is
 // the semantics table's call (vs_input_is_attribute).
 static bool semantic_is_generated(svsl_str_t semantic) {
@@ -991,9 +991,9 @@ static bool semantic_is_generated(svsl_str_t semantic) {
 }
 
 // A vertex-entry input is a mesh attribute (collected for reflection) or a
-// system-generated value (a table-verified vs-input builtin — skipped). An SV_*
+// system-generated value (a table-verified vs-input builtin - skipped). An SV_*
 // spelling the table doesn't recognize is neither: it can't be fed by a mesh
-// and the container can't name it for attribute matching, so it is an error —
+// and the container can't name it for attribute matching, so it is an error -
 // not a silent drop that would leave the metadata disagreeing with the SPIR-V.
 // This must classify exactly like the emitter's counted/builtin split; both
 // consult the same semantics table, and the emitter's record_vs_input guard
@@ -1057,12 +1057,12 @@ static void add_entry(sema_t *s, const svsl_ast_func_t *func, svsl_stage_ stage)
 		if (svsl_str_eq_cstr(attr->name, "tile_shading_rate_qcom")) {
 			if (stage != svsl_stage_compute)
 				err(s, attr->loc, "[tile_shading_rate_qcom] on '%.*s': compute entries only", func->name);
-			// the rate replaces LocalSize — the implementation derives the
+			// the rate replaces LocalSize - the implementation derives the
 			// workgroup shape from it, so an explicit numthreads is an error
 			for (int32_t k = 0; k < func->attrs.count; k++)
 				if (svsl_str_eq_cstr(func->attrs.items[k].name, "numthreads") ||
 				    svsl_str_eq_cstr(func->attrs.items[k].name, "compute"))
-					err(s, attr->loc, "[tile_shading_rate_qcom] on '%.*s' replaces [numthreads] — remove one", func->name);
+					err(s, attr->loc, "[tile_shading_rate_qcom] on '%.*s' replaces [numthreads] - remove one", func->name);
 			bool ok = attr->arg_count == 3;
 			for (int32_t i = 0; ok && i < 3; i++) {
 				int64_t v;
@@ -1257,7 +1257,7 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 				// the element sits in an implicit runtime array; probe it as one so
 				// the stride-alignment and per-element straddle checks match the block
 				// form (needs_scalar's array case walks every distinct stride phase, not
-				// just element 0 — a vector can straddle only from element 1 onward)
+				// just element 0 - a vector can straddle only from element 1 onward)
 				svsl_type_id_t elem_array = svsl_type_array_id(&s.prog->types, base->elem, 0);
 				bool           violates   = svsl_layout_needs_scalar(&s.prog->types, elem_array, elem_layout, 0, NULL);
 				// interning the probe array may have grown the type table; re-derive
@@ -1267,7 +1267,7 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 					if (var->pack == svsl_pack_default)
 						svsl_diag_add(arena, s.diags, svsl_severity_error, var->loc,
 						              "the C-packed element layout of '%.*s' is not expressible under "
-						              "core Vulkan rules — reorder or pad the struct so vectors don't "
+						              "core Vulkan rules - reorder or pad the struct so vectors don't "
 						              "cross 16-byte boundaries and the stride is 16-aligned, or "
 						              "declare 'pack1' to require the scalarBlockLayout device feature",
 						              var->name.len, var->name.ptr);
@@ -1295,11 +1295,11 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 					else
 						err(&s, attr->loc, "[input_attachment_index] on '%.*s' needs a non-negative constant", var->name);
 				}
-				// [[vk::binding(b, set)]] — direct descriptor binding, replaces register()
+				// [[vk::binding(b, set)]] - direct descriptor binding, replaces register()
 				if (svsl_str_eq_cstr(attr->name, "vk::binding") && !attr_binding(&s, attr, &reg))
 					err(&s, attr->loc, "[[vk::binding]] on '%.*s' needs (binding[, set]) constants", var->name);
 			}
-			// [tile_attachment] — VK_QCOM_tile_shading: the variable lives in the
+			// [tile_attachment] - VK_QCOM_tile_shading: the variable lives in the
 			// TileAttachmentQCOM storage class (still a set/binding descriptor)
 			bool tile_attachment = false;
 			for (int32_t a = 0; a < var->attrs.count; a++) {
@@ -1457,7 +1457,7 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 		}
 
 		// //--apron = W[, H]: VK_QCOM_tile_shading render pass tileApronSize.
-		// Purely renderer-facing — the apron has no shader-side representation
+		// Purely renderer-facing - the apron has no shader-side representation
 		// (shaders only *read* the active size via tile_apron_size_qcom())
 		const svsl_pp_meta_t *apron = meta_find(pp, "apron");
 		if (apron) {

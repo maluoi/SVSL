@@ -38,7 +38,7 @@ static uint32_t rd_u32(rd_t *r) { const uint8_t *p = rd_take(r, 4); uint32_t v =
 static int32_t  rd_i32(rd_t *r) { const uint8_t *p = rd_take(r, 4); int32_t  v = 0; if (p) memcpy(&v, p, 4); return v; }
 static uint64_t rd_u64(rd_t *r) { const uint8_t *p = rd_take(r, 8); uint64_t v = 0; if (p) memcpy(&v, p, 8); return v; }
 
-// a fixed-size zero-padded field → an arena-owned NUL-terminated string
+// a fixed-size zero-padded field -> an arena-owned NUL-terminated string
 static const char *rd_str(rd_t *r, int32_t field) {
 	const uint8_t *p = rd_take(r, field);
 	if (!p) return "";
@@ -194,7 +194,8 @@ svsl_sks_file_t *svsl_sks_parse(const void *bytes, int32_t size) {
 			stages[spirv_count].spirv_word_count = (int32_t)(spirv_bytes / 4);
 		} else {
 			if (code_bytes & 3) goto fail;
-			stages[spirv_count].spirv            = (const uint32_t *)rd_blob(&r, code_bytes);
+			// through void*: rd_blob hands back arena memory, which is 16-byte aligned
+			stages[spirv_count].spirv            = (const uint32_t *)(const void *)rd_blob(&r, code_bytes);
 			stages[spirv_count].spirv_word_count = code_bytes / 4;
 		}
 		stages[spirv_count].stage            = stage;

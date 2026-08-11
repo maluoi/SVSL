@@ -91,7 +91,7 @@ static void test_sema_reference(void) {
 	TEST_CHECK(globals != NULL);
 	if (globals) {
 		TEST_CHECK(globals->bind.cls == 'b' && globals->bind.slot == 0 && globals->bind.space == 0);
-		TEST_CHECK(globals->size == 48); // f4 + f4 + float → padded to 16
+		TEST_CHECK(globals->size == 48); // f4 + f4 + float -> padded to 16
 		TEST_CHECK(globals->members.count == 3);
 		TEST_CHECK(globals->members.items[0].offset == 0);
 		TEST_CHECK(globals->members.items[1].offset == 16);
@@ -115,7 +115,7 @@ static void test_sema_reference(void) {
 	TEST_CHECK(sk != NULL);
 	if (sk) {
 		TEST_CHECK(sk->bind.slot == 1);
-		TEST_CHECK(sk->size == 400); // 6*64 + 4 → pad 16
+		TEST_CHECK(sk->size == 400); // 6*64 + 4 -> pad 16
 		TEST_CHECK(sk->members.items[1].offset == 384);
 	}
 
@@ -158,12 +158,12 @@ static void test_sema_auto_binding(void) {
 	const svsl_resource_t *third  = find_resource(&r.prog, "third");
 	const svsl_resource_t *first_s= find_resource(&r.prog, "first_s");
 	TEST_CHECK(second && second->bind.slot == 0);
-	TEST_CHECK(first  && first->bind.slot == 1);   // t0 taken → t1
+	TEST_CHECK(first  && first->bind.slot == 1);   // t0 taken -> t1
 	TEST_CHECK(third  && third->bind.slot == 2);
 	TEST_CHECK(first_s && first_s->bind.slot == 1); // paired with 'first' by name
 	TEST_CHECK(first  && first->sampler_slot == 1);
 
-	// $Global slips after explicit buffers: Params has no register → b0, bare → $Global b1
+	// $Global slips after explicit buffers: Params has no register -> b0, bare -> $Global b1
 	const svsl_buffer_t *params  = find_buffer(&r.prog, "Params");
 	const svsl_buffer_t *globals = find_buffer(&r.prog, "$Global");
 	TEST_CHECK(params && globals);
@@ -230,7 +230,7 @@ static void test_sema_storagebuffer_block(void) {
 static void test_sema_unsized_arrays(void) {
 	svsl_arena_t arena = {0};
 
-	// the outermost dimension takes its count from the initializer list —
+	// the outermost dimension takes its count from the initializer list -
 	// const globals, locals, and multi-dim arrays alike
 	sema_run_t r = run_sema(&arena,
 		"static const float3 grad[] = { float3(0,0,0), float3(1,1,1), float3(2,2,2) };\n"
@@ -357,7 +357,7 @@ static void test_sema_errors(void) {
 	TEST_CHECK(!r.ok); // spec constants are 32-bit scalars
 
 	// an SV_* spelling the semantics table doesn't know can't be a vertex
-	// attribute (nothing can feed it) — rejected, not silently dropped; known
+	// attribute (nothing can feed it) - rejected, not silently dropped; known
 	// system values (SV_VertexID here) and SV_Position stay accepted
 	r = run_sema_ex(&arena,
 		"struct O { float4 pos : SV_Position; };\n"
@@ -598,7 +598,7 @@ static void test_sema_half_strict16(void) {
 	const svsl_resource_t *res = find_resource(&r.prog, "data");
 	TEST_CHECK(res != NULL);
 	if (res) {
-		// half a; half2 b; as float16: a at 0 (2B), b at 2..6 → 6-byte struct,
+		// half a; half2 b; as float16: a at 0 (2B), b at 2..6 -> 6-byte struct,
 		// std430 element stride 8 (vec2 alignment 4)
 		TEST_CHECK(res->element_size == 8);
 		const svsl_type_t *t = svsl_type_get(&r.prog.types, res->type);
@@ -617,7 +617,7 @@ static void test_sema_half_strict16(void) {
 static void test_sema_attributes(void) {
 	svsl_arena_t arena = {0};
 
-	// unknown plain attribute → warning; compile still succeeds
+	// unknown plain attribute -> warning; compile still succeeds
 	sema_run_t r = run_sema(&arena,
 		"[totally_bogus(1)]\n"
 		"float4 ps() : SV_TARGET { return 1; }\n");
@@ -627,7 +627,7 @@ static void test_sema_attributes(void) {
 		if (r.diags.items[i].severity == svsl_severity_warning) warned = true;
 	TEST_CHECK(warned);
 
-	// unknown [[vk::*]] attribute → error (spec §6)
+	// unknown [[vk::*]] attribute -> error (spec section 6)
 	r = run_sema_ex(&arena,
 		"[[vk::frobnicate]]\n"
 		"float4 ps() : SV_TARGET { return 1; }\n", true);
@@ -717,7 +717,7 @@ static void test_check_atomic_order(void) {
 	r = run_sema(&arena, src);
 	TEST_CHECK(r.ok);
 
-	// seq_cst is rejected — Vulkan has no sequential consistency
+	// seq_cst is rejected - Vulkan has no sequential consistency
 	snprintf(src, sizeof(src), "%s atomic_add(b[0], 1u, seq_cst); }\n", prefix);
 	r = run_sema_ex(&arena, src, true);
 	TEST_CHECK(!r.ok);
@@ -757,7 +757,7 @@ static void test_check_bitfield(void) {
 		"}\n");
 	TEST_CHECK(r.ok);
 
-	// a float value is rejected — bitfields are integer only
+	// a float value is rejected - bitfields are integer only
 	r = run_sema_ex(&arena,
 		"float4 ps() : SV_TARGET { return bitfield_extract(1.5, 0u, 4u); }\n", true);
 	TEST_CHECK(!r.ok);
@@ -783,8 +783,8 @@ static void test_check_bitfield_struct(void) {
 		"	bool  f : 1;\n"
 		"	float c : un10;\n"
 		"	half  d : sn6;\n"   // a..d = 27 bits, still in word 0
-		"	half  h : 16;\n"    // would cross 32 → new word
-		"	uint  e;\n"         // plain member, natural 32 bits → its own word
+		"	half  h : 16;\n"    // would cross 32 -> new word
+		"	uint  e;\n"         // plain member, natural 32 bits -> its own word
 		"};\n"
 		"RWStructuredBuffer<P> buf : register(u0);\n"
 		"[numthreads(1,1,1)] void cs(uint3 t : SV_DispatchThreadID) {\n"
@@ -809,7 +809,7 @@ static void test_check_bitfield_struct(void) {
 		TEST_CHECK(f[3].bit_offset == 11 && f[3].bit_format == svsl_bitfmt_unorm);
 		TEST_CHECK(f[4].bit_offset == 21 && f[4].bit_format == svsl_bitfmt_snorm);
 		TEST_CHECK(f[5].bit_offset == 32 && f[5].bit_width == 16);  // half pushed to word 1
-		TEST_CHECK(f[6].bit_offset == 64 && f[6].bit_width == 32);  // plain uint → word 2
+		TEST_CHECK(f[6].bit_offset == 64 && f[6].bit_width == 32);  // plain uint -> word 2
 	}
 
 	// bool must be exactly one raw bit
@@ -865,7 +865,7 @@ static void test_check_enum(void) {
 	TEST_CHECK(svsl_type_get(&r.prog.types, one->type)->scalar == svsl_scalar_int16);
 	TEST_CHECK(svsl_type_get(&r.prog.types, modec->type)->scalar == svsl_scalar_uint32);
 
-	// enum as a packed bit-field resolve type → a raw integer field
+	// enum as a packed bit-field resolve type -> a raw integer field
 	r = run_sema(&arena,
 		"enum Facing : uint { N, E, S, W };\n"
 		"struct T { Facing dir : 2; uint hp : 6; };\n"
@@ -883,7 +883,7 @@ static void test_check_enum(void) {
 	r = run_sema_ex(&arena, "struct C {int x;}; enum C { A }; float4 ps():SV_TARGET{return 0;}\n", true);
 	TEST_CHECK(!r.ok);
 
-	// inline enums in a parameter, a struct member, and a local — constants are still
+	// inline enums in a parameter, a struct member, and a local - constants are still
 	// global, and each inline enum resolves to its underlying integer type
 	r = run_sema(&arena,
 		"uint pick(enum { Thing1, Thing2 } which) { return (uint)which; }\n"
@@ -937,7 +937,7 @@ static void test_sema_porting_hints(void) {
 	on.ok = svsl_sema_run(&arena, ast, &pp, "porting.hlsl",
 	                      &(svsl_sema_options_t){ .porting_hints = true }, &on.prog, &on.diags);
 	TEST_CHECK(on.ok);
-	TEST_CHECK(count_porting(&on) == 3); // SamplerState, min16float4, InterlockedAdd — each once
+	TEST_CHECK(count_porting(&on) == 3); // SamplerState, min16float4, InterlockedAdd - each once
 	svsl_arena_free(&arena);
 }
 

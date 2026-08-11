@@ -32,7 +32,7 @@ static void test_layout_interning(void) {
 	svsl_arena_t arena = {0};
 	lt_t         lt    = lt_init(&arena);
 
-	// interning dedups: same request → same id
+	// interning dedups: same request -> same id
 	TEST_CHECK(svsl_type_vector_id(&lt.types, svsl_scalar_float32, 4) == lt.f4);
 	TEST_CHECK(svsl_type_scalar_id(&lt.types, svsl_scalar_half) == lt.h);
 	TEST_CHECK(lt.f4 != lt.h4);
@@ -163,7 +163,7 @@ static void test_layout_structs_and_offsets(void) {
 	lt_t         lt    = lt_init(&arena);
 	svsl_types_t *t    = &lt.types;
 
-	// inst_t { float4x4 world; float4 color; } — the instancing struct
+	// inst_t { float4x4 world; float4 color; } - the instancing struct
 	svsl_struct_info_t inst = { .name = svsl_str("inst_t") };
 	svsl_array_push(&arena, &inst.members, (svsl_member_t){ .name = svsl_str("world"), .type = lt.m44, .explicit_offset = -1 });
 	svsl_array_push(&arena, &inst.members, (svsl_member_t){ .name = svsl_str("color"), .type = lt.f4,  .explicit_offset = -1 });

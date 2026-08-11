@@ -1,5 +1,5 @@
 // Public API implementation (<svsl/svsl.h>): orchestrates the internal pipeline
-// pp → lex → parse → sema → IR → SPIR-V and owns all of a compile's memory in one
+// pp -> lex -> parse -> sema -> IR -> SPIR-V and owns all of a compile's memory in one
 // arena. The SKS reader lives in out/sks_read.c. This is the only translation unit
 // that stitches the modules together for consumers; the CLI goes through here too.
 
@@ -28,7 +28,7 @@ typedef struct impl_t {
 	svsl_ir_module_t   ir;
 	svsl_spirv_blob_t *blobs;      // one per IR entry point (arena-sized after ir_build)
 	svsl_wgsl_blob_t  *wgsl_blobs; // one per entry when targets include wgsl; else NULL
-	uint32_t           targets;    // svsl_target_ bits, normalized (0 → spirv)
+	uint32_t           targets;    // svsl_target_ bits, normalized (0 -> spirv)
 	bool               keep_debug_names;
 	bool               no_smolv;
 	svsl_sks_blob_t    sks;   // memoized container; .bytes stays NULL until first serialized
@@ -65,7 +65,7 @@ svsl_result_t *svsl_compile(const svsl_source_t *source, const svsl_options_t *o
 
 	// the target settles before the preprocessor runs: it predefines TARGET_SPIRV
 	// or TARGET_WGSL, so source can vary per target. That only works with one
-	// target per compile — two would need two preprocessor runs, and the SKS
+	// target per compile - two would need two preprocessor runs, and the SKS
 	// carries a single reflection table that could not describe both.
 	impl->targets = opt.targets ? opt.targets : svsl_target_spirv;
 	if (impl->targets & ~(uint32_t)(svsl_target_spirv | svsl_target_wgsl))
@@ -106,7 +106,7 @@ svsl_result_t *svsl_compile(const svsl_source_t *source, const svsl_options_t *o
 	if (impl->diags.error_count == 0) {
 		svsl_ir_build(arena, &impl->program, opt.opt_level, &impl->ir, &impl->diags);
 		impl->have_ir = true;
-		// SPIR-V always compiles — reflection metadata (vertex locations, feature
+		// SPIR-V always compiles - reflection metadata (vertex locations, feature
 		// bits, op counts) derives from it; targets only govern serialization
 		impl->blobs = svsl_arena_alloc(arena, sizeof(svsl_spirv_blob_t) * (impl->ir.func_count > 0 ? impl->ir.func_count : 1));
 		if (impl->diags.error_count == 0)

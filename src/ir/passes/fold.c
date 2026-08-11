@@ -134,7 +134,7 @@ bool svsl_ir_fold(svsl_ir_func_t *fn, const svsl_types_t *types) {
 			}
 			break;
 		}
-		case svsl_ir_convert: { // int literal → float constant is the common case
+		case svsl_ir_convert: { // int literal -> float constant is the common case
 			if (!const_bits(fn, inst->args[0], &a)) break;
 			const svsl_type_t *from = svsl_type_get(types, fn->insts.items[inst->args[0]].type);
 			if (from->kind != svsl_type_scalar) break;
@@ -154,7 +154,7 @@ bool svsl_ir_fold(svsl_ir_func_t *fn, const svsl_types_t *types) {
 				uint32_t ua = (uint32_t)a;
 				float    fa;
 				memcpy(&fa, &ua, 4);
-				// out-of-range float→int is UB in C and undefined in SPIR-V; clamp, NaN → 0
+				// out-of-range float->int is UB in C and undefined in SPIR-V; clamp, NaN -> 0
 				uint32_t bits;
 				if (t->scalar == svsl_scalar_int32)
 					bits = fa != fa            ? 0 :

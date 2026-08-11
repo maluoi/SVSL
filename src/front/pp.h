@@ -1,4 +1,4 @@
-// Preprocessor: text → text with a line map (every output line knows its source
+// Preprocessor: text -> text with a line map (every output line knows its source
 // file + line), macro expansion, conditionals, includes, and //-- metadata capture.
 
 #pragma once

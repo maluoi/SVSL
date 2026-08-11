@@ -1,4 +1,4 @@
-// WGSL emission: IR → WGSL text for StereoKit's WebGPU backend. See
+// WGSL emission: IR -> WGSL text for StereoKit's WebGPU backend. See
 // emit_wgsl.h for the output contract. Structure mirrors emit_spirv.c where
 // the problems are shared; WGSL needs none of the id/section machinery, and
 // entry IO maps to attributed structs instead of SROA'd variables.
@@ -20,6 +20,7 @@
 #include "../ir/ir_operands.h"
 #include "../front/ast.h"
 #include "../util/array.h"
+#include "../util/attr.h"
 #include "../../vendor/spirv.h"
 #include "../../vendor/GLSL.std.450.h"
 
@@ -50,34 +51,34 @@ typedef struct wgsl_t {
 	uint8_t *res_cmp;        // texture: 1 = SampleCmp'd, 2 = also plainly sampled
 	uint8_t *res_access;     // storage image: bit 0 read, bit 1 written
 	uint8_t *struct_used;    // per prog->types.structs entry
-	int32_t *sampler_pair;   // standalone sampler → first texture it samples, -1
+	int32_t *sampler_pair;   // standalone sampler -> first texture it samples, -1
 	const char **const_texts;// per const-global: materialized initializer, NULL = unused/int
 	// WGSL atomics are type-level: these mark the storage leaves that must
 	// declare atomic<T> (and whose plain loads/stores become atomicLoad/Store)
 	uint8_t  *res_atomic;    // object-form structured buffer: its elements
 	uint8_t  *wg_atomic;     // workgroup variable (scalar or array-of-scalar)
-	uint8_t **buf_atomic;    // per buffer → per member
+	uint8_t **buf_atomic;    // per buffer -> per member
 
 	// std140 arrays of scalars/vec2s have 16-byte strides WGSL can't declare
 	// directly; they wrap in `struct sk_pad_T { @size(16) v : T }` instead,
 	// which reproduces the layout byte-for-byte. Accessors route through .v.
-	uint8_t **buf_wrapped;       // per buffer → per member
+	uint8_t **buf_wrapped;       // per buffer -> per member
 	bool      path_wrap_pending; // lvalue met a wrapped member; next index adds .v
 	svsl_array_t(svsl_type_id_t) pad_types; // distinct wrapped element types
 
 	// single-use inlining: a value referenced exactly once folds into its use
-	// site instead of a `let _N` (see inline_analyze) — inline_expr holds its
+	// site instead of a `let _N` (see inline_analyze) - inline_expr holds its
 	// expression text once emission reaches it
 	uint8_t     *inline_ok;
 	const char **inline_expr;
 
-	// set by lvalue() when a path routes through transpose() — loadable but
+	// set by lvalue() when a path routes through transpose() - loadable but
 	// not assignable (storing into a buffer matrix's row needs a scatter)
 	bool path_readonly;
 
 	// Buffer matrix loads whose transpose() can commute away at the use site:
 	// transpose(X) * v == v * X, so a single-use load feeding a multiply emits
-	// source operand order on the raw path instead — the common transform path
+	// source operand order on the raw path instead - the common transform path
 	// (mul(pos, viewproj)) carries zero transposes.
 	uint8_t     *buf_mat_load; // per inst: load of a matrix from buffer memory
 	const char **buf_mat_raw;  // its untransposed path text
@@ -101,6 +102,7 @@ typedef struct wgsl_t {
 
 // ---- text building ---------------------------------------------------------------
 
+static const char *sfmt(wgsl_t *e, const char *fmt, ...) SVSL_PRINTF(2, 3);
 static const char *sfmt(wgsl_t *e, const char *fmt, ...) {
 	// fast path: most expressions are short, so format once into a stack
 	// buffer and copy; only oversized results pay the measure+format double
@@ -123,6 +125,7 @@ static void wraw(wgsl_t *e, const char *text) {
 }
 
 // one statement/declaration line at the current indent
+static void wln(wgsl_t *e, const char *fmt, ...) SVSL_PRINTF(2, 3);
 static void wln(wgsl_t *e, const char *fmt, ...) {
 	if (e->skipped) return;
 	for (int32_t i = 0; i < e->indent; i++)
@@ -139,6 +142,15 @@ static void wln(wgsl_t *e, const char *fmt, ...) {
 	svsl_array_push(e->arena, &e->out, '\n');
 }
 
+// a blank separator line - same indent behavior as wln with an empty format
+static void wnl(wgsl_t *e) {
+	if (e->skipped) return;
+	for (int32_t i = 0; i < e->indent; i++)
+		svsl_array_push(e->arena, &e->out, '\t');
+	svsl_array_push(e->arena, &e->out, '\n');
+}
+
+static void skip(wgsl_t *e, svsl_loc_t loc, const char *fmt, ...) SVSL_PRINTF(3, 4);
 static void skip(wgsl_t *e, svsl_loc_t loc, const char *fmt, ...) {
 	if (e->skipped) return;
 	e->skipped = true;
@@ -228,11 +240,13 @@ static bool wgsl_scalar_literal(wgsl_t *e, svsl_scalar_ scalar, double v, const 
 	case svsl_scalar_float32: {
 		float f = (float)v;
 		if (f != f || f > 3.4e38f || f < -3.4e38f) return false; // WGSL can't spell NaN/Inf
-		return *out = sfmt(e, "%.9gf", f), true;
+		*out = sfmt(e, "%.9gf", f);
+		return true;
 	}
 	case svsl_scalar_float16:
 		e->uses_f16 = true;
-		return *out = sfmt(e, "%.9gh", (float)v), true;
+		*out = sfmt(e, "%.9gh", (float)v);
+		return true;
 	default: return false;
 	}
 }
@@ -293,7 +307,7 @@ static const char *const_global_text(wgsl_t *e, const struct svsl_ast_expr_t *ex
 }
 
 // packed structs expose logical bit fields; their physical members are all
-// backing uint32 words that share a source name — number them instead
+// backing uint32 words that share a source name - number them instead
 static const char *struct_member_name(wgsl_t *e, int32_t struct_index, int32_t m) {
 	const svsl_struct_info_t *info = &e->prog->types.structs.items[struct_index];
 	if (info->packed) return sfmt(e, "_w%d", m);
@@ -370,7 +384,7 @@ static bool wgsl_layout(wgsl_t *e, svsl_type_id_t id, bool uniform,
 	case svsl_type_array: {
 		uint32_t ea, es;
 		if (!wgsl_layout(e, t->elem, uniform, &ea, &es)) return false;
-		// the element stride is natural — WGSL does NOT round it up; a uniform
+		// the element stride is natural - WGSL does NOT round it up; a uniform
 		// array whose natural stride isn't a 16-multiple is simply invalid
 		uint32_t stride = round_up(es, ea);
 		if (uniform && stride % 16 != 0) return false;
@@ -431,7 +445,7 @@ static void check_buffer_layout(wgsl_t *e, const svsl_buffer_t *buf) {
 		}
 		if (offset != member->offset) {
 			skip(e, member->loc, "member '%.*s' of buffer '%.*s' sits at offset %u, but WGSL's "
-			     "%s layout puts it at %u — restructure the buffer (float4-sized members always agree)",
+			     "%s layout puts it at %u - restructure the buffer (float4-sized members always agree)",
 			     member->name.len, member->name.ptr, buf->name.len, buf->name.ptr,
 			     member->offset, uniform ? "uniform" : "storage", offset);
 			return;
@@ -476,7 +490,7 @@ static const char *res_name(wgsl_t *e, int32_t res) {
 	return ident(e, e->prog->resources.items[res].name);
 }
 
-// the sampler resource paired with a texture (same s-slot + space), or -1 —
+// the sampler resource paired with a texture (same s-slot + space), or -1 -
 // the same pairing rule sks_write uses to fuse samplers away on Vulkan
 static int32_t tex_paired_sampler(wgsl_t *e, int32_t tex_res) {
 	const svsl_resource_t *tex = &e->prog->resources.items[tex_res];
@@ -496,7 +510,7 @@ static const char *paired_sampler_name(wgsl_t *e, int32_t tex_res) {
 	return smp >= 0 ? res_name(e, smp) : sfmt(e, "%s_sampler", res_name(e, tex_res));
 }
 
-// Whether a texture binds as texture_depth_* — decided by its paired sampler's
+// Whether a texture binds as texture_depth_* - decided by its paired sampler's
 // DECLARED type, because the runtime derives the bind group layout from that
 // declaration (meta shape bit 5), never from per-stage usage. Usage that
 // contradicts the declaration skips the stage in the prescan.
@@ -650,7 +664,7 @@ static const char *lvalue(wgsl_t *e, uint32_t id, svsl_type_id_t *out_type) {
 				// in-register: the index selects an HLSL row = WGSL column. In
 				// buffer memory the matrix is column-major HLSL, so compensate:
 				// element access swaps the two indices; a row access reads
-				// through transpose() (read-only — stores would need a scatter)
+				// through transpose() (read-only - stores would need a scatter)
 				if (ptr_in_buffer(e, id) && i + 1 < in->aux_count) {
 					uint32_t jdx = e->fn->aux.items[in->aux + i + 1];
 					path      = sfmt(e, "%s[%s][%s]", path, val(e, jdx), val(e, idx));
@@ -695,7 +709,7 @@ static const char *val(wgsl_t *e, uint32_t id) {
 	}
 }
 
-// vec4 → the instruction's narrower result, as a swizzle suffix
+// vec4 -> the instruction's narrower result, as a swizzle suffix
 static const char *shrink4(wgsl_t *e, const char *expr, svsl_type_id_t type) {
 	const svsl_type_t *t = svsl_type_get(&e->prog->types, type);
 	int32_t count = t->kind == svsl_type_vector ? t->count : 1;
@@ -745,7 +759,7 @@ static void prescan(wgsl_t *e) {
 
 	if (fn->entry->wave_size > 0 || prog->wave_size > 0)
 		svsl_diag_add(e->arena, e->diags, svsl_severity_warning, fn->entry->func->loc,
-		              "WGSL: [wave_size] pins the subgroup size, which WebGPU can't honor — "
+		              "WGSL: [wave_size] pins the subgroup size, which WebGPU can't honor - "
 		              "the hint is ignored for the WGSL stage");
 	for (int32_t i = 0; i < prog->spec_consts.count; i++)
 		if (prog->spec_consts.items[i].id == WGSL_VIEW_INDEX_SPEC_ID) {
@@ -766,7 +780,7 @@ static void prescan(wgsl_t *e) {
 			if (svsl_type_get(&prog->types, in->type)->scalar == svsl_scalar_float32 ||
 			    svsl_type_get(&prog->types, in->type)->scalar == svsl_scalar_half)
 				if ((in->args[0] & 0x7F800000u) == 0x7F800000u)
-					skip(e, in->loc, "a NaN/Inf float constant, which WGSL cannot spell — "
+					skip(e, in->loc, "a NaN/Inf float constant, which WGSL cannot spell - "
 					     "compute the value at runtime instead");
 			break;
 		case svsl_ir_spirv_asm:
@@ -797,7 +811,7 @@ static void prescan(wgsl_t *e) {
 				const svsl_type_t *et = svsl_type_get(&prog->types, rt->elem);
 				if (et->kind != svsl_type_scalar) {
 					skip(e, in->loc, "atomics into structured-buffer struct members aren't "
-					     "supported yet — use a scalar element type");
+					     "supported yet - use a scalar element type");
 					break;
 				}
 				e->res_atomic[root->args[1]] = 1;
@@ -989,7 +1003,7 @@ static void prescan(wgsl_t *e) {
 			const char *name = wgsl_texel_format(fmt);
 			uint8_t     acc  = e->res_access[r];
 			// an undeclared format infers above, so Unknown here means the shader
-			// asked for a format-agnostic image — WGSL makes the texel format part
+			// asked for a format-agnostic image - WGSL makes the texel format part
 			// of the storage texture type, so there is nothing to emit
 			if (fmt == SpvImageFormatUnknown) {
 				skip(e, res->loc, "storage image '%.*s' is declared format-agnostic ('unknown'), which "
@@ -1077,7 +1091,7 @@ static const char *splat(wgsl_t *e, svsl_type_id_t type, const char *scalar, svs
 	return sfmt(e, "%s(%s)", scalar_name(e, t->scalar, loc), scalar);
 }
 
-// argument list "a, b, c" from the instruction's aux operands; built linearly —
+// argument list "a, b, c" from the instruction's aux operands; built linearly -
 // re-formatting the accumulated prefix per operand was quadratic
 static const char *aux_args(wgsl_t *e, const svsl_ir_inst_t *in) {
 	svsl_array_t(char) buf = {0};
@@ -1149,7 +1163,7 @@ static const char *intrinsic_expr(wgsl_t *e, const svsl_ir_inst_t *in) {
 	case svsl_emit_bitcast: {
 		// asfloat of constant NaN/Inf bits is a WGSL shader-creation error when
 		// const-evaluated; routing the bits through a var defers the bitcast to
-		// runtime, where the value is legal — exactly what the source intends
+		// runtime, where the value is legal - exactly what the source intends
 		const svsl_type_t    *rt  = svsl_type_get(&e->prog->types, in->type);
 		const svsl_ir_inst_t *src = a_count > 0 ? &e->fn->insts.items[e->fn->aux.items[in->aux]] : NULL;
 		if (src && src->op == svsl_ir_const && rt->kind == svsl_type_scalar &&
@@ -1175,7 +1189,7 @@ static const char *intrinsic_expr(wgsl_t *e, const svsl_ir_inst_t *in) {
 		return sfmt(e, "%s)", ex);
 	}
 	case svsl_emit_f32tof16: {
-		// lanes pack in pairs — two pack2x16floats cover vec3/vec4, where the
+		// lanes pack in pairs - two pack2x16floats cover vec3/vec4, where the
 		// scalar form burns a whole pack (with a zeroed high lane) per value
 		const svsl_type_t *t = svsl_type_get(&e->prog->types, in->type);
 		if (t->kind != svsl_type_vector)
@@ -1417,7 +1431,7 @@ static void io_add(wgsl_t *e, io_list_t *io, svsl_str_t name, svsl_type_id_t typ
 		if (info.builtin == SpvBuiltInViewIndex) { f->view_index = true; e->uses_view_index = true; return; }
 		if (info.builtin == SpvBuiltInLayer) {
 			skip(e, loc, "SV_RenderTargetArrayIndex routes primitives to a layered-target slice, "
-			     "which WebGPU cannot express — use SV_ViewID and multiview instead");
+			     "which WebGPU cannot express - use SV_ViewID and multiview instead");
 			return;
 		}
 		f->builtin = builtin_name(info.builtin, sem_io != svsl_sem_vs_out && sem_io != svsl_sem_ps_out);
@@ -1486,7 +1500,7 @@ static bool needs_flat(wgsl_t *e, const io_field_t *f) {
 	return t->scalar == svsl_scalar_int32 || t->scalar == svsl_scalar_uint32 || t->scalar == svsl_scalar_bool;
 }
 
-// `varying` marks the interpolated vs↔ps interface, where WGSL requires
+// `varying` marks the interpolated vs<->ps interface, where WGSL requires
 // integer fields to declare @interpolate(flat) on both sides. `inputs`
 // excludes builtins: input builtins are separate entry parameters (see
 // io_ref); output builtins stay in the struct, where uniformity is moot.
@@ -1513,10 +1527,10 @@ static void emit_io_struct(wgsl_t *e, const char *name, const io_list_t *io,
 	}
 	e->indent--;
 	wln(e, "}");
-	wln(e, "");
+	wnl(e);
 }
 
-// Raw reference to an input field. Builtins are separate entry parameters —
+// Raw reference to an input field. Builtins are separate entry parameters -
 // bundling them into the IO struct would give the whole struct one uniformity
 // per Tint's analysis, so a non-uniform member (local_invocation_id) would
 // poison uniform ones (workgroup_id) and reject legal barriers.
@@ -1630,7 +1644,7 @@ static void param_split_analyze(wgsl_t *e) {
 // `let _N`. sink[i] = the statement where i's text is finally evaluated,
 // chased through inlined users and through chains (whose text materializes at
 // their user). State-readers only inline when no side-effecting or
-// control-flow instruction (svsl_ir_has_side_effects — the shared oracle)
+// control-flow instruction (svsl_ir_has_side_effects - the shared oracle)
 // separates their definition from that sink.
 static void inline_analyze(wgsl_t *e, bool struct_return) {
 	const svsl_ir_func_t *fn = e->fn;
@@ -1646,7 +1660,7 @@ static void inline_analyze(wgsl_t *e, bool struct_return) {
 	for (int32_t i = 0; i < fn->insts.count; i++) {
 		const svsl_ir_inst_t *in = &fn->insts.items[i];
 		cum[i + 1] = cum[i] + (svsl_ir_has_side_effects(in, &e->prog->types) ? 1 : 0);
-		// struct returns and cmpxchg print an operand's text more than once —
+		// struct returns and cmpxchg print an operand's text more than once -
 		// weight 2 forces those into lets so evaluation isn't duplicated
 		int32_t  w    = in->op == svsl_ir_atomic ||
 		                (in->op == svsl_ir_return && struct_return) ? 2 : 1;
@@ -1796,7 +1810,7 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 			if (e->path_wrap_pending) {
 				e->path_wrap_pending = false;
 				skip(e, in->loc, "copying a whole scalar array out of a uniform buffer isn't "
-				     "supported on WGSL (its elements are std140-wrapped) — index them instead");
+				     "supported on WGSL (its elements are std140-wrapped) - index them instead");
 			}
 			const svsl_type_t *lt = svsl_type_get(&e->prog->types, in->type);
 			bool from_buf = ptr_in_buffer(e, in->args[0]);
@@ -1807,7 +1821,7 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 			}
 			else if (from_buf && type_contains_matrix(e, in->type)) {
 				skip(e, in->loc, "copying a struct/array that contains a matrix out of a buffer "
-				     "isn't supported on WGSL — read the matrix member itself");
+				     "isn't supported on WGSL - read the matrix member itself");
 				ex = path;
 			} else if (ptr_is_atomic(e, in->args[0])) {
 				ex = sfmt(e, "atomicLoad(&%s)", path);
@@ -1824,19 +1838,19 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 			if (e->path_wrap_pending) {
 				e->path_wrap_pending = false;
 				skip(e, in->loc, "storing a whole scalar array into a buffer isn't supported on "
-				     "WGSL (its elements are std140-wrapped) — index them instead");
+				     "WGSL (its elements are std140-wrapped) - index them instead");
 			}
 			const svsl_type_t *st = svsl_type_get(&e->prog->types,
 			                                      fn->insts.items[in->args[1]].type);
 			bool to_buf = ptr_in_buffer(e, in->args[0]);
 			if (e->path_readonly)
 				skip(e, in->loc, "assigning into a row of a matrix in a buffer isn't supported "
-				     "on WGSL — copy the matrix to a local, modify it, store it back whole");
+				     "on WGSL - copy the matrix to a local, modify it, store it back whole");
 			else if (to_buf && st->kind == svsl_type_matrix)
 				wln(e, "%s = transpose(%s);", path, val(e, in->args[1]));
 			else if (to_buf && type_contains_matrix(e, fn->insts.items[in->args[1]].type))
 				skip(e, in->loc, "storing a struct/array that contains a matrix into a buffer "
-				     "isn't supported on WGSL — store the matrix member itself");
+				     "isn't supported on WGSL - store the matrix member itself");
 			else if (ptr_is_atomic(e, in->args[0]))
 				wln(e, "atomicStore(&%s, %s);", path, val(e, in->args[1]));
 			else
@@ -1855,7 +1869,7 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 				break;
 			}
 			// compare-exchange: WGSL only has the weak form, which may fail
-			// spuriously — retry until it either succeeds or genuinely mismatches
+			// spuriously - retry until it either succeeds or genuinely mismatches
 			wln(e, "var _%d : %s;", i, type_name_w(e, in->type, in->loc));
 			wln(e, "loop {");
 			e->indent++;
@@ -1964,19 +1978,19 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 			ex = sfmt(e, "%s(%s)", type_name_w(e, in->type, in->loc), val(e, in->args[0]));
 			break;
 		case svsl_ir_mat_mul: {
-			// swapped operands, mirroring the SPIR-V backend — but a single-use
+			// swapped operands, mirroring the SPIR-V backend - but a single-use
 			// buffer matrix load commutes its transpose away: T(X)*v == v*X
-			uint32_t a = in->args[0], b = in->args[1];
-			bool ainl = e->buf_mat_load[a] && e->inline_expr && e->inline_expr[a];
-			bool binl = e->buf_mat_load[b] && e->inline_expr && e->inline_expr[b];
+			uint32_t lhs = in->args[0], rhs = in->args[1];
+			bool ainl = e->buf_mat_load[lhs] && e->inline_expr && e->inline_expr[lhs];
+			bool binl = e->buf_mat_load[rhs] && e->inline_expr && e->inline_expr[rhs];
 			if (ainl && binl)      // T(Xb)*T(Xa) == T(Xa*Xb): two transposes become one
-				ex = sfmt(e, "transpose((%s * %s))", e->buf_mat_raw[a], e->buf_mat_raw[b]);
+				ex = sfmt(e, "transpose((%s * %s))", e->buf_mat_raw[lhs], e->buf_mat_raw[rhs]);
 			else if (binl)         // mul(v, M): T(Xm)*v == v*Xm
-				ex = sfmt(e, "(%s * %s)", val(e, a), e->buf_mat_raw[b]);
+				ex = sfmt(e, "(%s * %s)", val(e, lhs), e->buf_mat_raw[rhs]);
 			else if (ainl)         // mul(M, v): v*T(Xm) == Xm*v
-				ex = sfmt(e, "(%s * %s)", e->buf_mat_raw[a], val(e, b));
+				ex = sfmt(e, "(%s * %s)", e->buf_mat_raw[lhs], val(e, rhs));
 			else
-				ex = sfmt(e, "(%s * %s)", val(e, b), val(e, a));
+				ex = sfmt(e, "(%s * %s)", val(e, rhs), val(e, lhs));
 			break;
 		}
 
@@ -2124,7 +2138,7 @@ static void emit_structs(wgsl_t *e) {
 			    type_name_w(e, info->members.items[m].type, info->members.items[m].loc));
 		e->indent--;
 		wln(e, "}");
-		wln(e, "");
+		wnl(e);
 	}
 }
 
@@ -2185,7 +2199,7 @@ static void emit_buffer_struct(wgsl_t *e, const svsl_buffer_t *buf, const uint8_
 
 // Buffer memory holds matrices in HLSL column-major (the D3D cbuffer
 // convention the CPU writes), so a WGSL matNxN load yields the TRUE HLSL
-// matrix — while every in-register value uses the swapped representation the
+// matrix - while every in-register value uses the swapped representation the
 // SPIR-V backend defined (HLSL rows as columns). Loads/stores across the
 // buffer boundary therefore transpose, and index chains into buffer matrices
 // compensate (see lvalue's matrix step).
@@ -2198,7 +2212,7 @@ static bool ptr_in_buffer(wgsl_t *e, uint32_t id) {
 }
 
 // a struct/array whose interior holds a matrix can't cross the buffer
-// boundary as one copy — its matrix members would keep the wrong orientation
+// boundary as one copy - its matrix members would keep the wrong orientation
 static bool type_contains_matrix(wgsl_t *e, svsl_type_id_t id) {
 	const svsl_type_t *t = svsl_type_get(&e->prog->types, id);
 	if (t->kind == svsl_type_matrix) return false; // bare matrices transpose fine
@@ -2238,7 +2252,7 @@ static void add_sampler(wgsl_t *e, const char *name, uint16_t slot, uint16_t pai
 static void emit_globals(wgsl_t *e) {
 	const svsl_program_t *prog = e->prog;
 
-	// specialization constants → pipeline-overridable constants
+	// specialization constants -> pipeline-overridable constants
 	for (int32_t i = 0; i < prog->spec_consts.count; i++) {
 		const svsl_spec_const_t *sc = &prog->spec_consts.items[i];
 		const svsl_type_t       *t  = svsl_type_get(&prog->types, sc->type);
@@ -2252,7 +2266,7 @@ static void emit_globals(wgsl_t *e) {
 	}
 	if (e->uses_view_index)
 		wln(e, "@id(%d) override sk_view_index : u32 = 0u;", WGSL_VIEW_INDEX_SPEC_ID);
-	if (prog->spec_consts.count > 0 || e->uses_view_index) wln(e, "");
+	if (prog->spec_consts.count > 0 || e->uses_view_index) wnl(e);
 
 	// const globals: materialized initializers (prescan), int-folded ones direct
 	for (int32_t i = 0; i < prog->const_globals.count; i++) {
@@ -2275,7 +2289,7 @@ static void emit_globals(wgsl_t *e) {
 	for (int32_t i = 0; i < e->pad_types.count; i++)
 		wln(e, "struct %s { @size(16) v : %s }", pad_struct_name(e, e->pad_types.items[i]),
 		    type_name_w(e, e->pad_types.items[i], (svsl_loc_t){0}));
-	if (e->pad_types.count > 0) wln(e, "");
+	if (e->pad_types.count > 0) wnl(e);
 
 	// uniform buffers
 	for (int32_t b = 0; b < prog->buffers.count; b++) {
@@ -2284,7 +2298,7 @@ static void emit_globals(wgsl_t *e) {
 		emit_buffer_struct(e, buf, NULL);
 		wln(e, "@group(0) @binding(%d) var<uniform> %s : %s_t;",
 		    buf->bind.slot, ident(e, buf->name), ident(e, buf->name));
-		wln(e, "");
+		wnl(e);
 	}
 
 	// resources
@@ -2368,7 +2382,7 @@ static void emit_globals(wgsl_t *e) {
 		default: break; // tileimage already skipped in prescan
 		}
 	}
-	wln(e, "");
+	wnl(e);
 }
 
 // ---- public entry ----------------------------------------------------------------
@@ -2419,10 +2433,10 @@ bool svsl_wgsl_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 	e.in_io = &in_io;
 	if (e.skipped) return true;
 
-	// Vertex attributes must equal the SKS meta's records — Dawn requires every
+	// Vertex attributes must equal the SKS meta's records - Dawn requires every
 	// declared attribute to be fed, and the runtime feeds exactly the meta. The
 	// meta mirrors the SPIR-V module, so take presence and location straight
-	// from the SPIR-V emitter's recording: -1 = stripped as unused → pruned.
+	// from the SPIR-V emitter's recording: -1 = stripped as unused -> pruned.
 	// The location fields walk params in the same order collect_vertex_inputs
 	// flattened them (builtins excluded on both sides by the same table).
 	if (stage == svsl_stage_vertex && opt_vs_input_locations) {

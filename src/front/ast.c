@@ -3,6 +3,7 @@
 #include "ast.h"
 
 #include "../util/array.h"
+#include "../util/attr.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -15,6 +16,7 @@ typedef struct dump_t {
 	dump_buf_t    out;
 } dump_t;
 
+static void put(dump_t *d, const char *fmt, ...) SVSL_PRINTF(2, 3);
 static void put(dump_t *d, const char *fmt, ...) {
 	char    tmp[512];
 	va_list args;

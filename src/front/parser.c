@@ -174,7 +174,7 @@ static svsl_ast_type_t *parse_type(parse_t *p) {
 		advance(p);
 		// unorm/snorm texel modifiers parse and drop: glslang ignores them even
 		// for storage image format inference (RWTexture3D<unorm float4> is
-		// Rgba32f, same as plain float4 — verified against skshaderc)
+		// Rgba32f, same as plain float4 - verified against skshaderc)
 		if (at(p, svsl_tok_ident) &&
 		    (svsl_str_eq_cstr(cur(p)->text, "unorm") || svsl_str_eq_cstr(cur(p)->text, "snorm")))
 			advance(p);
@@ -200,7 +200,7 @@ static svsl_ast_type_t *type_clone(parse_t *p, const svsl_ast_type_t *type) {
 	return copy;
 }
 
-// [4][2] or [] — appended to the declarator's own type copy
+// [4][2] or [] - appended to the declarator's own type copy
 static void parse_array_dims(parse_t *p, svsl_ast_type_t *type) {
 	expr_list_t dims = {0};
 	while (accept(p, svsl_tok_lbracket)) {
@@ -312,8 +312,6 @@ static int32_t binary_prec(svsl_tok_ op) {
 
 static bool is_assign_op(svsl_tok_ op) { return binary_prec(op) == 2; }
 
-static svsl_ast_expr_t *parse_unary(parse_t *p);
-
 static svsl_ast_expr_t *parse_args_into(parse_t *p, expr_list_t *out) {
 	if (!at(p, svsl_tok_rparen)) {
 		do {
@@ -324,7 +322,7 @@ static svsl_ast_expr_t *parse_args_into(parse_t *p, expr_list_t *out) {
 	return NULL;
 }
 
-// spirv_asm(T) { OpXxx <operand>* ; ... } — inline SPIR-V. Operands are written
+// spirv_asm(T) { OpXxx <operand>* ; ... } - inline SPIR-V. Operands are written
 // in binary order: %id (a named local, %result carries the block's value), $expr
 // (an SVSL value), $$type (an SVSL type), an integer literal, or glsl450.
 static svsl_ast_expr_t *parse_spirv_asm(parse_t *p) {
@@ -429,7 +427,7 @@ static svsl_ast_expr_t *parse_primary(parse_t *p) {
 	}
 	if (at(p, svsl_tok_ident)) {
 		svsl_str_t name = cur(p)->text;
-		// constructor: type name used as a function — float4(...), float4x4(1)
+		// constructor: type name used as a function - float4(...), float4x4(1)
 		if (peek(p, 1)->kind == svsl_tok_lparen && is_type_name(p, name)) {
 			svsl_ast_type_t *type = parse_type(p);
 			expect(p, svsl_tok_lparen, "'('");
@@ -503,8 +501,6 @@ static svsl_ast_expr_t *parse_postfix(parse_t *p) {
 	}
 }
 
-static svsl_ast_expr_t *parse_unary(parse_t *p);
-
 static svsl_ast_expr_t *parse_unary_inner(parse_t *p) {
 	svsl_loc_t loc = cur(p)->loc;
 
@@ -551,7 +547,7 @@ static svsl_ast_expr_t *parse_binary(parse_t *p, int32_t min_prec);
 
 // A binary/ternary right-hand side recurses through parse_binary; right-associative
 // forms (assignment, ternary arms) nest without bound, which parse_unary's guard
-// doesn't cover — so track and cap depth across the RHS descent here too.
+// doesn't cover - so track and cap depth across the RHS descent here too.
 static svsl_ast_expr_t *parse_binary_rhs(parse_t *p, int32_t min_prec) {
 	if (p->depth >= PARSE_MAX_DEPTH) {
 		if (!p->too_deep) {
@@ -642,7 +638,7 @@ typedef struct decl_mods_t {
 	bool     any;
 } decl_mods_t;
 
-// Layout keywords by their standards names — context-sensitive identifiers, not
+// Layout keywords by their standards names - context-sensitive identifiers, not
 // reserved words ('relaxed' is also an atomic order argument, 'scalar' a likely
 // variable name). Only recognized when what follows can continue a declaration:
 // a type name, a block keyword, or another modifier.
@@ -703,7 +699,7 @@ static decl_mods_t parse_decl_mods(parse_t *p, bool allow_dir) {
 		else if (allow_dir && accept_kw(p, svsl_kw_inout)) mods.dir = svsl_dir_inout;
 		else if (at(p, svsl_tok_ident) && svsl_str_eq_cstr(cur(p)->text, "inline") &&
 		         peek(p, 1)->kind == svsl_tok_ident) {
-			advance(p); // HLSL 'inline' — accepted, meaningless (all calls are inlined anyway)
+			advance(p); // HLSL 'inline' - accepted, meaningless (all calls are inlined anyway)
 			continue;   // doesn't count as a modifier
 		}
 		else break;
@@ -712,7 +708,7 @@ static decl_mods_t parse_decl_mods(parse_t *p, bool allow_dir) {
 	return mods;
 }
 
-// layout keywords name a whole buffer's memory layout — they have no meaning on
+// layout keywords name a whole buffer's memory layout - they have no meaning on
 // locals, parameters, or individual members
 static void reject_pack_mods(parse_t *p, decl_mods_t *mods, svsl_loc_t loc) {
 	if (!mods->pack) return;
@@ -723,12 +719,12 @@ static void reject_pack_mods(parse_t *p, decl_mods_t *mods, svsl_loc_t loc) {
 
 // one declarator: name [dims] [: semantic] [: register] [= init]
 // packed-struct bit field: ': N' (raw), ': unN' (unorm), ': snN' (snorm). Only
-// consumes the ':' when it is genuinely a bit field — a plain ': SEMANTIC' or
+// consumes the ':' when it is genuinely a bit field - a plain ': SEMANTIC' or
 // ': register(...)' is left for parse_colon_clauses.
 static void parse_bitfield_spec(parse_t *p, svsl_ast_var_t *var) {
 	if (!at(p, svsl_tok_colon)) return;
 	const svsl_token_t *nx = peek(p, 1);
-	if (nx->kind == svsl_tok_int_lit) {                 // ': N' — raw bits
+	if (nx->kind == svsl_tok_int_lit) {                 // ': N' - raw bits
 		advance(p); // ':'
 		var->bit_width  = (int16_t)cur(p)->int_value;
 		var->bit_format = svsl_bitfmt_raw;
@@ -742,7 +738,7 @@ static void parse_bitfield_spec(parse_t *p, svsl_ast_var_t *var) {
 		if (fmt == 255) return;
 		int32_t w = 0;
 		for (int32_t i = 2; i < t.len; i++) {
-			if (t.ptr[i] < '0' || t.ptr[i] > '9') return; // not un/sn<digits> → a semantic
+			if (t.ptr[i] < '0' || t.ptr[i] > '9') return; // not un/sn<digits> -> a semantic
 			w = w * 10 + (t.ptr[i] - '0');
 		}
 		advance(p); // ':'
@@ -779,7 +775,7 @@ static svsl_ast_var_t *parse_declarator(parse_t *p, const svsl_ast_type_t *base_
 	return var;
 }
 
-// type declarator [, declarator]* ';' — shared by locals, globals, and block members
+// type declarator [, declarator]* ';' - shared by locals, globals, and block members
 static void parse_var_decl_list(parse_t *p, const decl_mods_t *mods, svsl_ast_attrs_t attrs,
                                 var_list_t *out) {
 	svsl_ast_type_t *base = parse_type(p);
@@ -795,16 +791,16 @@ static void parse_var_decl_list(parse_t *p, const decl_mods_t *mods, svsl_ast_at
 static bool stmt_starts_decl(const parse_t *p) {
 	if (at_kw(p, svsl_kw_static) || at_kw(p, svsl_kw_const) ||
 	    at_kw(p, svsl_kw_workgroup) || at_kw(p, svsl_kw_groupshared)) return true;
-	if (at_kw(p, svsl_kw_enum)) return true; // 'enum {...} local;' — inline in a type position
+	if (at_kw(p, svsl_kw_enum)) return true; // 'enum {...} local;' - inline in a type position
 	if (!at(p, svsl_tok_ident)) return false;
 	if (peek(p, 1)->kind == svsl_tok_ident) {
-		// 'type name' — including keyword-flavored names like 'float sample'
+		// 'type name' - including keyword-flavored names like 'float sample'
 		if (is_type_name(p, cur(p)->text)) return true;
 		// 'ident ident' is never a valid expression, so it's a declaration even when
 		// the type name is unknown (sema reports the unknown type with a better message)
 		if (peek(p, 1)->keyword == (int16_t)svsl_kw_none) return true;
 	}
-	// 'type <' — templated resource local (illegal, sema rejects with context)
+	// 'type <' - templated resource local (illegal, sema rejects with context)
 	return is_type_name(p, cur(p)->text) && peek(p, 1)->kind == svsl_tok_lt;
 }
 
@@ -1052,7 +1048,7 @@ static svsl_ast_decl_t *parse_struct(parse_t *p) {
 	return d;
 }
 
-// enum [Name] [: underlying] { A [= expr], ... } — stops after '}'. Constant names
+// enum [Name] [: underlying] { A [= expr], ... } - stops after '}'. Constant names
 // are global (C / HLSL-unscoped flavor); the enum names an integer type alias.
 static void parse_enum_body(parse_t *p, svsl_ast_enum_t *out) {
 	out->loc = cur(p)->loc;
@@ -1090,7 +1086,7 @@ static svsl_ast_type_t *make_type_named(parse_t *p, svsl_str_t name, svsl_loc_t 
 }
 
 // access modifiers and layout keywords that used to follow the block keyword and
-// now prefix it — reserved words, so none can ever be a valid buffer name
+// now prefix it - reserved words, so none can ever be a valid buffer name
 static bool at_buffer_postfix_mod(const parse_t *p) {
 	return at_kw(p, svsl_kw_readonly) || at_kw(p, svsl_kw_writeonly) ||
 	       at_kw(p, svsl_kw_coherent) || at_kw(p, svsl_kw_volatile)  ||
@@ -1242,7 +1238,7 @@ static void parse_decl_into(parse_t *p, decl_list_t *out) {
 			do {
 				svsl_array_push(p->arena, &vars, parse_declarator(p, base, &mods, (svsl_ast_attrs_t){0}));
 			} while (accept(p, svsl_tok_comma));
-			push_var_list_decls(p, out, &vars, vars.items[0]->loc); // ≥1 declarator here
+			push_var_list_decls(p, out, &vars, vars.items[0]->loc); // >=1 declarator here
 		}
 		expect(p, svsl_tok_semicolon, "';' after enum");
 		return;
@@ -1310,7 +1306,7 @@ static void scan_struct_names(parse_t *p) {
 		if (p->toks[i].kind == svsl_tok_ident &&
 		    (p->toks[i].keyword == svsl_kw_struct || p->toks[i].keyword == svsl_kw_enum) &&
 		    p->toks[i + 1].kind == svsl_tok_ident) {
-			svsl_array_push(p->arena, &p->struct_names, p->toks[i + 1].text); // 'enum Name'/'enum : t' → skip ':'
+			svsl_array_push(p->arena, &p->struct_names, p->toks[i + 1].text); // 'enum Name'/'enum : t' -> skip ':'
 		}
 	}
 }

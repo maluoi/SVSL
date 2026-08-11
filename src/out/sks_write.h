@@ -1,5 +1,5 @@
 // SKS container writer (StereoKit's SKSHADER format). One version at a time,
-// per the standing SKS policy — the version field lets runtimes refuse old
+// per the standing SKS policy - the version field lets runtimes refuse old
 // files, it is not a compatibility mechanism. Byte layout follows
 // sksc.cpp::sksc_build_file / sksc_file.c exactly (the authoritative pair).
 
@@ -21,7 +21,7 @@ typedef struct svsl_sks_options_t {
 	bool     no_smolv;         // store SPIR-V stages raw rather than SMOL-V encoded
 } svsl_sks_options_t;
 
-// blobs: one SPIR-V module per module->funcs entry, same order — always
+// blobs: one SPIR-V module per module->funcs entry, same order - always
 // required (metadata derives from them); opts->targets decides which languages
 // the container carries (skshaderc -t style). opt_wgsl adds one WGSL stage
 // record per entry whose blob has text, plus the v12 standalone sampler records

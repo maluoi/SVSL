@@ -1,5 +1,5 @@
 // pack16 is proper std140. Note: glslang's HLSL front-end (skshaderc) packs
-// cbuffers with HLSL rules instead — 4-byte alignment with a 16-byte-straddle
+// cbuffers with HLSL rules instead - 4-byte alignment with a 16-byte-straddle
 // bump, and no array tail padding. The two agree on every StereoKit corpus
 // shader (scalars, float3+float pairs, and 16-byte-multiple arrays lay out
 // identically); they differ only for vec2-after-scalar patterns, where the
@@ -105,7 +105,7 @@ uint32_t svsl_layout_size(const svsl_types_t *types, svsl_type_id_t id, svsl_lay
 		const svsl_struct_info_t *info = &types->structs.items[t->struct_index];
 		int32_t bad = -1;
 		return svsl_layout_members(types, info->members.items, info->members.count,
-		                           layout, NULL, &bad); // size only — no per-member offsets needed
+		                           layout, NULL, &bad); // size only - no per-member offsets needed
 	}
 	case svsl_type_void:
 	case svsl_type_texture:
@@ -121,8 +121,8 @@ uint32_t svsl_layout_size(const svsl_types_t *types, svsl_type_id_t id, svsl_lay
 
 // Vulkan's relaxed block layout (core 1.1, no device feature) is std430 with one
 // relaxation: vector members may sit at component alignment as long as they don't
-// improperly straddle a 16-byte boundary. Everything else — composite member
-// offsets, array strides, matrix column strides — must still satisfy std430
+// improperly straddle a 16-byte boundary. Everything else - composite member
+// offsets, array strides, matrix column strides - must still satisfy std430
 // alignment. A concrete layout violating that needs the scalarBlockLayout device
 // feature. (SVSL layouts always keep members component-aligned, so the relaxation
 // baseline itself is never violated.)

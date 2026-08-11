@@ -169,7 +169,7 @@ static void lex_number(lex_t *lex) {
 	} else if (is_bin) {
 		token.int_value = strtoull(src.ptr + start + 2, NULL, 2);
 	} else if (token_text.len > 1 && token_text.ptr[0] == '0' && !is_float) {
-		// octal (matching C and glslang) — reject a non-octal digit rather than
+		// octal (matching C and glslang) - reject a non-octal digit rather than
 		// silently truncating at it (strtoull would parse "09" as just 0)
 		for (int32_t k = start + 1; k < i; k++) {
 			char c = src.ptr[k];

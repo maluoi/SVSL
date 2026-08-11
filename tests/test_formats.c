@@ -1,6 +1,6 @@
 // Storage image formats and per-target compilation.
 //
-// An undeclared storage image format means SpvImageFormatUnknown — the shader
+// An undeclared storage image format means SpvImageFormatUnknown - the shader
 // is agnostic to the bound view's format, like DXC. The old texel-type
 // inference survives only inside the WGSL backend, which has no formatless
 // storage texture to emit (see test_wgsl.c). The emitted words are the testable
@@ -72,7 +72,7 @@ static int32_t count_insts(const svsl_spirv_blob_t *b, SpvOp op) {
 	return n;
 }
 
-// True when the module declares a 32-bit OpConstant of this value — enough to
+// True when the module declares a 32-bit OpConstant of this value - enough to
 // see which memory-semantics mask an atomic was handed, since the tiny shaders
 // here have no other source for the bit pattern.
 static bool has_u32_const(const svsl_spirv_blob_t *b, uint32_t value) {
@@ -126,7 +126,7 @@ void test_formats(void) {
 	TEST_CHECK(first_image_format(&c.blobs[0]) == SpvImageFormatUnknown);
 	TEST_CHECK(count_caps(&c.blobs[0], SpvCapabilityStorageImageWriteWithoutFormat) == 1);
 	TEST_CHECK(count_caps(&c.blobs[0], SpvCapabilityStorageImageReadWithoutFormat)  == 0);
-	// the sks bit is joint, so a write-only shader still reports it — the SPIR-V
+	// the sks bit is joint, so a write-only shader still reports it - the SPIR-V
 	// capability list above is what distinguishes read from write
 	{
 		uint64_t f = sks_features(&c);
@@ -267,7 +267,7 @@ void test_formats(void) {
 
 	// the third argument means different things per spelling: the HLSL alias
 	// takes an out-param, the native form a memory-order name. 0x808 is
-	// AcquireRelease | ImageMemory — the semantics mask an ordered image atomic
+	// AcquireRelease | ImageMemory - the semantics mask an ordered image atomic
 	// gets, and proof the order reached emit instead of being read as a store
 	// destination
 	fmt_compile(&c,

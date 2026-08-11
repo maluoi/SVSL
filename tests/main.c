@@ -1,4 +1,4 @@
-// svsl_tests — unit + corpus test runner.
+// svsl_tests - unit + corpus test runner.
 // Runs all suites, or only those named on the command line.
 
 #include "test.h"
@@ -8,20 +8,6 @@
 
 int32_t test_checks = 0;
 int32_t test_fails  = 0;
-
-void test_util  (void);
-void test_pp    (void);
-void test_lexer (void);
-void test_parser(void);
-void test_layout(void);
-void test_sema  (void);
-void test_ir    (void);
-void test_sks   (void);
-void test_api   (void);
-void test_qcom  (void);
-void test_formats(void);
-void test_wgsl  (void);
-void test_corpus(void);
 
 typedef struct {
 	const char *name;

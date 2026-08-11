@@ -1,6 +1,6 @@
 // IR: function-scoped, SSA-ish, flat arrays. Values are instruction indices.
 // Control flow keeps the AST's structure via marker ops (SPIR-V needs structured
-// CF anyway); variables that cross blocks stay as var/load/store — no general phi.
+// CF anyway); variables that cross blocks stay as var/load/store - no general phi.
 // Opaque types (textures/samplers/images) never appear as values: resource ops
 // carry resource-table indices, resolved at inline time for opaque parameters.
 
@@ -30,7 +30,7 @@ typedef enum svsl_ir_op_ {
 	svsl_ir_store,       // args[0] = pointer, args[1] = value
 
 	// composites
-	svsl_ir_construct,   // components in aux → vector/matrix/array/struct
+	svsl_ir_construct,   // components in aux -> vector/matrix/array/struct
 	svsl_ir_extract,     // args[0] = composite value, args[1] = literal index
 	svsl_ir_insert,      // args[0] = composite value, args[1] = literal index, args[2] = value
 	svsl_ir_shuffle,     // args[0] = vector value, args[1] = packed nibble indices, args[2] = count
@@ -43,7 +43,7 @@ typedef enum svsl_ir_op_ {
 	svsl_ir_eq, svsl_ir_ne, svsl_ir_lt, svsl_ir_le, svsl_ir_gt, svsl_ir_ge,
 	svsl_ir_log_and, svsl_ir_log_or, // componentwise, not short-circuit (HLSL/glslang)
 	svsl_ir_select,      // args[0] = cond, args[1] = a, args[2] = b
-	svsl_ir_convert,     // args[0] = value; converts operand type → inst type
+	svsl_ir_convert,     // args[0] = value; converts operand type -> inst type
 	svsl_ir_mat_mul,     // args[0], args[1]: mat*mat, mat*vec, vec*mat by operand shapes
 
 	// intrinsics and resources
@@ -62,7 +62,7 @@ typedef enum svsl_ir_op_ {
 	svsl_ir_if,          // args[0] = cond
 	svsl_ir_else,
 	svsl_ir_end_if,
-	svsl_ir_loop,        // body … loop_continue … (increment) … end_loop
+	svsl_ir_loop,        // body ... loop_continue ... (increment) ... end_loop
 	svsl_ir_loop_continue,
 	svsl_ir_end_loop,
 	svsl_ir_break,
@@ -76,7 +76,7 @@ typedef enum svsl_ir_op_ {
 } svsl_ir_op_;
 
 // per-instruction flags (packs into the padding after `op`)
-enum { svsl_ir_flag_precise = 1 << 0 }; // no fma contraction (from `precise`) → OpDecorate NoContraction
+enum { svsl_ir_flag_precise = 1 << 0 }; // no fma contraction (from `precise`) -> OpDecorate NoContraction
 
 typedef struct svsl_ir_inst_t {
 	uint8_t        op;        // svsl_ir_op_
@@ -86,7 +86,7 @@ typedef struct svsl_ir_inst_t {
 	uint32_t       aux;       // offset into the function's aux pool
 	uint32_t       aux_count;
 	svsl_loc_t     loc;
-	svsl_str_t     name;      // optional, for dumps ("o", "world", …)
+	svsl_str_t     name;      // optional, for dumps ("o", "world", ...)
 } svsl_ir_inst_t;
 
 struct svsl_ast_expr_t;
@@ -123,8 +123,8 @@ bool svsl_ir_build(svsl_arena_t *arena, svsl_program_t *prog, svsl_opt_level_ op
                    svsl_ir_module_t *out_module, svsl_diag_list_t *ref_diags);
 
 // The optimizer: a fixed, iterated list of pure passes (no pass manager). Each
-// pass rewrites in place or nops instructions out — indices stay stable and
-// value references stay forward-only. See docs/OPTIMIZATION_PLAN.md §3.
+// pass rewrites in place or nops instructions out - indices stay stable and
+// value references stay forward-only. See docs/OPTIMIZATION_PLAN.md section 3.
 void svsl_ir_optimize(svsl_arena_t *arena, svsl_ir_func_t *fn,
                       const svsl_program_t *prog, svsl_opt_level_ level);
 
@@ -134,7 +134,7 @@ void svsl_ir_optimize(svsl_arena_t *arena, svsl_ir_func_t *fn,
 bool svsl_ir_fold   (svsl_ir_func_t *fn, const svsl_types_t *types); // constant folding
 bool svsl_ir_peephole(svsl_arena_t *arena, svsl_ir_func_t *fn,       // pattern simplification
                       const svsl_types_t *types, svsl_opt_level_ level);
-bool svsl_ir_forward(svsl_arena_t *arena, svsl_ir_func_t *fn,        // store→load + redundant-load
+bool svsl_ir_forward(svsl_arena_t *arena, svsl_ir_func_t *fn,        // store->load + redundant-load
                      const svsl_program_t *prog);
 bool svsl_ir_dse    (svsl_arena_t *arena, svsl_ir_func_t *fn);       // dead-store elimination
 bool svsl_ir_cse    (svsl_arena_t *arena, svsl_ir_func_t *fn, const svsl_types_t *types); // CSE

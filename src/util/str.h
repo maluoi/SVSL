@@ -11,7 +11,7 @@ typedef struct svsl_str_t {
 	int32_t     len;
 } svsl_str_t;
 
-svsl_str_t svsl_str            (const char *opt_cstr);                   // NULL → empty
+svsl_str_t svsl_str            (const char *opt_cstr);                   // NULL -> empty
 
 // The equality pair lives here as inlines: they run per table row in the
 // keyword/intrinsic/macro scans, where the call overhead itself was the cost
@@ -25,7 +25,7 @@ static inline bool svsl_str_eq(svsl_str_t a, svsl_str_t b) {
 	return true;
 }
 
-// compares against s.len and confirms cstr terminates there — never strlen()s
+// compares against s.len and confirms cstr terminates there - never strlen()s
 static inline bool svsl_str_eq_cstr(svsl_str_t s, const char *cstr) {
 	if (s.len == 0) return cstr[0] == '\0';
 	if (s.ptr[0] != cstr[0]) return false;

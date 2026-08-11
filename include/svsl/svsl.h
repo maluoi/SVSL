@@ -1,4 +1,4 @@
-// SVSL — SPIR-V Shading Language
+// SVSL - SPIR-V Shading Language
 // Public API. This is the only header a consumer includes.
 //
 // The whole surface is here: compile SVSL source to SPIR-V and StereoKit's SKS
@@ -68,7 +68,7 @@ typedef struct svsl_define_t {
 } svsl_define_t;
 
 // Result of an include callback. `content` may be freed by the caller once
-// svsl_compile returns — the compiler copies everything it keeps.
+// svsl_compile returns - the compiler copies everything it keeps.
 typedef struct svsl_include_src_t {
 	const char *content; // NULL = not found
 	int32_t     length;  // -1 = use strlen(content)
@@ -83,7 +83,7 @@ typedef enum svsl_opt_level_ {
 	svsl_opt_aggressive, // -O2: adds float-algebraic identities
 } svsl_opt_level_;
 
-// The shader language an SKS container carries. Exactly one per container —
+// The shader language an SKS container carries. Exactly one per container -
 // see svsl_options_t.targets.
 typedef enum svsl_target_ {
 	svsl_target_spirv = 1 << 0, // Vulkan runtimes
@@ -121,13 +121,13 @@ typedef struct svsl_options_t {
 	// Which shader language the SKS container carries (skshaderc's -t s/w).
 	// 0 = SPIR-V. Exactly one bit: the target is fixed before the preprocessor
 	// runs so it can predefine TARGET_SPIRV or TARGET_WGSL, which lets source
-	// vary per target — and one container has one reflection table, which could
+	// vary per target - and one container has one reflection table, which could
 	// not describe two sources that declare different resources. Setting both
 	// bits is an error; build the two containers separately.
-	// SPIR-V always compiles internally — reflection metadata derives from it —
+	// SPIR-V always compiles internally - reflection metadata derives from it -
 	// but is serialized only when requested, so WebGPU assets don't ship dead
 	// SPIR-V. WGSL needs a libsvsl built with SVSL_ENABLE_WGSL (see
-	// svsl_supports_wgsl) — a hard error otherwise; WGSL stages using features
+	// svsl_supports_wgsl) - a hard error otherwise; WGSL stages using features
 	// browser WebGPU can't express are skipped with a warning, and the SKS then
 	// carries no WGSL for them.
 	uint32_t        targets;       // svsl_target_ bits, exactly one
@@ -182,7 +182,7 @@ void svsl_result_free(svsl_result_t *result);
 
 // --- container / text products (valid until svsl_result_free) --------------
 // All return empty / NULL if the compile failed. Bytes and strings are owned by
-// the result's arena — copy them if you need to outlive it.
+// the result's arena - copy them if you need to outlive it.
 
 svsl_bytes_t svsl_result_sks       (svsl_result_t *result);              // SKS container
 const char  *svsl_result_header    (svsl_result_t *result, const char *name); // embeddable C header

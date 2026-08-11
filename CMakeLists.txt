@@ -21,10 +21,45 @@ set(CMAKE_C_STANDARD          11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS        OFF)
 
+# Warning set: portability is a feature, so the bar is "clean on MSVC /W4, GCC,
+# Clang, and mingw". Deliberately excluded, with reasons:
+#   -Wswitch-enum      thousands of hits; the switches use `default:` on purpose
+#   -Wcast-qual        the AST/const-expr paths cast const away by design
+#   -Wfloat-equal      constant folding compares bit-exact values on purpose
+#   -Wconversion       narrowing to int32_t/uint32_t is the house style
+# The GNU/Clang list is calibrated to cover the MSVC /W4 classes that would
+# otherwise only surface on Windows: -Wnested-externs is C4210, -Wshadow is
+# C4456/C4457, -Wconditional-uninitialized is C4701.
+#
+# Sources are plain ASCII on purpose, so /utf-8 (and C4819) never come up: MSVC
+# reads non-ASCII source in the local codepage, which mangles the text of the
+# diagnostics we emit. Keep new comments and string literals ASCII-only.
 if (MSVC)
 	set(SVSL_WARNINGS /W4)
 elseif (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-	set(SVSL_WARNINGS -Wall -Wextra)
+	set(SVSL_WARNINGS
+		-Wall -Wextra
+		-Wshadow                # MSVC C4456/C4457
+		-Wnested-externs        # MSVC C4210
+		-Wmissing-prototypes -Wmissing-declarations -Wstrict-prototypes -Wold-style-definition
+		-Wredundant-decls
+		-Wundef                 # #if on an undefined macro is always a typo
+		-Wpointer-arith -Wwrite-strings -Wcast-align -Winit-self
+		-Wvla                   # not portable to MSVC
+		-Wformat-security       # the diag/emit helpers carry format attributes (util/attr.h)
+		-Wnull-dereference
+		-Wimplicit-fallthrough)
+	if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+		list(APPEND SVSL_WARNINGS -Wlogical-op -Wduplicated-cond -Wduplicated-branches)
+	else()
+		list(APPEND SVSL_WARNINGS -Wconditional-uninitialized -Wcomma -Wloop-analysis
+		                          -Wmissing-variable-declarations -Wstring-conversion)
+	endif()
+endif()
+
+option(SVSL_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+if (SVSL_WARNINGS_AS_ERRORS)
+	list(APPEND SVSL_WARNINGS $<IF:$<BOOL:${MSVC}>,/WX,-Werror>)
 endif()
 
 # --- libsvsl: zero-dependency core library --------------------------------
@@ -76,7 +111,7 @@ target_include_directories(svsl PUBLIC
 target_include_directories(svsl PRIVATE src vendor)
 target_compile_options    (svsl PRIVATE ${SVSL_WARNINGS})
 
-# WGSL backend: pure C text emission, still zero-dependency — the option only
+# WGSL backend: pure C text emission, still zero-dependency - the option only
 # gates code size. svsl_options_t.emit_wgsl errors without it.
 if (SVSL_ENABLE_WGSL)
 	target_sources            (svsl PRIVATE src/back/emit_wgsl.c)
@@ -125,7 +160,7 @@ endif()
 
 # --- svsl_isa: dev-only RDNA ISA measurement tool ---------------------------
 # Compiles a .spv stage into a real RADV pipeline and reports VGPR/SGPR/code
-# size — the hardware cost SPIR-V word count only loosely proxies. Links
+# size - the hardware cost SPIR-V word count only loosely proxies. Links
 # libvulkan directly (measurement tool, not part of the zero-dependency core).
 
 if (SVSL_BUILD_ISA)

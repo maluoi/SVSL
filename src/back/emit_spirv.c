@@ -1,4 +1,4 @@
-// IR → SPIR-V. Matches glslang's HLSL model where it matters for StereoKit:
+// IR -> SPIR-V. Matches glslang's HLSL model where it matters for StereoKit:
 // combined image samplers named after the texture (binding t+100), matrices as
 // row-representation (SPIR-V vector i = HLSL row i, RowMajor layout, swapped
 // mul operands), half = float32 + RelaxedPrecision, bindings b+0/t,s+100/u+200.
@@ -17,7 +17,9 @@
 #include <string.h>
 
 // data-table rows initialize what they need; zero-fill is the point
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#if defined(__GNUC__) || defined(__clang__)
+	#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#endif
 
 typedef struct emit_t {
 	svsl_arena_t         *arena;
@@ -48,12 +50,12 @@ typedef struct emit_t {
 	svsl_array_t(uint64_t) qcom_decorated; // (var id << 32 | decoration) emitted so far
 	uint32_t *workgroup_ids;
 	uint32_t *const_global_ids;
-	uint32_t *param_shadow;     // entry params → function-local shadow vars
+	uint32_t *param_shadow;     // entry params -> function-local shadow vars
 	// scalar-replaced struct params: read-only inputs accessed only by constant
 	// member chains skip the shadow var + whole-struct construct entirely; each
 	// member chain resolves straight to the member's stage-input variable.
 	uint8_t  *param_sroa;       // per entry param: 1 = scalar-replaced
-	uint32_t *param_member_var; // [param * SVSL_EMIT_MAX_MEMBERS + member] → input var (0 if unused)
+	uint32_t *param_member_var; // [param * SVSL_EMIT_MAX_MEMBERS + member] -> input var (0 if unused)
 	uint32_t *builtin_input;    // subgroup builtins etc., created on demand
 	uint32_t *spec_const_ids;   // one OpSpecConstant per spec-constant index
 	uint32_t *sampler_vars;     // standalone sampler variables for cross-paired sampling
@@ -61,7 +63,7 @@ typedef struct emit_t {
 	int32_t   output_count;
 	int32_t  *vs_input_locations; // per prog->vertex_inputs entry; vertex stage only
 	// scalar-replaced return struct: a local var whose members are stored then
-	// returned whole is elided — member stores go straight to the stage-output
+	// returned whole is elided - member stores go straight to the stage-output
 	// variables (output_vars), so no local struct is built and torn apart again.
 	uint32_t  output_sroa_var;  // IR index of the SROA'd output var, or SVSL_IR_NONE
 
@@ -95,7 +97,7 @@ static void eerr(emit_t *e, svsl_loc_t loc, const char *msg) {
 	e->failed = true;
 }
 
-// --- svsl type → SPIR-V type ---------------------------------------------------
+// --- svsl type -> SPIR-V type ---------------------------------------------------
 
 static uint32_t spv_type_for(emit_t *e, svsl_type_id_t id);
 
@@ -530,7 +532,7 @@ static void create_globals(emit_t *e) {
 
 	// Emit only the globals this stage actually references. A fragment shader
 	// that returns its color input should not declare the system cbuffer, the
-	// instance buffer, etc. — glslang+spirv-opt strip these, and emitting them
+	// instance buffer, etc. - glslang+spirv-opt strip these, and emitting them
 	// is pure bloat (matches the used-only reflection the container already does).
 	uint8_t *buf_used = svsl_arena_alloc(e->arena, (size_t)(prog->buffers.count   > 0 ? prog->buffers.count   : 1));
 	uint8_t *res_used = svsl_arena_alloc(e->arena, (size_t)(prog->resources.count > 0 ? prog->resources.count : 1));
@@ -675,7 +677,7 @@ static void create_globals(emit_t *e) {
 		e->workgroup_ids[i] = var;
 	}
 
-	// const globals with constant initializers → Private variables
+	// const globals with constant initializers -> Private variables
 	for (int32_t i = 0; i < prog->const_globals.count; i++) {
 		const svsl_global_t *g = &prog->const_globals.items[i];
 		if (g->type == SVSL_TYPE_NONE || !g->var || !g->var->init) continue;
@@ -710,7 +712,7 @@ static uint32_t make_io_var(emit_t *e, svsl_type_id_t type, bool output, svsl_st
 }
 
 // How many interface locations a stage-IO member of this type consumes. A
-// scalar/vector (≤4 32-bit components) is one; a matrix is one per column vector
+// scalar/vector (<=4 32-bit components) is one; a matrix is one per column vector
 // (its emitted OpTypeMatrix has `rows` of them); an array multiplies by its
 // length; a nested struct sums its members. One-per-member would overlap an
 // array/matrix with the following member's location.
@@ -782,7 +784,7 @@ static void io_decorate(emit_t *e, uint32_t var, svsl_str_t semantic, svsl_sem_i
 
 // Records the location assigned to the next prog->vertex_inputs entry (-1 = its
 // OpVariable was stripped). The prologue's walk must mirror collect_vertex_inputs
-// (sema.c) — same order, same generated-semantic exclusions — so each entry is
+// (sema.c) - same order, same generated-semantic exclusions - so each entry is
 // name-checked and a divergence fails the compile instead of writing metadata
 // that lies about the SPIR-V interface.
 static void record_vs_input(emit_t *e, int32_t *ref_index, svsl_str_t name,
@@ -902,15 +904,15 @@ static uint32_t load_sampled_image(emit_t *e, int32_t tex, uint32_t sampler_res)
 }
 
 // QCOM image processing (VK_QCOM_image_processing[2]): decorations are inferred
-// from use, and a decorated resource is exclusive to its op family — the runtime
+// from use, and a decorated resource is exclusive to its op family - the runtime
 // binds it through a dedicated descriptor type / sampler create flag, so mixing
 // uses cannot be satisfied by any binding. First use classifies and decorates;
 // a conflicting later use is a compile error. Classes: svsl_qcom_use_
-// (emit_spirv.h — the SKS writer consumes the recorded array).
+// (emit_spirv.h - the SKS writer consumes the recorded array).
 static const char *qcom_use_names[] = { "", "ordinary texturing", "a weight texture",
 	"a block-match texture", "an image-processing sampler", "a window block-match sampler" };
 
-// conflict tracking only — decorations are per *variable* (qcom_decorate_once),
+// conflict tracking only - decorations are per *variable* (qcom_decorate_once),
 // since one sampler resource can be reached through a combined variable in one
 // use and its own variable in another
 static void qcom_classify(emit_t *e, int32_t res_index, uint8_t use, svsl_loc_t loc) {
@@ -919,7 +921,7 @@ static void qcom_classify(emit_t *e, int32_t res_index, uint8_t use, svsl_loc_t 
 	if (*cur == 0) { *cur = use; return; }
 	const svsl_resource_t *res = &e->prog->resources.items[res_index];
 	svsl_diag_add(e->arena, e->diags, svsl_severity_error, loc,
-	              "'%.*s' is used both as %s and %s — QCOM image-processing resources are exclusive to one use",
+	              "'%.*s' is used both as %s and %s - QCOM image-processing resources are exclusive to one use",
 	              res->name.len, res->name.ptr, qcom_use_names[*cur], qcom_use_names[use]);
 }
 
@@ -934,7 +936,7 @@ static void qcom_decorate_once(emit_t *e, uint32_t var, uint32_t dec) {
 // window block-match sampled image. The validator traces the QCOM decorations
 // through *direct* OpLoads, so the pair is either the texture's own combined
 // variable (both decorations land on it) or separate image + sampler variable
-// loads — a texture fused with a different sampler cannot be expressed.
+// loads - a texture fused with a different sampler cannot be expressed.
 static uint32_t qcom_window_pair(emit_t *e, int32_t tex, uint32_t sampler_res, svsl_loc_t loc) {
 	const svsl_resource_t *res = &e->prog->resources.items[tex];
 	svsl_spv_stream_t     *fs  = &e->spv.funcs;
@@ -1094,12 +1096,12 @@ static void analyze_param_sroa(emit_t *e) {
 			uint32_t o = inst->args[a];
 			int32_t  cp, cm;
 			int32_t  pidx = sroa_param_index(e, o);
-			if (pidx >= 0) { // direct use of the param op — only a member-chain base is ok
+			if (pidx >= 0) { // direct use of the param op - only a member-chain base is ok
 				if (!((svsl_ir_op_)inst->op == svsl_ir_chain && a == 0 &&
 				      sroa_member_chain(e, (uint32_t)i, &cp, &cm)))
 					e->param_sroa[pidx] = 0;
 			}
-			if (sroa_member_chain(e, o, &cp, &cm)) { // use of a member chain — only load's pointer
+			if (sroa_member_chain(e, o, &cp, &cm)) { // use of a member chain - only load's pointer
 				if ((svsl_ir_op_)inst->op == svsl_ir_load && a == 0)
 					e->param_member_var[cp * SVSL_EMIT_MAX_MEMBERS + cm] = 1; // referenced
 				else
@@ -1131,7 +1133,7 @@ static bool sroa_out_member_chain(const svsl_ir_func_t *fn, uint32_t id, uint32_
 // Finds a return-struct local var that can be scalar-replaced: the var is loaded
 // whole into every return, written only through constant member chains, and never
 // otherwise referenced (no whole-struct store, no member read-back, no aliasing
-// into aux). Such a var is pure output plumbing — its members go straight to the
+// into aux). Such a var is pure output plumbing - its members go straight to the
 // stage-output variables, so the intermediate struct is never materialized. This
 // is the mirror of analyze_param_sroa for the return path.
 static void analyze_output_sroa(emit_t *e, svsl_type_id_t ret_type) {
@@ -1148,7 +1150,7 @@ static void analyze_output_sroa(emit_t *e, svsl_type_id_t ret_type) {
 		const svsl_ir_inst_t *in = &fn->insts.items[i];
 		if (in->op != svsl_ir_return || in->args[0] == SVSL_IR_NONE) continue;
 		const svsl_ir_inst_t *rv = &fn->insts.items[in->args[0]];
-		if (rv->op != svsl_ir_load) return;                  // returns a computed value → no SROA
+		if (rv->op != svsl_ir_load) return;                  // returns a computed value -> no SROA
 		uint32_t v = rv->args[0];
 		if (fn->insts.items[v].op != svsl_ir_var || fn->insts.items[v].type != ret_type) return;
 		if      (cand == SVSL_IR_NONE) cand = v;
@@ -1176,7 +1178,7 @@ static void analyze_output_sroa(emit_t *e, svsl_type_id_t ret_type) {
 			if (fn->insts.items[o].op == svsl_ir_load && fn->insts.items[o].args[0] == cand)
 				if ((svsl_ir_op_)in->op != svsl_ir_return) return; // whole load feeds only return
 		}
-		if (svsl_ir_aux_holds_values(in)) // any use of the var / its chains in aux → veto
+		if (svsl_ir_aux_holds_values(in)) // any use of the var / its chains in aux -> veto
 			for (uint32_t k = 0; k < in->aux_count; k++) {
 				uint32_t o = fn->aux.items[in->aux + k];
 				if (o == cand || sroa_out_member_chain(fn, o, cand, &dummy)) return;
@@ -1188,7 +1190,7 @@ static void analyze_output_sroa(emit_t *e, svsl_type_id_t ret_type) {
 // Emit-level liveness: mark which IR values an *emitted* operand actually reads,
 // mirroring emit_inst's chain path. Values feeding only address computations
 // that emit re-inlines (a buffer/resource-member `ptr` folded into its chain) or
-// resolves away (an SROA'd member index — the chain becomes the interface
+// resolves away (an SROA'd member index - the chain becomes the interface
 // variable, so its constant index is never emitted) end up referenced in the IR
 // but orphaned in the output. `referenced` lets the body loop skip emitting such
 // dead constants/pointers. Constants/pointers/undefs are value leaves (they read

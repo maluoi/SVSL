@@ -1,8 +1,8 @@
-// svsl_bench — compiler performance harness. Compiles the whole shader corpus
+// svsl_bench - compiler performance harness. Compiles the whole shader corpus
 // many times, timing each pipeline phase, and reports the payoff metrics
 // (live IR instructions and emitted SPIR-V words) so the cost *and* benefit of
-// each optimization pass can be tracked. Not a correctness test — the corpus
-// and IR golden tests cover that. See docs/OPTIMIZATION_PLAN.md §5.
+// each optimization pass can be tracked. Not a correctness test - the corpus
+// and IR golden tests cover that. See docs/OPTIMIZATION_PLAN.md section 5.
 //
 //   ./svsl_bench            full report at -O0 and -O1 (and -O2)
 //   ./svsl_bench -O1 -n 400  pin a level and iteration count

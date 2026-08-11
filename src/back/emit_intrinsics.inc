@@ -52,7 +52,7 @@ static bool spec_op_allowed(SpvOp op) {
 	}
 }
 
-// emits `o` over the given IR operands — as OpSpecConstantOp in the global
+// emits `o` over the given IR operands - as OpSpecConstantOp in the global
 // section when every operand is a constant and at least one depends on a
 // specialization constant, so the expression stays specializable at pipeline
 // creation instead of becoming runtime math
@@ -93,7 +93,7 @@ static const sg_arith_t sg_arith[] = {
 };
 
 // rebuilds a composite value between its laid-out (buffer) and plain value
-// types, member by member (to_value: laid → value; else value → laid)
+// types, member by member (to_value: laid -> value; else value -> laid)
 static uint32_t convert_composite(emit_t *e, uint32_t value, svsl_type_id_t type,
                                   svsl_layout_ layout, bool to_value) {
 	const svsl_type_t *t = svsl_type_get(&e->prog->types, type);
@@ -432,11 +432,11 @@ static uint32_t emit_intrinsic(emit_t *e, int32_t index, const svsl_ir_inst_t *i
 			return emit_value_inst(e, &e->spv.funcs, (SpvOp)op, type_id, ops,
 			                       group_op == SpvGroupOperationClusteredReduce ? 4u : 3u);
 		}
-		break; // unknown suffix → error below (shouldn't happen for a table row)
+		break; // unknown suffix -> error below (shouldn't happen for a table row)
 	}
 	case svsl_emit_builtin_var: {
 		// zero-arg intrinsic whose native name is a builtin input variable
-		// (WaveGetLaneCount → subgroup_size, tile_offset_qcom, …): load it
+		// (WaveGetLaneCount -> subgroup_size, tile_offset_qcom, ...): load it
 		int32_t builtin = svsl_builtin_var_find(svsl_str(name));
 		if (builtin >= 0) {
 			if (builtin >= 4 && e->fn->entry->stage == svsl_stage_vertex) { // tile builtins
@@ -453,7 +453,7 @@ static uint32_t emit_intrinsic(emit_t *e, int32_t index, const svsl_ir_inst_t *i
 		break;
 	}
 	case svsl_emit_none:
-		break; // lowered before emit, or unmapped (e.g. select) → error
+		break; // lowered before emit, or unmapped (e.g. select) -> error
 	}
 
 	eerr(e, inst->loc, "intrinsic has no SPIR-V mapping yet");
@@ -463,8 +463,8 @@ static uint32_t emit_intrinsic(emit_t *e, int32_t index, const svsl_ir_inst_t *i
 // --- the per-instruction switch ------------------------------------------------------
 
 // Inline SPIR-V (spirv_asm): emit the block's instructions verbatim, splicing in
-// SVSL values ($ → value_ids, consumed from aux in binary order), SVSL types
-// ($$ → spv_type_for), and named locals (%id → fresh SPIR-V ids). The %result
+// SVSL values ($ -> value_ids, consumed from aux in binary order), SVSL types
+// ($$ -> spv_type_for), and named locals (%id -> fresh SPIR-V ids). The %result
 // local carries the block's value.
 static uint32_t emit_spirv_asm(emit_t *e, const svsl_ir_inst_t *inst) {
 	const svsl_ast_expr_t *node = e->fn->asm_nodes.items[inst->args[0]];
@@ -965,8 +965,8 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 			break;
 		}
 
-		// float vector × scalar (peephole strips the splat so one operand is a
-		// scalar) → OpVectorTimesScalar instead of splat + component-wise FMul
+		// float vector * scalar (peephole strips the splat so one operand is a
+		// scalar) -> OpVectorTimesScalar instead of splat + component-wise FMul
 		if (t->kind == svsl_type_vector && op == svsl_ir_mul && scalar_is_floaty(t->scalar)) {
 			const svsl_type_t *ta = svsl_type_get(&e->prog->types, e->fn->insts.items[inst->args[0]].type);
 			const svsl_type_t *tb = svsl_type_get(&e->prog->types, e->fn->insts.items[inst->args[1]].type);
@@ -1080,19 +1080,19 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 	case svsl_ir_convert: {
 		svsl_type_id_t from_t = e->fn->insts.items[inst->args[0]].type;
 		uint32_t       value  = e->value_ids[inst->args[0]];
-		if (spv_type_for(e, from_t) == type_id) { result = value; break; } // half ↔ float
+		if (spv_type_for(e, from_t) == type_id) { result = value; break; } // half <-> float
 		svsl_scalar_ from = svsl_type_get(&e->prog->types, from_t)->scalar;
 		svsl_scalar_ to   = svsl_type_get(&e->prog->types, inst->type)->scalar;
 		bool ff = scalar_is_floaty(from), tf = scalar_is_floaty(to);
 		bool fs_ = scalar_is_signed(from), ts = scalar_is_signed(to);
 
-		if (from == svsl_scalar_bool) { // bool → number: select(b, 1, 0)
+		if (from == svsl_scalar_bool) { // bool -> number: select(b, 1, 0)
 			uint32_t one  = tf ? float_splat(e, inst->type, 1.0f) : const_splat(e, inst->type, 1);
 			uint32_t zero = tf ? float_splat(e, inst->type, 0.0f) : const_splat(e, inst->type, 0);
 			result = emit_value_inst(e, fs, SpvOpSelect, type_id, (uint32_t[]){ value, one, zero }, 3);
 			break;
 		}
-		if (to == svsl_scalar_bool) { // number → bool: value != 0
+		if (to == svsl_scalar_bool) { // number -> bool: value != 0
 			uint32_t zero = ff ? float_splat(e, from_t, 0.0f) : const_splat(e, from_t, 0);
 			result = emit_value_inst(e, fs, ff ? SpvOpFUnordNotEqual : SpvOpINotEqual, type_id,
 			                         (uint32_t[]){ value, zero }, 2);
@@ -1459,14 +1459,14 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 		uint32_t atomic_op = inst->args[3] & 0xFF;
 		uint32_t order     = inst->args[3] >> 8; // svsl_mem_order_ (0 relaxed)
 
-		// scope: inferred from the destination's storage — a groupshared atomic
+		// scope: inferred from the destination's storage - a groupshared atomic
 		// synchronizes only within the workgroup, so Workgroup scope suffices;
 		// buffer (and image) atomics are device-visible.
 		SpvStorageClass pc = op == svsl_ir_image_atomic ? SpvStorageClassImage
 		                                                : (SpvStorageClass)e->value_class[inst->args[0]];
 		uint32_t scope = spv_uint_const(e, pc == SpvStorageClassWorkgroup ? SpvScopeWorkgroup
 		                                                                  : SpvScopeDevice);
-		// semantics: relaxed (0) stays None — bit-identical to glslang. A requested
+		// semantics: relaxed (0) stays None - bit-identical to glslang. A requested
 		// order carries its ordering bits OR the storage-class memory bit.
 		uint32_t sem_bits = 0;
 		if (order > 0) {

@@ -106,7 +106,7 @@ static int32_t conv_cost(svsl_types_t *types, svsl_type_id_t from, svsl_type_id_
 	                  : 1 + (scalar_rank(t->scalar) < scalar_rank(f->scalar) ? 4 : 0);
 
 	if (fc == tc) return component;           // same shape
-	if (fc == 1)  return component + 8;       // scalar → vector splat
+	if (fc == 1)  return component + 8;       // scalar -> vector splat
 	if (tc < fc)  return component + 16;      // truncation (warned at apply time)
 	return -1;                                 // vector widening never implicit
 }
@@ -377,8 +377,8 @@ static int32_t texdim_coord_count(const svsl_type_t *t) {
 	return n + (t->arrayed ? 1 : 0);
 }
 
-// The storage image an atomic addresses through HLSL's subscript spelling —
-// InterlockedAdd(img[coord], v) — or NULL for an ordinary pointer destination
+// The storage image an atomic addresses through HLSL's subscript spelling -
+// InterlockedAdd(img[coord], v) - or NULL for an ordinary pointer destination
 // (buffer, groupshared). Both spellings lower to the same image atomic.
 static const svsl_type_t *atomic_image_dest(const svsl_types_t *types, const svsl_ast_expr_t *dest) {
 	if (dest->kind != svsl_expr_index) return NULL;
@@ -387,7 +387,7 @@ static const svsl_type_t *atomic_image_dest(const svsl_types_t *types, const svs
 }
 
 // Vulkan's standalone SPIR-V rules (VUID-StandaloneSpirv-OpImageTexelPointer-04658)
-// limit the image an atomic addresses to R32f/R32i/R32ui — so neither a
+// limit the image an atomic addresses to R32f/R32i/R32ui - so neither a
 // format-agnostic image nor a declared narrow format can take one. The 64-bit
 // halves of that rule need SpvCapabilityInt64ImageEXT, which formats.c omits.
 static bool check_atomic_image_format(check_t *c, const svsl_type_t *img, svsl_loc_t loc) {
@@ -653,7 +653,7 @@ static svsl_type_id_t check_mul(check_t *c, svsl_ast_expr_t *e) {
 	const svsl_type_t *ta = svsl_type_get(types, a->sema_type);
 	const svsl_type_t *tb = svsl_type_get(types, b->sema_type);
 
-	// scalar * anything → componentwise
+	// scalar * anything -> componentwise
 	if (ta->kind == svsl_type_scalar) return b->sema_type;
 	if (tb->kind == svsl_type_scalar) return a->sema_type;
 
@@ -757,7 +757,7 @@ static svsl_type_id_t check_special_intrinsic(check_t *c, svsl_ast_expr_t *e, co
 		return is_sincos ? svsl_type_intern(types, (svsl_type_t){ .kind = svsl_type_void }) : g;
 	}
 
-	// atomics: (dest lvalue int/uint scalar, value...) — native returns the prior value
+	// atomics: (dest lvalue int/uint scalar, value...) - native returns the prior value
 	if (SVSL_INTR_IS_ATOMIC(tag)) {
 		bool    is_alias = intr->opt_native != NULL;
 		bool    is_cmpxchg = tag == svsl_intr_atomic_cmpxchg;
@@ -774,7 +774,7 @@ static svsl_type_id_t check_special_intrinsic(check_t *c, svsl_ast_expr_t *e, co
 			              is_alias ? "[, out original]" : " [, memory order]", arg_count);
 			return SVSL_TYPE_NONE;
 		}
-		// Vulkan's memory model has no sequential consistency — reject it up front
+		// Vulkan's memory model has no sequential consistency - reject it up front
 		// rather than emit SPIR-V that spirv-val refuses (the strongest is acq_rel)
 		if (has_order && svsl_atomic_order(args[arg_count - 1]->ident) == svsl_mem_order_seq_cst)
 			cerr(c, args[arg_count - 1]->loc,
@@ -782,7 +782,7 @@ static svsl_type_id_t check_special_intrinsic(check_t *c, svsl_ast_expr_t *e, co
 			     (svsl_str_t){0});
 		// HLSL addresses a storage image atomic through a subscript. That lowers
 		// to an image atomic, whose IR carries (image, coord, value) with no room
-		// for a comparator — and needs a real format like the method spelling.
+		// for a comparator - and needs a real format like the method spelling.
 		const svsl_type_t *img_dest = atomic_image_dest(types, args[0]);
 		if (img_dest) {
 			if (is_cmpxchg) {
@@ -834,13 +834,13 @@ static svsl_type_id_t check_intrinsic_call(check_t *c, svsl_ast_expr_t *e, int32
 
 	e->call.callee->sema_ref = (svsl_sema_ref_t){ .kind = svsl_ref_intrinsic, .a = index };
 
-	// opt_native names an intrinsic's SVSL-native spelling — i.e. this row is a legacy alias
+	// opt_native names an intrinsic's SVSL-native spelling - i.e. this row is a legacy alias
 	if (c->prog->porting && intr->opt_native)
 		svsl_diag_add(c->arena, c->diags, svsl_severity_porting, e->loc,
 		              "legacy '%s' -> '%s'", intr->name, intr->opt_native);
 	for (int32_t i = 0; i < e->call.arg_count; i++) {
 		// a trailing memory-order name on a native atomic (atomic_add(p, v, acquire))
-		// is not a value operand — it names the ordering, resolved in the atomic path
+		// is not a value operand - it names the ordering, resolved in the atomic path
 		if (SVSL_INTR_IS_ATOMIC(intr->tag) && intr->opt_native == NULL &&
 		    i == e->call.arg_count - 1 && args[i]->kind == svsl_expr_ident &&
 		    svsl_atomic_order(args[i]->ident) >= 0)
@@ -1186,8 +1186,6 @@ static svsl_type_id_t check_expr(check_t *c, svsl_ast_expr_t *e) {
 		if (ot == SVSL_TYPE_NONE) break;
 		// resolve the target through sema's own resolver (kept in sema.c); the cast
 		// target was already validated syntactically, so resolve leniently here
-		extern svsl_type_id_t svsl_sema_resolve_type(svsl_arena_t *arena, svsl_program_t *prog,
-		                                             svsl_diag_list_t *diags, const svsl_ast_type_t *ref);
 		svsl_type_id_t to = svsl_sema_resolve_type(c->arena, c->prog, c->diags, e->cast.type);
 		if (to == SVSL_TYPE_NONE) break;
 		const svsl_type_t *tt = svsl_type_get(types, to);
@@ -1208,8 +1206,6 @@ static svsl_type_id_t check_expr(check_t *c, svsl_ast_expr_t *e) {
 		break;
 	}
 	case svsl_expr_ctor: {
-		extern svsl_type_id_t svsl_sema_resolve_type(svsl_arena_t *arena, svsl_program_t *prog,
-		                                             svsl_diag_list_t *diags, const svsl_ast_type_t *ref);
 		svsl_type_id_t to = svsl_sema_resolve_type(c->arena, c->prog, c->diags, e->ctor.type);
 		if (to == SVSL_TYPE_NONE) break;
 		const svsl_type_t *t = svsl_type_get(types, to);
@@ -1270,8 +1266,6 @@ static svsl_type_id_t check_expr(check_t *c, svsl_ast_expr_t *e) {
 		cerr(c, e->loc, "initializer lists are only valid as initializers%.*s", (svsl_str_t){0});
 		break;
 	case svsl_expr_spirv_asm: {
-		extern svsl_type_id_t svsl_sema_resolve_type(svsl_arena_t *arena, svsl_program_t *prog,
-		                                             svsl_diag_list_t *diags, const svsl_ast_type_t *ref);
 		svsl_type_id_t rt = svsl_sema_resolve_type(c->arena, c->prog, c->diags, e->spirv_asm.result_type);
 		if (rt == SVSL_TYPE_NONE) break;
 		bool ok = true, has_result = false;
@@ -1283,7 +1277,7 @@ static svsl_type_id_t check_expr(check_t *c, svsl_ast_expr_t *e) {
 				ok = false;
 			}
 			// OpCapability/OpExtension are routed to the module's declaration
-			// streams at emit — a block states its own prerequisites
+			// streams at emit - a block states its own prerequisites
 			if (inst->spv_op == SpvOpCapability &&
 			    (inst->operand_count != 1 || inst->operands[0].kind != svsl_spv_operand_literal)) {
 				cerr(c, inst->loc, "OpCapability takes exactly one integer operand%.*s", (svsl_str_t){0});
@@ -1322,13 +1316,6 @@ static svsl_type_id_t check_expr(check_t *c, svsl_ast_expr_t *e) {
 }
 
 // --- statements ------------------------------------------------------------------------------------------------
-
-// exposed by sema.c for local declarations and cast/ctor targets
-extern svsl_type_id_t svsl_sema_resolve_type(svsl_arena_t *arena, svsl_program_t *prog,
-                                             svsl_diag_list_t *diags, const svsl_ast_type_t *ref);
-extern svsl_type_id_t svsl_sema_infer_array_size(svsl_arena_t *arena, svsl_program_t *prog,
-                                                 svsl_diag_list_t *diags, svsl_type_id_t type,
-                                                 const svsl_ast_var_t *var);
 
 static void check_stmt(check_t *c, svsl_ast_stmt_t *s);
 

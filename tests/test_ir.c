@@ -58,7 +58,7 @@ static int32_t count_op(const svsl_ir_func_t *fn, svsl_ir_op_ op) {
 }
 
 // the prototype-killer: opaque texture/sampler params resolve to global
-// resources at inline time — golden, byte for byte
+// resources at inline time - golden, byte for byte
 static void test_ir_opaque_inline(void) {
 	svsl_arena_t arena = {0};
 	TEST_CHECK(dump_is(&arena,
@@ -227,20 +227,20 @@ static void test_ir_passes(void) {
 	// dead code disappears: an unused expression becomes nops
 	r = run_ir(&arena,
 		"float4 ps() : SV_TARGET {\n"
-		"	float unused = sqrt(25.0);\n" // pure, unreferenced… but stored: var stays
+		"	float unused = sqrt(25.0);\n" // pure, unreferenced... but stored: var stays
 		"	float2 dead_value = float2(1, 2);\n"
 		"	return 1;\n"
 		"}\n");
 	TEST_CHECK(r.ok);
 	fn = &r.module.funcs[0];
 	// the returned splat construct survives; everything else feeding stores stays
-	// conservative — but a value with no store and no use must be gone:
+	// conservative - but a value with no store and no use must be gone:
 	// (the shuffle/extract-free dump keeps this focused on nop-ing behavior)
 	TEST_CHECK(count_op(fn, svsl_ir_nop) >= 0); // structural sanity
 
-	// out/inout copy-back at the call boundary: a=1,b=0; x=a; x+=1→2; y=x*2→4;
+	// out/inout copy-back at the call boundary: a=1,b=0; x=a; x+=1->2; y=x*2->4;
 	// copy back a=2,b=4; return a+b = 6. Store-to-load forwarding threads the
-	// copies and folding collapses the whole thing to the constant 6 — a proof
+	// copies and folding collapses the whole thing to the constant 6 - a proof
 	// that the inout/out write-back is wired correctly.
 	r = run_ir(&arena,
 		"void bump(inout float x, out float y) { x += 1; y = x * 2; }\n"
@@ -287,7 +287,7 @@ static void test_ir_single_eval_target(void) {
 	const svsl_ir_func_t *fn = &r.module.funcs[0];
 	// a[0]=, a[1]=, a[i++]; the a[0] read reuses the a[0]= address (CSE merges
 	// the two identical chains). The single-eval guarantee is that a[i++] uses
-	// ONE chain for its load and store and i++ runs once — proven by add == 2.
+	// ONE chain for its load and store and i++ runs once - proven by add == 2.
 	TEST_CHECK(count_op(fn, svsl_ir_chain) == 3);
 	TEST_CHECK(count_op(fn, svsl_ir_add)   == 2); // one i+1, one a[0]+i
 	svsl_arena_free(&arena);
@@ -295,7 +295,7 @@ static void test_ir_single_eval_target(void) {
 
 // indexing a non-addressable value: a constant index extracts the right element
 // (was silently element 0); a dynamic index becomes a single extract_dynamic on
-// the value — no spill variable, no access chain into memory (#17).
+// the value - no spill variable, no access chain into memory (#17).
 static void test_ir_rvalue_index(void) {
 	svsl_arena_t arena = {0};
 
@@ -330,29 +330,29 @@ static void test_ir_rvalue_index(void) {
 
 // dominance-based forwarding: a single-assignment local established at the top
 // level flows into branch bodies (no reload), but a conditionally-assigned local
-// must NOT be forwarded past the merge — that boundary is what keeps it sound.
+// must NOT be forwarded past the merge - that boundary is what keeps it sound.
 static void test_ir_cross_cf_forward(void) {
 	svsl_arena_t arena = {0};
 
 	ir_run_t r = run_ir(&arena,
 		"float ps(float2 uv : TEXCOORD0) : SV_TARGET {\n"
-		"	float k = uv.x * 2;\n"          // single store, depth 0 → dominates all
+		"	float k = uv.x * 2;\n"          // single store, depth 0 -> dominates all
 		"	float acc = 0;\n"
-		"	if (uv.y > 0.5) { acc = k + 1; }\n"  // reads k inside the branch …
-		"	else            { acc = k - 1; }\n"  // … and the other branch
+		"	if (uv.y > 0.5) { acc = k + 1; }\n"  // reads k inside the branch ...
+		"	else            { acc = k - 1; }\n"  // ... and the other branch
 		"	return acc;\n"
 		"}\n");
 	TEST_CHECK(r.ok);
 	const svsl_ir_func_t *fn = &r.module.funcs[0];
 	// k is read in both arms but forwards to the one `uv.x*2` value: its var is
-	// gone and no load of it survives. Only uv.x, uv.y and the final acc remain —
+	// gone and no load of it survives. Only uv.x, uv.y and the final acc remain -
 	// three loads, not five. `acc` keeps its var and post-if load (conditionally
-	// assigned → cannot forward past the merge without a phi).
+	// assigned -> cannot forward past the merge without a phi).
 	TEST_CHECK(count_op(fn, svsl_ir_mul)  == 1); // the single k = uv.x*2
-	TEST_CHECK(count_op(fn, svsl_ir_load) == 3); // uv.x, uv.y, acc — k's two loads forwarded
+	TEST_CHECK(count_op(fn, svsl_ir_load) == 3); // uv.x, uv.y, acc - k's two loads forwarded
 	TEST_CHECK(count_op(fn, svsl_ir_var)  == 1); // only acc; k fully scalar-forwarded away
 
-	// adversarial: a local reassigned *inside* a branch is conditional — its value
+	// adversarial: a local reassigned *inside* a branch is conditional - its value
 	// after the merge is ambiguous, so it must be reloaded, never forwarded. If the
 	// pass forwarded the pre-branch value the var/stores would vanish (var==0).
 	ir_run_t r2 = run_ir(&arena,
@@ -363,13 +363,13 @@ static void test_ir_cross_cf_forward(void) {
 		"}\n");
 	TEST_CHECK(r2.ok);
 	const svsl_ir_func_t *fn2 = &r2.module.funcs[0];
-	TEST_CHECK(count_op(fn2, svsl_ir_var)   == 1); // k survives — not scalar-forwarded
+	TEST_CHECK(count_op(fn2, svsl_ir_var)   == 1); // k survives - not scalar-forwarded
 	TEST_CHECK(count_op(fn2, svsl_ir_store) == 2); // both k= stores kept (DSE can't kill them)
 	TEST_CHECK(count_op(fn2, svsl_ir_load)  == 3); // uv.x, uv.y, and the reloaded k after the if
 	svsl_arena_free(&arena);
 }
 
-// vector × scalar: the front-end splats the scalar to a vector and multiplies
+// vector * scalar: the front-end splats the scalar to a vector and multiplies
 // component-wise; the peephole strips the splat so emit can select
 // OpVectorTimesScalar. No construct survives and the mul's operand is the scalar.
 static void test_ir_vector_times_scalar(void) {
@@ -407,7 +407,7 @@ static void test_ir_getdim_out_params(void) {
 	const svsl_ir_func_t *fn = &r.module.funcs[0];
 	TEST_CHECK(count_op(fn, svsl_ir_tex) == 1);
 	TEST_CHECK(count_op(fn, svsl_ir_extract) >= 2);  // one per component
-	TEST_CHECK(count_op(fn, svsl_ir_convert) >= 2);  // uint → float out args
+	TEST_CHECK(count_op(fn, svsl_ir_convert) >= 2);  // uint -> float out args
 	// the queried components feed the result directly: forwarding threads each
 	// store into the float4(w,h,..) construct, so the w/h stores are eliminated
 	TEST_CHECK(count_op(fn, svsl_ir_construct) >= 1);
@@ -485,7 +485,7 @@ static void test_ir_swizzle_stores(void) {
 	TEST_CHECK(r.ok);
 	const svsl_ir_func_t *fn = &r.module.funcs[0];
 	TEST_CHECK(count_op(fn, svsl_ir_insert) == 5);  // 2 (xw) + 3 (rgb)
-	TEST_CHECK(count_op(fn, svsl_ir_shuffle) == 0); // .bgr read folds into the inserts' extracts (③)
+	TEST_CHECK(count_op(fn, svsl_ir_shuffle) == 0); // .bgr read folds into the inserts' extracts (3)
 	TEST_CHECK(count_op(fn, svsl_ir_chain) == 1);   // c.y store path
 	svsl_arena_free(&arena);
 }

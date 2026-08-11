@@ -70,7 +70,7 @@ typedef struct compare_result_t {
 } compare_result_t;
 
 // Compiles `shader_path` with both compilers, then renders both and diffs the
-// pixels — or, for compute-only shaders with a test config, dispatches both on
+// pixels - or, for compute-only shaders with a test config, dispatches both on
 // identical inputs and diffs the outputs. When out_dir is non-NULL, writes
 // <name>_ref.ppm / <name>_svsl.ppm there. show_spirv_diff prints a spirv-dis
 // unified diff of every stage (used by -file mode).

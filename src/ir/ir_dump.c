@@ -3,6 +3,7 @@
 #include "ir.h"
 
 #include "../tables/intrinsics.h"
+#include "../util/attr.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -18,6 +19,7 @@ typedef struct dump_t {
 	int32_t               indent;
 } dump_t;
 
+static void put(dump_t *d, const char *fmt, ...) SVSL_PRINTF(2, 3);
 static void put(dump_t *d, const char *fmt, ...) {
 	char    tmp[256];
 	va_list args;

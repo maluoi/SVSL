@@ -1,4 +1,4 @@
-// Semantic name ↔ SPIR-V builtin mapping (case-insensitive, per stage/direction).
+// Semantic name <-> SPIR-V builtin mapping (case-insensitive, per stage/direction).
 
 #pragma once
 

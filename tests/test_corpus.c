@@ -1,6 +1,6 @@
 // Corpus tests: every StereoKit + ported prototype shader in tests/shaders/
-// must go through the whole pipeline cleanly — pp + lex + parse + sema + IR +
-// SPIR-V emission — and, when spirv-val is on PATH, every stage must validate
+// must go through the whole pipeline cleanly - pp + lex + parse + sema + IR +
+// SPIR-V emission - and, when spirv-val is on PATH, every stage must validate
 // against the Vulkan 1.1 environment.
 
 #include "test.h"

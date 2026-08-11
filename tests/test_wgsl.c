@@ -1,7 +1,7 @@
 // WGSL backend tests: structural goldens over emitted text (bindings, split
 // samplers, multiview override, atomics retyping, subpass lowering, control
 // flow), the skip-diagnostic contract, container stage records, and a full
-// corpus sweep. When `naga` is on PATH every emitted stage also validates —
+// corpus sweep. When `naga` is on PATH every emitted stage also validates -
 // the same optional shell-out pattern the corpus suite uses for spirv-val.
 //
 // The whole suite no-ops (with a note) on a libsvsl built without
@@ -86,7 +86,7 @@ static bool has_warning(svsl_result_t *r, const char *needle) {
 
 // Validators on PATH give every golden + corpus stage a real validation pass;
 // a missing one degrades to the structural checks only, like spirv-val.
-// `naga` is wgpu's validator, `tint` is Chrome's — they disagree on real
+// `naga` is wgpu's validator, `tint` is Chrome's - they disagree on real
 // cases, so both run when present.
 static bool have_naga(void) {
 	static int32_t probed = -1;
@@ -111,7 +111,7 @@ static bool have_tint(void) {
 
 // WGSL's uniformity analysis for barriers cannot be waived by any directive;
 // shaders with data-dependent trip counts around barriers are valid Vulkan but
-// unprovable for Tint. Those reject in Chrome as authored — tracked as a
+// unprovable for Tint. Those reject in Chrome as authored - tracked as a
 // count, not a failure, since only a source-level restructure can fix them.
 static int32_t tint_uniformity_rejects = 0;
 
@@ -318,7 +318,7 @@ static void test_wgsl_control_flow(void) {
 
 // Buffer memory holds matrices column-major HLSL (the D3D convention the CPU
 // writes); in-register values use the swapped representation. The boundary
-// must transpose — without it every buffer-loaded transform renders transposed
+// must transpose - without it every buffer-loaded transform renders transposed
 // (triangle smears converging on the horizon, as found in the field).
 static void test_wgsl_matrix_majority(void) {
 	svsl_result_t *r = compile_wgsl(
@@ -340,7 +340,7 @@ static void test_wgsl_matrix_majority(void) {
 		TEST_CHECK(strstr(vs, " * inst["));
 		TEST_CHECK(!strstr(vs, "transpose(inst["));
 		TEST_CHECK(strstr(vs, " * C.viewproj)"));
-		TEST_CHECK(strstr(vs, "viewproj[3i][3i]"));          // element indices swap ([row][col] → [col][row])
+		TEST_CHECK(strstr(vs, "viewproj[3i][3i]"));          // element indices swap ([row][col] -> [col][row])
 		TEST_CHECK(strstr(vs, "transpose(C.viewproj)[2i]")); // row read still transposes
 		TEST_CHECK(wgsl_validate(vs, "matrix majority vs"));
 	}
@@ -367,7 +367,7 @@ static void test_wgsl_matrix_majority(void) {
 }
 
 // std140 strides scalar/vec2 arrays to 16 bytes; WGSL can't declare that
-// directly, so elements wrap in a @size(16) struct and accesses gain .v —
+// directly, so elements wrap in a @size(16) struct and accesses gain .v -
 // byte-identical layout, no skip (the cubemap_mipgen `uint _pad[2]` case)
 static void test_wgsl_std140_arrays(void) {
 	svsl_result_t *r = compile_wgsl(
@@ -395,7 +395,7 @@ static void test_wgsl_std140_arrays(void) {
 
 // Vertex attributes must match the SKS meta exactly: unused inputs are pruned
 // (Dawn requires every declared attribute to be fed), and survivors keep the
-// SPIR-V-recorded locations, gaps included — declaring all four here with only
+// SPIR-V-recorded locations, gaps included - declaring all four here with only
 // pos+col used must yield locations 0 and 3, with norm/uv absent.
 static void test_wgsl_input_pruning(void) {
 	svsl_result_t *r = compile_wgsl(
@@ -446,7 +446,7 @@ static void test_wgsl_stage_rules(void) {
 // a do-while's condition rides the continuing block as a `break if`; constant
 // NaN bit-patterns and divisions by constant zero defer to runtime through a
 // var, since WGSL rejects them when const-evaluated (Tint catches these,
-// naga historically has not — hence the goldens)
+// naga historically has not - hence the goldens)
 static void test_wgsl_const_traps(void) {
 	svsl_result_t *r = compile_wgsl(
 		"cbuffer G : register(b0) { int max_iter; };\n"
@@ -470,7 +470,7 @@ static void test_wgsl_const_traps(void) {
 	svsl_result_free(r);
 }
 
-// depth-texture-ness follows the paired sampler's DECLARED type — the bind
+// depth-texture-ness follows the paired sampler's DECLARED type - the bind
 // group layout the runtime builds derives from it, so usage must agree
 static void test_wgsl_depth_pairing(void) {
 	// declared + used as comparison: depth texture, comparison sampler
@@ -492,7 +492,7 @@ static void test_wgsl_depth_pairing(void) {
 	svsl_result_free(r);
 
 	// compare-sampled with an UNPAIRED comparison sampler: the layout would say
-	// filterable-float while the module says depth — must skip, not mismatch
+	// filterable-float while the module says depth - must skip, not mismatch
 	r = compile_wgsl(
 		"Texture2D              shadow : register(t0);\n"
 		"SamplerComparisonState cmp    : register(s5);\n"
@@ -524,8 +524,8 @@ static int32_t count_substr(const char *text, const char *needle) {
 	return n;
 }
 
-// vector f32tof16 packs lanes in pairs — two pack2x16floats for vec3/vec4, not
-// one zero-padded pack per lane — and vector f16tof32 unpacks per lane; both
+// vector f32tof16 packs lanes in pairs - two pack2x16floats for vec3/vec4, not
+// one zero-padded pack per lane - and vector f16tof32 unpacks per lane; both
 // bind a multiply-referenced argument to a let instead of duplicating it
 static void test_wgsl_pack_vectors(void) {
 	svsl_result_t *r = compile_wgsl(
@@ -598,7 +598,7 @@ static void test_wgsl_only_target(void) {
 
 // The container's storage-image format byte must name the format the container's
 // own blob declares. WGSL has no formatless storage texture, so an undeclared
-// format resolves to the inferred one in the text — and a WebGPU runtime builds
+// format resolves to the inferred one in the text - and a WebGPU runtime builds
 // its bind group layout from the record, where a mismatch fails pipeline creation.
 static void test_wgsl_storage_format_record(void) {
 	static const char *src =
@@ -729,7 +729,7 @@ void test_wgsl(void) {
 	       have_naga() ? " (naga-validated)" : "",
 	       have_tint() ? " (tint-validated)" : "");
 	if (tint_uniformity_rejects > 0)
-		printf("  tint uniformity rejects: %d stage(s) — valid Vulkan, but Chrome "
+		printf("  tint uniformity rejects: %d stage(s) - valid Vulkan, but Chrome "
 		       "needs barriers in provably-uniform control flow\n", tint_uniformity_rejects);
 	// a mass regression in the emitter shows up as a collapse in coverage;
 	// per-feature skips are asserted individually above

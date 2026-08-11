@@ -285,7 +285,7 @@ static void pp_expand(pp_t *pp, svsl_str_t text, pp_buf_t *out, svsl_loc_t loc) 
 			if (i < text.len) { svsl_array_push(pp->arena, out, '"'); i++; }
 			continue;
 		}
-		if (is_digit(c)) { // numbers can contain ident chars (0xFF, 1e5f) — copy whole
+		if (is_digit(c)) { // numbers can contain ident chars (0xFF, 1e5f) - copy whole
 			while (i < text.len && (is_ident_char(text.ptr[i]) || text.ptr[i] == '.')) {
 				svsl_array_push(pp->arena, out, text.ptr[i]);
 				i++;
@@ -721,8 +721,8 @@ static void pp_directive(pp_t *pp, svsl_str_t line, const char *file, int32_t li
 		// (lookup scans in reverse, so the last one wins), so #undef has to clear
 		// every entry with the name or an older definition resurfaces
 		svsl_str_t target = svsl_str_slice(rest, 0, n);
-		for (int32_t i = 0; i < pp->macros.count; i++)
-			if (svsl_str_eq(pp->macros.items[i].name, target)) pp->macros.items[i].alive = false;
+		for (int32_t m = 0; m < pp->macros.count; m++)
+			if (svsl_str_eq(pp->macros.items[m].name, target)) pp->macros.items[m].alive = false;
 	}
 	else if (svsl_str_eq_cstr(name, "include")) pp_directive_include(pp, rest, file, loc, false);
 	else if (svsl_str_eq_cstr(name, "pragma")) {
@@ -797,7 +797,7 @@ static void pp_process_file(pp_t *pp, svsl_str_t src, const char *file_name) {
 		}
 		if (!pp_active(pp)) continue;
 
-		// language-level `include "file"` — resolved like #include, but idempotent
+		// language-level `include "file"` - resolved like #include, but idempotent
 		if (first + 7 < clean.len && memcmp(clean.ptr + first, "include", 7) == 0) {
 			int32_t after = first + 7;
 			while (after < clean.len && is_hspace(clean.ptr[after])) after++;

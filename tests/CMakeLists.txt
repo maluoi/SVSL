@@ -17,6 +17,7 @@ add_executable(svsl_tests
 target_link_libraries     (svsl_tests PRIVATE svsl)
 target_include_directories(svsl_tests PRIVATE ../src)
 target_compile_definitions(svsl_tests PRIVATE SVSL_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options    (svsl_tests PRIVATE ${SVSL_WARNINGS})
 
 # dev-only mutation fuzzer; build with -DCMAKE_C_FLAGS="-fsanitize=address,undefined"
 # in a separate build dir for real coverage (see fuzz_main.c header)
@@ -24,12 +25,14 @@ add_executable            (svsl_fuzz fuzz_main.c)
 target_link_libraries     (svsl_fuzz PRIVATE svsl)
 target_include_directories(svsl_fuzz PRIVATE ../src)
 target_compile_definitions(svsl_fuzz PRIVATE SVSL_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options    (svsl_fuzz PRIVATE ${SVSL_WARNINGS})
 
 # dev-only performance harness (see bench_main.c). Not wired into ctest.
 add_executable            (svsl_bench bench_main.c)
 target_link_libraries     (svsl_bench PRIVATE svsl)
 target_include_directories(svsl_bench PRIVATE ../src)
 target_compile_definitions(svsl_bench PRIVATE SVSL_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options    (svsl_bench PRIVATE ${SVSL_WARNINGS})
 if (SVSL_ENABLE_WGSL) # bench times the WGSL phase too when the backend exists
 	target_compile_definitions(svsl_bench PRIVATE SVSL_HAS_WGSL)
 endif()

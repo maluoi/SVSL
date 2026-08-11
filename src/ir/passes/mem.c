@@ -10,8 +10,8 @@
 //   * distinct vars/params never alias (private storage, no escaping pointers);
 //   * read-only globals are never written, so their loads are always reusable.
 // A per-root generation, bumped on every store to a root, invalidates only the
-// entries that share that root (same storage object → may alias; different root
-// → cannot).
+// entries that share that root (same storage object -> may alias; different root
+// -> cannot).
 //
 // Forwarding across control flow (dominance). A value carried in a local carries
 // past a branch only when it provably dominates the use and cannot be clobbered
@@ -22,14 +22,14 @@
 //     depth-0 store's value operand is itself defined at depth 0 (values that
 //     escape a nested region must do so through a var), so it dominates too;
 //   * a root that is never stored inside a conditional region (depth > 0) has one
-//     unambiguous value at every point — no phi is ever needed to merge it.
-// So an entry is *durable* — survives control-flow markers — exactly when its
+//     unambiguous value at every point - no phi is ever needed to merge it.
+// So an entry is *durable* - survives control-flow markers - exactly when its
 // root is never conditionally stored AND the entry was created at depth 0. Every
 // other entry flushes at each marker, as before (its value may not dominate a
 // sibling/outer region). This forwards single-assignment locals and read-only
-// globals into branch/loop bodies with no merge machinery. See §4 / §5b.
+// globals into branch/loop bodies with no merge machinery. See section 4 / section 5b.
 //
-// Writable globals (storage buffers, images, groupshared) are left untouched —
+// Writable globals (storage buffers, images, groupshared) are left untouched -
 // reasoning about aliasing across duplicate global pointers would need pointer
 // canonicalization; the win there is small.
 
@@ -71,7 +71,7 @@ static bool forwardable_root(const svsl_ir_func_t *fn, const svsl_program_t *pro
 	case svsl_ref_resource:
 		return prog->resources.items[in->args[1]].kind == svsl_res_structured; // read-only
 	default:
-		return false; // storage buffers, images, groupshared, builtins, …
+		return false; // storage buffers, images, groupshared, builtins, ...
 	}
 }
 
@@ -89,7 +89,7 @@ bool svsl_ir_forward(svsl_arena_t *arena, svsl_ir_func_t *fn, const svsl_program
 	// sibling-member store); e_cf[P] the CF generation, 0 = empty. An entry is
 	// valid iff its root generation still matches and either it is durable or the
 	// CF generation matches. e_dur[P] marks entries whose value dominates all
-	// later uses (non-conditional root, established at depth 0) — those survive
+	// later uses (non-conditional root, established at depth 0) - those survive
 	// control-flow markers.
 	uint32_t *table    = svsl_arena_alloc(arena, (size_t)count * sizeof(uint32_t));
 	uint32_t *e_gen    = svsl_arena_alloc(arena, (size_t)count * sizeof(uint32_t));
@@ -136,7 +136,7 @@ bool svsl_ir_forward(svsl_arena_t *arena, svsl_ir_func_t *fn, const svsl_program
 			uint32_t p = inst->args[0], r = root_ptr(fn, p);
 			if (!forwardable_root(fn, prog, r)) break;
 			if (e_cf[p] != 0 && e_gen[p] == root_gen[r] && (e_dur[p] || e_cf[p] == cf)) {
-				remap[i] = resolve(remap, table[p]);         // store→load or load→load
+				remap[i] = resolve(remap, table[p]);         // store->load or load->load
 				changed  = true;
 				break;
 			}
@@ -151,7 +151,7 @@ bool svsl_ir_forward(svsl_arena_t *arena, svsl_ir_func_t *fn, const svsl_program
 					const svsl_ir_inst_t *val    = &fn->insts.items[v_id];
 					if (idx->op == svsl_ir_const) {
 						if (val->op == svsl_ir_construct && idx->args[0] < val->aux_count) {
-							// constant member of a live construct → reuse that
+							// constant member of a live construct -> reuse that
 							// component value directly (no new instruction)
 							uint32_t comp = fn->aux.items[val->aux + idx->args[0]];
 							if (fn->insts.items[comp].type == inst->type) {
@@ -160,7 +160,7 @@ bool svsl_ir_forward(svsl_arena_t *arena, svsl_ir_func_t *fn, const svsl_program
 								break;
 							}
 						}
-						// constant member of any other live composite → static
+						// constant member of any other live composite -> static
 						// extract, no spill: the var/store/chain die (DCE), emit
 						// uses OpCompositeExtract straight off the value
 						svsl_type_kind_ vk = svsl_type_get(&prog->types, val->type)->kind;
@@ -173,7 +173,7 @@ bool svsl_ir_forward(svsl_arena_t *arena, svsl_ir_func_t *fn, const svsl_program
 							break;
 						}
 					} else if (svsl_type_get(&prog->types, val->type)->kind == svsl_type_vector) {
-						// dynamic component of a live vector → extract-dynamic, no spill:
+						// dynamic component of a live vector -> extract-dynamic, no spill:
 						// the var/store/chain die (DCE), emit uses OpVectorExtractDynamic
 						inst->op        = svsl_ir_extract_dynamic;
 						inst->args[0]   = v_id;
@@ -218,7 +218,7 @@ bool svsl_ir_forward(svsl_arena_t *arena, svsl_ir_func_t *fn, const svsl_program
 // Overwriting-store elimination: a store to an exact local pointer whose value
 // is overwritten by a later store to the *same* pointer, with no load of that
 // pointer's root and no control-flow boundary in between, is unobservable. The
-// never-read pass below can't catch this — the root is read elsewhere (e.g. a
+// never-read pass below can't catch this - the root is read elsewhere (e.g. a
 // whole-struct `return o` loads every member), so it keeps all member stores;
 // but `o.color = a; o.color.rgb *= b;` writes the same member twice with the
 // first never observed. Exact-pointer comparison is sound because CSE has
@@ -238,7 +238,7 @@ static bool dse_overwriting(svsl_arena_t *arena, svsl_ir_func_t *fn) {
 		svsl_ir_op_     op   = (svsl_ir_op_)inst->op;
 
 		if (svsl_ir_ends_run(op)) {                     // region boundary: a store before it may
-			for (int32_t k = 0; k < np; k++)            // be observed on another path — flush
+			for (int32_t k = 0; k < np; k++)            // be observed on another path - flush
 				{ last[pend[k]] = SVSL_IR_NONE; pending[pend[k]] = 0; }
 			np = 0;
 			continue;
@@ -246,7 +246,7 @@ static bool dse_overwriting(svsl_arena_t *arena, svsl_ir_func_t *fn) {
 		if (op == svsl_ir_store) {
 			uint32_t p = inst->args[0];
 			if (!is_local_var(fn, root_ptr(fn, p))) continue; // writable globals may be observed
-			if (last[p] != SVSL_IR_NONE) {                    // prior store to p, unread → dead
+			if (last[p] != SVSL_IR_NONE) {                    // prior store to p, unread -> dead
 				svsl_ir_inst_t *dead = &fn->insts.items[last[p]];
 				dead->op = svsl_ir_nop; dead->type = SVSL_TYPE_NONE; dead->aux_count = 0;
 				changed = true;

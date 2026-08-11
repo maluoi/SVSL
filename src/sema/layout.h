@@ -1,5 +1,5 @@
 // Layout engine: pack1/pack8/pack16 offset/size/stride computation.
-// Pure functions over the type table — no state, no diagnostics; callers
+// Pure functions over the type table - no state, no diagnostics; callers
 // (sema) validate the results that can be user errors (explicit offsets).
 
 #pragma once
@@ -33,7 +33,7 @@ uint32_t svsl_layout_members(const svsl_types_t *types, const svsl_member_t *mem
 
 // True when the type, laid out at byte `base`, violates Vulkan 1.1's core
 // relaxed block layout rules (vector straddling a 16-byte boundary, or a
-// composite offset / array stride / matrix stride off its std430 alignment) —
+// composite offset / array stride / matrix stride off its std430 alignment) -
 // layouts only the scalarBlockLayout device feature permits. The offending byte
 // offset lands in out_offset (optional).
 bool svsl_layout_needs_scalar(const svsl_types_t *types, svsl_type_id_t id,

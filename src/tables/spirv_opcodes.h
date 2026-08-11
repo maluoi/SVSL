@@ -1,5 +1,5 @@
-// SPIR-V opcode mnemonic → SpvOp value, for `spirv_asm` inline-assembly blocks.
-// The rest of the compiler never needs opcode-by-name lookup — only the inline
+// SPIR-V opcode mnemonic -> SpvOp value, for `spirv_asm` inline-assembly blocks.
+// The rest of the compiler never needs opcode-by-name lookup - only the inline
 // assembler does, so the table lives apart from the opcode *emission* helpers.
 
 #pragma once

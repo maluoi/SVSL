@@ -1,17 +1,17 @@
 // Peephole simplification: local pattern rewrites that replace an instruction
 // with an already-computed, dominating value. Because every replacement target
 // is an operand of the matched instruction (or an operand's operand), it always
-// dominates the use — no region tracking needed. Duplicates are nopped and
+// dominates the use - no region tracking needed. Duplicates are nopped and
 // their users redirected, exactly like CSE.
 //
 // -O1 (value-preserving + exact integer identities):
 //   * extract(construct C, k)      -> C's k-th component   (#5)
 //   * shuffle(v, identity)         -> v                    (#9)
 //   * integer x+0 / x-0 / x*1 / x*0 / x/1 / x|0 / x^0 / x<<0 / x>>0 / x&x / x|x  (#12)
-// -O2 (float-algebraic, may change IEEE edge cases — not oracle-covered):
+// -O2 (float-algebraic, may change IEEE edge cases - not oracle-covered):
 //   * float x*1.0 / x/1.0          -> x                    (#13)
 //
-// See docs/OPTIMIZATION_PLAN.md §4.
+// See docs/OPTIMIZATION_PLAN.md section 4.
 
 #include "../ir.h"
 #include "../ir_operands.h"
@@ -66,9 +66,9 @@ static uint32_t splat_source(const svsl_ir_func_t *fn, const svsl_types_t *types
 	return s;
 }
 
-// Vector×scalar in disguise: a float-vector `mul` whose operand is a scalar splat
+// Vector*scalar in disguise: a float-vector `mul` whose operand is a scalar splat
 // construct is really OpVectorTimesScalar. Rewrite that operand to the splatted
-// scalar in place — the splat construct then dies (DCE) and emit picks the
+// scalar in place - the splat construct then dies (DCE) and emit picks the
 // single-instruction encoding instead of splat + component-wise FMul. Bit-exact:
 // both multiply every component by the same scalar. Returns true if rewritten.
 static bool strip_vector_splat(svsl_ir_func_t *fn, const svsl_types_t *types, uint32_t i) {
@@ -89,7 +89,7 @@ static bool strip_vector_splat(svsl_ir_func_t *fn, const svsl_types_t *types, ui
 // directly. svsl shuffle: args[0] = source vector, args[1] = packed 4-bit lane
 // indices, args[2] = lane count; every emitted lane is < the source's width.
 // extract(shuffle(v, lanes), k)          -> extract(v, lanes[k])
-// shuffle(shuffle(v, lanes1), lanes2, n) -> shuffle(v, lanes1∘lanes2, n)
+// shuffle(shuffle(v, lanes1), lanes2, n) -> shuffle(v, lanes1[lanes2], n)
 // The inner shuffle then dies (DCE). Bit-exact: the mapped lane names the same
 // component. Returns true if rewritten.
 static bool compose_shuffle(svsl_ir_func_t *fn, uint32_t i) {
@@ -199,7 +199,7 @@ bool svsl_ir_peephole(svsl_arena_t *arena, svsl_ir_func_t *fn,
 	uint32_t *remap = svsl_arena_alloc(arena, (size_t)count * sizeof(uint32_t));
 	for (int32_t i = 0; i < count; i++) remap[i] = (uint32_t)i;
 
-	// Detect on raw operands — patterns that only appear after another rewrite
+	// Detect on raw operands - patterns that only appear after another rewrite
 	// compose on the driver's next fixpoint iteration, so no per-instruction
 	// canonicalization is needed here (keeping this pass cheap when it is idle).
 	bool changed = false;
@@ -221,7 +221,7 @@ bool svsl_ir_peephole(svsl_arena_t *arena, svsl_ir_func_t *fn,
 	}
 
 	// in-place operand rewrites on the now-canonical IR (no value replacement):
-	// strip vector×scalar splats so DCE reclaims the dead splat constructs, and
+	// strip vector*scalar splats so DCE reclaims the dead splat constructs, and
 	// collapse shuffle-of-shuffle / extract-of-shuffle chains onto their source.
 	bool stripped = false;
 	for (int32_t i = 0; i < count; i++) {

@@ -60,7 +60,7 @@ static void test_pp_basics(void) {
 	TEST_CHECK(text_is(&r, "x = 7;\ny = B;\n"));
 
 	// a redefinition pushes a second entry rather than replacing the first, so
-	// #undef has to clear them all — otherwise the older definition resurfaces
+	// #undef has to clear them all - otherwise the older definition resurfaces
 	r = run_pp(&arena,
 		"#define N 1\n"
 		"#define N 2\n"

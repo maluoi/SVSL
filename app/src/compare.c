@@ -43,7 +43,7 @@ static bool compile_reference(svsl_arena_t *arena, const char *shader_path,
 	remove("svsl_view_ref.sks");
 	if (*out_data == NULL) return false;
 	// skshaderc exits 0 even when it finds no entry points, leaving a
-	// stage-less container — that is not a usable reference
+	// stage-less container - that is not a usable reference
 	uint32_t stage_count = 0;
 	if (*out_size >= 14) memcpy(&stage_count, (const uint8_t *)*out_data + 10, 4);
 	return stage_count > 0;
@@ -74,7 +74,7 @@ static svsl_include_src_t view_include(void *user, const char *path, const char 
 }
 
 // Texture dimensionality per resource name, taken from our own sema
-// reflection — the SKS container doesn't record it, and both compilers see
+// reflection - the SKS container doesn't record it, and both compilers see
 // identical declarations, so the names transfer to the reference build too.
 typedef struct tex_kind_t {
 	char    name[33];
@@ -288,7 +288,7 @@ static void bind_textures(scene_t *scene, skr_material_t *material,
 
 // Disassembles matching stages from both containers and prints a unified diff.
 // Informational only: skshaderc's SPIR-V is optimized and ours is not, so the
-// diff is always noisy — it exists for chasing codegen differences by hand.
+// diff is always noisy - it exists for chasing codegen differences by hand.
 static void spirv_diff(const void *ref, int32_t ref_size, const void *ours, int32_t ours_size) {
 	if (system("spirv-dis --version > /dev/null 2>&1") != 0) {
 		printf("  (spirv-dis not on PATH; skipping SPIR-V diff)\n");
@@ -334,13 +334,13 @@ static void spirv_diff(const void *ref, int32_t ref_size, const void *ours, int3
 // Dispatch chains, parameters, and buffer sizes are per-shader table entries.
 // Verification tiers, applied in combination per config:
 //   - reference:    bitwise output diff against the skshaderc build (default)
-//   - expect[]:     golden outputs, for shaders skshaderc can't compile —
+//   - expect[]:     golden outputs, for shaders skshaderc can't compile -
 //     bitwise words when eps is 0, |got - value| <= eps otherwise (float
 //     buffer words, or texture readback bytes with .tex)
 //   - radix_golden: CPU replay of one radix-sort pass (the gpu_sort chain,
 //     where glslang's inclusive-scan WavePrefixSum makes the reference wrong)
 //   - fallback:     none of the above applies (smoke)
-// Every tier additionally requires that the run actually changed some output —
+// Every tier additionally requires that the run actually changed some output -
 // two dispatches that silently no-op produce identical fills and would
 // otherwise "match" perfectly.
 
@@ -504,7 +504,7 @@ static const compute_cfg_t compute_cfgs[] = {
 	  .buffers = { { "accum", 64 } },
 	  // slots 1..15 collect exact atomic float adds: fill(s) + 0.25*(4s + 96) =
 	  // fill(s) + s + 24, order-independent to ~1e-5. Slot 0 mixes in the
-	  // atomic_min and slots 62/63 are exchange races — excluded by design.
+	  // atomic_min and slots 62/63 are exchange races - excluded by design.
 	  .expect  = { {  1, .value = 25.475365f, .eps = 1e-3f },
 	               {  2, .value = 26.950729f, .eps = 1e-3f },
 	               {  3, .value = 27.426077f, .eps = 1e-3f },
@@ -551,7 +551,7 @@ static const compute_cfg_t compute_cfgs[] = {
 	  .passes  = { { .dispatch = { 1, 1, 1 } } },
 	  .buffers = { { "results", 8, fill_zero } },
 	  // rec_t is 4 words per element: pair.x, pair.y, flag, v.
-	  // pair = (i>1, i>5), flag = !(i>3), v = i*0.5 — one thread per element, exact.
+	  // pair = (i>1, i>5), flag = !(i>3), v = i*0.5 - one thread per element, exact.
 	  .expect  = { {  0, .value = 0, .eps = 0.1f }, // [0] pair.x: 0>1 = 0
 	               {  2, 1 },                       // [0] flag: !(0>3) = 1
 	               {  8, 1 },                       // [2] pair.x: 2>1
@@ -576,7 +576,7 @@ static const compute_cfg_t compute_cfgs[] = {
 	               { 7, 0xBE800000 },   // f3.z = -0.25f
 	               { 8, 0x3FC00000 } } }, // f4 sum = 1.5f
 	// SVSL-native checks (enums, bit fields, atomic orders): golden words.
-	// check_atomic_order only pins buf[0] — the other slots are racy by design.
+	// check_atomic_order only pins buf[0] - the other slots are racy by design.
 	{ .file    = "check_atomic_order",
 	  .passes  = { { .dispatch = { 1, 1, 1 } } },
 	  .buffers = { { "buf", 4, fill_zero } },
@@ -655,7 +655,7 @@ static uint8_t tex_init_byte(int32_t i) {
 // finite and both compilers see identical parameters. Returns the buffer
 // count; out_indices maps each buffer back to its info->bufs record.
 // For render passes that's every slot above material + system; for compute
-// it's every named cbuffer — skr_compute only auto-manages "$Global".
+// it's every named cbuffer - skr_compute only auto-manages "$Global".
 static int32_t make_global_buffers(const sks_info_t *info, skr_buffer_t *out_bufs,
                                    int32_t *out_indices, int32_t max, bool compute) {
 	int32_t count = 0;
@@ -1029,7 +1029,7 @@ static void png_chunk(FILE *f, const char *type, const uint8_t *data, uint32_t l
 // --- postfx / SubpassInput rendering -----------------------------------------------
 
 // Geometry for the postfx pass: the unlit sphere, built ONCE with our own
-// compiler and shared by both sides — so the diff isolates the postfx shader.
+// compiler and shared by both sides - so the diff isolates the postfx shader.
 static skr_material_t *baseline_material(scene_t *scene) {
 	static skr_material_t material;
 	static skr_shader_t   shader;
@@ -1320,7 +1320,7 @@ compare_result_t compare_shader(scene_t *scene, const char *shader_path,
 		if (ref_ok) {
 			// buffer elements may hold integer data whose float interpretation
 			// is a denormal (~1e-42), so a magnitude threshold would never see
-			// integer bugs — buffers must match BITWISE; texture bytes get a
+			// integer bugs - buffers must match BITWISE; texture bytes get a
 			// tolerance
 			double  total    = 0;
 			int32_t n        = 0;
@@ -1520,7 +1520,7 @@ compare_result_t compare_shader(scene_t *scene, const char *shader_path,
 		write_png(path, pixels_ref);
 		snprintf(path, sizeof(path), "%s/%.*s_svsl.png", opt_out_dir, len, stem);
 		write_png(path, pixels_ours);
-		if (multiview) { // second view of the stereo pair (first ≈ the single view)
+		if (multiview) { // second view of the stereo pair (first ~= the single view)
 			snprintf(path, sizeof(path), "%s/%.*s_view1_ref.png", opt_out_dir, len, stem);
 			write_png(path, mv_ref + VIEW_SIZE * VIEW_SIZE * 4);
 			snprintf(path, sizeof(path), "%s/%.*s_view1_svsl.png", opt_out_dir, len, stem);

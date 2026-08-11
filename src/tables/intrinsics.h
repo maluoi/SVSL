@@ -10,16 +10,16 @@
 // generic parameter classes; 'G' is bound by the first generic argument
 typedef enum svsl_iparam_ {
 	svsl_iparam_end = 0,
-	svsl_iparam_genf,    // float-family scalar/vector (half/float16/float32/float64) — binds G
-	svsl_iparam_gen,     // any numeric scalar/vector — binds G
-	svsl_iparam_geni,    // int/uint scalar/vector — binds G
-	svsl_iparam_genb,    // bool scalar/vector (numeric converts) — binds G
+	svsl_iparam_genf,    // float-family scalar/vector (half/float16/float32/float64) - binds G
+	svsl_iparam_gen,     // any numeric scalar/vector - binds G
+	svsl_iparam_geni,    // int/uint scalar/vector - binds G
+	svsl_iparam_genb,    // bool scalar/vector (numeric converts) - binds G
 	svsl_iparam_same,    // exactly G
 	svsl_iparam_scalar,  // scalar of G's component type
 	svsl_iparam_uint,    // uint32 scalar
 	svsl_iparam_bool,    // bool scalar
-	svsl_iparam_vec3f,   // float-family 3-vector — binds G
-	svsl_iparam_any32,   // any 32-bit-component scalar/vector — binds G (asfloat & co)
+	svsl_iparam_vec3f,   // float-family 3-vector - binds G
+	svsl_iparam_any32,   // any 32-bit-component scalar/vector - binds G (asfloat & co)
 } svsl_iparam_;
 
 typedef enum svsl_ires_ {
@@ -51,8 +51,8 @@ typedef enum svsl_intr_tag_ {
 	svsl_intr_determinant,
 	svsl_intr_inverse,
 	svsl_intr_select,
-	svsl_intr_pack2,      // pack_half2x16: float2 → uint
-	svsl_intr_pack4,      // pack_[us]norm4x8: float4 → uint
+	svsl_intr_pack2,      // pack_half2x16: float2 -> uint
+	svsl_intr_pack4,      // pack_[us]norm4x8: float4 -> uint
 	svsl_intr_legacy,     // lit/dst/msad4: rejected with direction
 	svsl_intr_sincos,
 	svsl_intr_modf,
@@ -72,7 +72,7 @@ typedef enum svsl_intr_tag_ {
 #define SVSL_INTR_ATOMIC_OP(tag) ((uint32_t)(tag) - svsl_intr_atomic_add)
 
 // Optional memory-order name on a native atomic_* call (the trailing argument).
-// Returns the order code (0 relaxed … 4 seq_cst) or -1 if the name is not one.
+// Returns the order code (0 relaxed ... 4 seq_cst) or -1 if the name is not one.
 // emit maps the code to SPIR-V memory semantics; scope is inferred from storage.
 typedef enum svsl_mem_order_ {
 	svsl_mem_order_relaxed = 0,
@@ -85,9 +85,9 @@ typedef enum svsl_mem_order_ {
 int32_t svsl_atomic_order(svsl_str_t name);
 
 // How the back end lowers an intrinsic. The IR stores the table index, so emit
-// dispatches on this row field — the name is matched once, at find time, never
+// dispatches on this row field - the name is matched once, at find time, never
 // re-parsed. `none` means the intrinsic is lowered before emit (mul, atomics,
-// sincos…) or has no mapping (select) → emit errors, matching the old fall-through.
+// sincos...) or has no mapping (select) -> emit errors, matching the old fall-through.
 typedef enum svsl_emit_ {
 	svsl_emit_none = 0,
 	svsl_emit_ext450,    // GLSLstd450 ext inst; op[0..2] = float/signed/unsigned variant
@@ -102,7 +102,7 @@ typedef enum svsl_emit_ {
 	svsl_emit_barrier_device, svsl_emit_barrier_all,
 	svsl_emit_barrier_device_sync, svsl_emit_barrier_all_sync,
 	svsl_emit_subgroup,      // routes to the subgroup/quad sub-dispatcher (parses the suffix)
-	svsl_emit_builtin_var,   // load a builtin input variable (WaveGetLaneCount → subgroup_size)
+	svsl_emit_builtin_var,   // load a builtin input variable (WaveGetLaneCount -> subgroup_size)
 } svsl_emit_;
 
 typedef struct svsl_intrinsic_t {
@@ -112,7 +112,7 @@ typedef struct svsl_intrinsic_t {
 	const char *opt_native; // porting hint ("use X"), NULL when this is the native form
 	uint8_t     tag;        // svsl_intr_tag_
 	uint8_t     emit;       // svsl_emit_
-	uint16_t    op[3];      // ext450/core opcodes: float/signed/unsigned (op[1]==0 → float-only)
+	uint16_t    op[3];      // ext450/core opcodes: float/signed/unsigned (op[1]==0 -> float-only)
 } svsl_intrinsic_t;
 
 // returns table index or -1

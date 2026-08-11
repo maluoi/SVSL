@@ -1,5 +1,5 @@
 // SKS container tests: our writer's metadata must match what skshaderc
-// produces for the same shader, record by record (both emit v12 — one version
+// produces for the same shader, record by record (both emit v12 - one version
 // at a time). The reference comparison runs when the local skshaderc build is
 // present; the structural checks always run.
 
@@ -205,7 +205,7 @@ static void test_sks_structure(void) {
 	TEST_CHECK(f.vertex_input_count == 3); // norm is unused and dropped
 
 	// v10 locations mirror the SPIR-V: dropped `norm` still consumed location 1,
-	// so the surviving pos/uv/col sit at 0/2/3 — the gap must be visible
+	// so the surviving pos/uv/col sit at 0/2/3 - the gap must be visible
 	TEST_CHECK(f.vins[0][10] == 0);
 	TEST_CHECK(f.vins[1][10] == 2);
 	TEST_CHECK(f.vins[2][10] == 3);
@@ -241,7 +241,7 @@ static void test_sks_structure(void) {
 	}
 	TEST_CHECK(found_diffuse && found_inst);
 
-	// v9 extras: unlit renders per-view (SV_ViewID → multiview) and needs
+	// v9 extras: unlit renders per-view (SV_ViewID -> multiview) and needs
 	// nothing else; its texture reports a plain 2D shape while the structured
 	// buffer stays unreported
 	TEST_CHECK(f.features == (1ull << 7));
@@ -305,7 +305,7 @@ static void test_sks_structure(void) {
 	// block-form storage buffers must reach the resource records (member
 	// access marks the buffer; its resource twin must light up with it), and
 	// the container's entry point is renamed to the canonical stage name
-	// ("cs" here — the source entry is `main`) so the runtime can bind it
+	// ("cs" here - the source entry is `main`) so the runtime can bind it
 	svsl_sks_blob_t sb = {0};
 	TEST_CHECK(compile_sks(&arena, "ported/21_storage_buffer.svsl", &sb));
 	sks_file_t fsb = {0};
@@ -339,7 +339,7 @@ static void test_sks_structure(void) {
 	svsl_arena_free(&arena);
 }
 
-// bool buffer members are stored as uint 0/1 and reflect as var_uint — the type
+// bool buffer members are stored as uint 0/1 and reflect as var_uint - the type
 // material_set_bool passes. Spec-const bools stay OpTypeBool and reflect as
 // var_int, matching sksc's reflection of both.
 static void test_sks_bool_params(void) {
@@ -396,7 +396,7 @@ static void test_sks_scalar_layout_feature(void) {
 
 	// object-form buffer whose element straddles only from element 1 onward: the
 	// straddle is invisible at offset 0, so it is caught only by walking element
-	// stride phases — must raise bit 16 like the equivalent block form
+	// stride phases - must raise bit 16 like the equivalent block form
 	svsl_sks_blob_t stride = {0};
 	TEST_CHECK(compile_sks(&arena, "checks/check_pack_stride.hlsl", &stride));
 	sks_file_t fst = {0};

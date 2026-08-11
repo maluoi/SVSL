@@ -1,6 +1,6 @@
-// WGSL emission: one IR entry function → one WGSL module (text), for the
+// WGSL emission: one IR entry function -> one WGSL module (text), for the
 // StereoKit WebGPU backend. Only compiled when SVSL_ENABLE_WGSL is on; the
-// emitter is pure C text output — the core stays dependency-free.
+// emitter is pure C text output - the core stays dependency-free.
 //
 // Output contract (sk_renderer's wgpu backend, sksc_file.h v12):
 // - All bindings @group(0); slot = register + shift: b+0, t+100, u+200,
@@ -41,7 +41,7 @@ typedef struct svsl_wgsl_blob_t {
 //
 // opt_vs_input_locations: the vertex stage's svsl_spirv_blob_t.vs_input_locations
 // (NULL otherwise). WGSL must declare exactly the vertex inputs the SKS meta
-// records — Dawn requires every declared attribute to be fed by the pipeline —
+// records - Dawn requires every declared attribute to be fed by the pipeline -
 // and the meta mirrors the SPIR-V module, so the SPIR-V emitter's recorded
 // locations are the single source of truth: -1 entries (inputs stripped as
 // unused) are pruned here too, survivors take the recorded location.

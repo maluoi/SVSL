@@ -1,4 +1,4 @@
-# svsl_view — dev-only visual test app. Renders every corpus shader with both
+# svsl_view - dev-only visual test app. Renders every corpus shader with both
 # skshaderc (reference) and svslc, and pixel-diffs the results offscreen.
 # Only this target may use FetchContent dependencies (SVSL_BUILD_VIEW=ON).
 
@@ -7,7 +7,7 @@ include(FetchContent)
 set(SKR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 
 # skshaderc's optional embedded-SVSL backend would FetchContent this very
-# project (target collision) — and the reference must stay glslang regardless.
+# project (target collision) - and the reference must stay glslang regardless.
 set(SKSHADERC_ENABLE_SVSL OFF CACHE BOOL "" FORCE)
 
 # sk_renderer for rendering test images, and for skshaderc, our reference compiler.

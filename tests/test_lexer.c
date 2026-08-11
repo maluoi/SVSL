@@ -114,7 +114,7 @@ static void test_lex_operators(void) {
 	TEST_CHECK(r.tokens.items[9].kind == svsl_tok_eq);
 	TEST_CHECK(r.tokens.items[11].kind == svsl_tok_neq);
 
-	// [[vk::binding(0, 1)]] — attribute punctuation incl. ::
+	// [[vk::binding(0, 1)]] - attribute punctuation incl. ::
 	r = run_lex(&arena, "[[vk::binding(0, 1)]]");
 	TEST_CHECK(r.ok);
 	TEST_CHECK(r.tokens.items[0].kind == svsl_tok_lbracket);

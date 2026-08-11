@@ -1,4 +1,4 @@
-// Sema: AST → typed program. This header holds the program representation that
+// Sema: AST -> typed program. This header holds the program representation that
 // reflection, IR lowering, and the writers consume.
 
 #pragma once
@@ -60,7 +60,7 @@ typedef struct svsl_resource_t {
 	svsl_binding_t bind;
 	int32_t        sampler_slot; // texture: paired sampler s-slot, -1 if unpaired
 	uint32_t       element_size; // structured buffers: element stride
-	uint8_t        layout;       // svsl_layout_ — object-form structured buffers: element layout
+	uint8_t        layout;       // svsl_layout_ - object-form structured buffers: element layout
 	int32_t        subpass_index;// subpass inputs: input_attachment_index (-1 = auto)
 	int32_t        buffer_index; // block-form storage buffers: index into buffers (-1 = object form)
 	bool           tile_attachment; // [tile_attachment]: VK_QCOM_tile_shading storage class
@@ -129,7 +129,7 @@ typedef struct svsl_program_t {
 	bool         porting;   // emit porting hints on legacy HLSL spellings (-Wporting)
 	bool         needs_scalar_layout; // a pack1/pack8 layout straddles: scalarBlockLayout feature
 	int32_t      wave_size; // //--wave_size or [wave_size(N)], 0 = none
-	int32_t      tile_apron[2]; // //--apron = W[, H] — VK_QCOM_tile_shading render pass
+	int32_t      tile_apron[2]; // //--apron = W[, H] - VK_QCOM_tile_shading render pass
 	                            // tileApronSize, applied by the renderer; (0,0) = none
 
 	svsl_array_t(svsl_buffer_t)       buffers;
@@ -151,13 +151,13 @@ const svsl_func_info_t *svsl_program_func_info(const svsl_program_t *prog,
                                                const svsl_ast_func_t *func);
 
 typedef struct svsl_sema_options_t {
-	const char *entry_vs, *entry_ps, *entry_cs; // NULL → "vs"/"ps"/"cs"
+	const char *entry_vs, *entry_ps, *entry_cs; // NULL -> "vs"/"ps"/"cs"
 	bool        half_strict16;                  // --half=strict16: half means float16
 	bool        porting_hints;                  // -Wporting: hint on legacy HLSL spellings
 } svsl_sema_options_t;
 
 // Attributes are honored or rejected, never silently dropped: known attributes
-// used out of context warn, unknown [[vk::*]] attributes are errors (spec §6),
+// used out of context warn, unknown [[vk::*]] attributes are errors (spec section 6),
 // anything else unknown warns. Shared by decl sema and the statement checker.
 typedef enum svsl_attr_ctx_ {
 	svsl_attr_ctx_func   = 1 << 0,
@@ -177,3 +177,14 @@ void svsl_attrs_check(svsl_arena_t *arena, svsl_diag_list_t *diags,
 bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_result_t *pp,
                    const char *opt_filename, const svsl_sema_options_t *opt_options,
                    svsl_program_t *out_program, svsl_diag_list_t *ref_diags);
+
+// Re-entry points into decl sema for consumers that resolve types lazily: the
+// body checker (locals, casts, constructors) and IR lowering (local decls,
+// switch case labels).
+svsl_type_id_t svsl_sema_resolve_type    (svsl_arena_t *arena, svsl_program_t *prog,
+                                          svsl_diag_list_t *diags, const svsl_ast_type_t *ref);
+svsl_type_id_t svsl_sema_infer_array_size(svsl_arena_t *arena, svsl_program_t *prog,
+                                          svsl_diag_list_t *diags, svsl_type_id_t type,
+                                          const svsl_ast_var_t *var);
+bool           svsl_sema_const_eval_int  (svsl_program_t *prog, const svsl_ast_expr_t *e,
+                                          int64_t *out);

@@ -1,4 +1,4 @@
-// Lexer: preprocessed text → flat token array (one pass, one growing allocation).
+// Lexer: preprocessed text -> flat token array (one pass, one growing allocation).
 
 #pragma once
 
@@ -21,7 +21,7 @@ typedef enum svsl_tok_ {
 	svsl_tok_lbrace, svsl_tok_rbrace,
 	svsl_tok_comma, svsl_tok_semicolon, svsl_tok_dot, svsl_tok_question,
 	svsl_tok_colon, svsl_tok_coloncolon,
-	svsl_tok_dollar, // '$' — value/type interpolation inside spirv_asm blocks
+	svsl_tok_dollar, // '$' - value/type interpolation inside spirv_asm blocks
 
 	svsl_tok_plus, svsl_tok_minus, svsl_tok_star, svsl_tok_slash, svsl_tok_percent,
 	svsl_tok_plusplus, svsl_tok_minusminus,
@@ -41,12 +41,12 @@ typedef enum svsl_tok_ {
 // Literal suffixes; sema uses these to pick the literal's type.
 typedef enum svsl_suffix_ {
 	svsl_suffix_none = 0,
-	svsl_suffix_u,   // 42u        → uint32
-	svsl_suffix_l,   // 42L        → int64
-	svsl_suffix_ul,  // 42uL       → uint64
-	svsl_suffix_f,   // 3.14f      → float32
-	svsl_suffix_h,   // 3.14h      → half
-	svsl_suffix_lf,  // 3.14lf     → float64
+	svsl_suffix_u,   // 42u        -> uint32
+	svsl_suffix_l,   // 42L        -> int64
+	svsl_suffix_ul,  // 42uL       -> uint64
+	svsl_suffix_f,   // 3.14f      -> float32
+	svsl_suffix_h,   // 3.14h      -> half
+	svsl_suffix_lf,  // 3.14lf     -> float64
 } svsl_suffix_;
 
 typedef struct svsl_token_t {

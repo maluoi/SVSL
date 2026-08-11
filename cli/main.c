@@ -1,4 +1,4 @@
-// svslc — SVSL command-line compiler. Default output is StereoKit's .sks
+// svslc - SVSL command-line compiler. Default output is StereoKit's .sks
 // container; -spv writes raw per-stage SPIR-V and -h an embeddable C header.
 //
 // The CLI talks to libsvsl only through <svsl/svsl.h>: it handles files, flags,
@@ -226,7 +226,7 @@ static bool compile_file(const cli_t *cli, const char *path) {
 				if (!write_bytes(wgsl_path, st->wgsl, (size_t)st->wgsl_length)) ok = false;
 			}
 
-			// WGSL stages validate through naga when it's on PATH — optional,
+			// WGSL stages validate through naga when it's on PATH - optional,
 			// like the corpus tests, since naga is a cargo tool not a SDK one
 			if (cli->validate && st->wgsl) {
 				static int32_t has_naga = -1;
@@ -285,7 +285,7 @@ static bool compile_file(const cli_t *cli, const char *path) {
 }
 
 // like skshaderc: skip recompiling when the output is newer than the input.
-// Only the top-level input's mtime is checked — edits to #include'd files won't
+// Only the top-level input's mtime is checked - edits to #include'd files won't
 // trigger a rebuild. Matches skshaderc; use -f after touching a header.
 static bool output_is_fresh(const cli_t *cli, const char *input) {
 	if (cli->force || !cli->sks || cli->spv || cli->header || cli->reflect ||

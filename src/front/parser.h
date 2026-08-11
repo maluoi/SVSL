@@ -1,4 +1,4 @@
-// Parser: token array → AST. Two passes — pass 1 scans top-level declarations for
+// Parser: token array -> AST. Two passes - pass 1 scans top-level declarations for
 // struct names (forward references work without prototypes), pass 2 builds the AST
 // with Pratt expression parsing. Recovers after errors and keeps reporting.
 

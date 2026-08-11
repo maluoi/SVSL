@@ -1,6 +1,6 @@
-// Public API tests: everything here goes through <svsl/svsl.h> only — no internal
-// headers — so it doubles as a check that the public surface is self-sufficient.
-// The headline case is a compile → SKS bytes → svsl_sks_parse round trip.
+// Public API tests: everything here goes through <svsl/svsl.h> only - no internal
+// headers - so it doubles as a check that the public surface is self-sufficient.
+// The headline case is a compile -> SKS bytes -> svsl_sks_parse round trip.
 
 #include "test.h"
 
@@ -67,7 +67,7 @@ static void test_api_diagnostics(void) {
 	svsl_result_free(r);
 }
 
-// compile → SKS bytes → parse them back and check the structured view
+// compile -> SKS bytes -> parse them back and check the structured view
 static void test_api_sks_roundtrip(void) {
 	svsl_result_t *r = svsl_compile(&(svsl_source_t){ .text = k_shader, .filename = "api_test.hlsl" }, NULL);
 	TEST_CHECK(r && r->ok);
@@ -121,7 +121,7 @@ static void test_api_sks_roundtrip(void) {
 	}
 	svsl_result_free(r);
 
-	// garbage in → NULL, not a crash
+	// garbage in -> NULL, not a crash
 	TEST_CHECK(svsl_sks_parse("not an sks file at all", 22) == NULL);
 	TEST_CHECK(svsl_sks_parse(NULL, 0) == NULL);
 }

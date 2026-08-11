@@ -176,7 +176,7 @@ bool scene_init(scene_t *scene) {
 	float3   at   = { 0, 0, 0 };
 	float4x4 view = float4x4_lookat(eye, at, (float3){ 0, 1, 0 });
 	float4x4 proj = float4x4_perspective(1.0f, 1.0f, 0.1f, 50.0f);
-	float4x4 vp   = float4x4_mul(proj, view); // proj·view, like the sk_renderer examples
+	float4x4 vp   = float4x4_mul(proj, view); // proj*view, like the sk_renderer examples
 
 	sk_system_buffer_t *sys = &scene->system;
 	for (int32_t v = 0; v < SK_MAX_VIEWS; v++) {

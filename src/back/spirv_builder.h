@@ -1,6 +1,6 @@
 // SPIR-V word builder: id allocation, per-section instruction streams
 // concatenated at finalize, and type/constant caches. All opcodes and enums
-// come from vendor/spirv.h — never hand-written constants.
+// come from vendor/spirv.h - never hand-written constants.
 
 #pragma once
 
@@ -23,8 +23,8 @@ typedef struct svsl_spv_t {
 	svsl_arena_t *arena;
 	uint32_t      next_id;
 	// module header version word (major<<16 | minor<<8); starts at the 1.3
-	// baseline, raised by features that need more (QCOM image processing → 1.4).
-	// 1.4+ changes the entry-point interface rule — the emitter handles that.
+	// baseline, raised by features that need more (QCOM image processing -> 1.4).
+	// 1.4+ changes the entry-point interface rule - the emitter handles that.
 	uint32_t      version;
 
 	svsl_spv_stream_t caps;        // OpCapability
@@ -41,7 +41,7 @@ typedef struct svsl_spv_t {
 	uint32_t glsl450;              // ext-inst import id
 
 	svsl_array_t(svsl_spv_type_key_t) type_cache;  // types + pointer types
-	svsl_array_t(svsl_spv_type_key_t) const_cache; // (type, bits) → id
+	svsl_array_t(svsl_spv_type_key_t) const_cache; // (type, bits) -> id
 	svsl_array_t(uint32_t)            cap_list;    // deduped capabilities
 } svsl_spv_t;
 
@@ -57,7 +57,7 @@ void svsl_spv_inst2(svsl_spv_t *spv, svsl_spv_stream_t *stream, SpvOp op, uint32
 void svsl_spv_inst3(svsl_spv_t *spv, svsl_spv_stream_t *stream, SpvOp op, uint32_t a, uint32_t b, uint32_t c);
 void svsl_spv_inst4(svsl_spv_t *spv, svsl_spv_stream_t *stream, SpvOp op, uint32_t a, uint32_t b, uint32_t c, uint32_t d);
 
-// instruction with a trailing string literal (OpName, OpEntryPoint, …):
+// instruction with a trailing string literal (OpName, OpEntryPoint, ...):
 // fixed operands first, then the packed string
 void svsl_spv_inst_str(svsl_spv_t *spv, svsl_spv_stream_t *stream, SpvOp op,
                        const uint32_t *operands, uint32_t operand_count, svsl_str_t text);
@@ -67,7 +67,7 @@ void svsl_spv_extension(svsl_spv_t *spv, const char *name);     // deduped by co
 void svsl_spv_require_version(svsl_spv_t *spv, uint32_t version); // raises, never lowers
 
 // cached type lookup: emits OpType* on first request. Operands beyond the key
-// are not supported — struct types are emitted uncached by the caller.
+// are not supported - struct types are emitted uncached by the caller.
 uint32_t svsl_spv_type(svsl_spv_t *spv, SpvOp op, const uint32_t *operands, uint32_t count);
 
 // cached scalar constant (bits sized by the type's width; 64-bit uses two words)

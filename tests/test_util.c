@@ -86,7 +86,7 @@ static void test_str(void) {
 	svsl_str_t slice = svsl_str_slice(s, 6, 11);
 	TEST_CHECK(svsl_str_eq_cstr(slice, "world"));
 	TEST_CHECK(svsl_str_eq_cstr(svsl_str_slice(s, -5, 100), "hello world")); // clamped
-	TEST_CHECK(svsl_str_slice(s, 8, 3).len == 0);                            // inverted → empty
+	TEST_CHECK(svsl_str_slice(s, 8, 3).len == 0);                            // inverted -> empty
 
 	TEST_CHECK(svsl_str_eq_cstr(svsl_str_trim(svsl_str("  \t hi \r\n ")), "hi"));
 	TEST_CHECK(svsl_str_trim(svsl_str("   ")).len == 0);
@@ -101,17 +101,17 @@ static void test_f16(void) {
 	TEST_CHECK(svsl_f32_to_f16_bits(1.0f)  == 0x3C00);
 	TEST_CHECK(svsl_f32_to_f16_bits(2.0f)  == 0x4000);
 	TEST_CHECK(svsl_f32_to_f16_bits(-2.0f) == 0xC000);
-	TEST_CHECK(svsl_f32_to_f16_bits(INFINITY) == 0x7C00); // overflow path too: 70000 → inf
+	TEST_CHECK(svsl_f32_to_f16_bits(INFINITY) == 0x7C00); // overflow path too: 70000 -> inf
 	TEST_CHECK(svsl_f32_to_f16_bits(70000.0f)  == 0x7C00);
 
 	// round-to-nearest, non-ties: the 11th mantissa bit decides the direction
-	TEST_CHECK(svsl_f32_to_f16_bits(1.0001220703125f) == 0x3C00); // 1 + 2^-13, below half → down
-	TEST_CHECK(svsl_f32_to_f16_bits(1.000732421875f)  == 0x3C01); // 1 + 3·2^-12, above half → up
+	TEST_CHECK(svsl_f32_to_f16_bits(1.0001220703125f) == 0x3C00); // 1 + 2^-13, below half -> down
+	TEST_CHECK(svsl_f32_to_f16_bits(1.000732421875f)  == 0x3C01); // 1 + 3*2^-12, above half -> up
 
 	// exact ties resolve to even (this is what "round-to-nearest-even" means;
 	// round-half-up would give 0x3C01 / 0x3C01 here)
-	TEST_CHECK(svsl_f32_to_f16_bits(1.00048828125f) == 0x3C00); // tie, LSB even → stays 0x3C00
-	TEST_CHECK(svsl_f32_to_f16_bits(1.00146484375f) == 0x3C02); // tie, LSB odd  → up to 0x3C02
+	TEST_CHECK(svsl_f32_to_f16_bits(1.00048828125f) == 0x3C00); // tie, LSB even -> stays 0x3C00
+	TEST_CHECK(svsl_f32_to_f16_bits(1.00146484375f) == 0x3C02); // tie, LSB odd  -> up to 0x3C02
 }
 
 void test_util(void) {

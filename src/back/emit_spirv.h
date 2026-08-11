@@ -1,4 +1,4 @@
-// SPIR-V emission: one IR entry function → one SPIR-V module.
+// SPIR-V emission: one IR entry function -> one SPIR-V module.
 
 #pragma once
 
@@ -14,10 +14,10 @@
 typedef enum svsl_qcom_use_ {
 	svsl_qcom_use_none = 0,
 	svsl_qcom_use_plain,             // ordinary sample/load/gather/query
-	svsl_qcom_use_weight,            // SampleWeightedQCOM weights → WeightTextureQCOM
-	svsl_qcom_use_block_match,       // block-match target/reference → BlockMatchTextureQCOM
+	svsl_qcom_use_weight,            // SampleWeightedQCOM weights -> WeightTextureQCOM
+	svsl_qcom_use_block_match,       // block-match target/reference -> BlockMatchTextureQCOM
 	svsl_qcom_use_ip_sampler,        // weighted/box/block-match sampler (no decoration)
-	svsl_qcom_use_bm_window_sampler, // Window-op sampler → BlockMatchSamplerQCOM
+	svsl_qcom_use_bm_window_sampler, // Window-op sampler -> BlockMatchSamplerQCOM
 } svsl_qcom_use_;
 
 typedef struct svsl_spirv_blob_t {

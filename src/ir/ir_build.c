@@ -1,4 +1,4 @@
-// AST → IR lowering with mandatory full inlining. Rvalues that root in storage
+// AST -> IR lowering with mandatory full inlining. Rvalues that root in storage
 // lower as pointer chains + one load (never load-whole-then-extract), which is
 // the structural fix for the prototype's over-fetch bug. Opaque parameters
 // resolve to their caller's resource index at inline time.
@@ -13,7 +13,7 @@
 typedef svsl_array_t(uint32_t) u32_list_t;
 
 #define IR_MAX_INLINE_DEPTH 64
-#define RES_MARK 0x80000000u // param_vars entry: opaque param → resource index
+#define RES_MARK 0x80000000u // param_vars entry: opaque param -> resource index
 
 typedef struct lower_ctx_t lower_ctx_t;
 struct lower_ctx_t {
@@ -224,7 +224,7 @@ static svsl_type_id_t pointee_elem(build_t *b, svsl_type_id_t base, int32_t memb
 }
 
 // appends indices to a pointer, folding chain-of-chain into one flat chain
-// (one OpAccessChain per access path — the over-fetch fix, structurally)
+// (one OpAccessChain per access path - the over-fetch fix, structurally)
 static uint32_t emit_chain(build_t *b, uint32_t base, const uint32_t *indices, uint32_t count,
                            svsl_type_id_t type, svsl_loc_t loc) {
 	uint32_t merged[16];
@@ -244,7 +244,7 @@ static uint32_t emit_chain(build_t *b, uint32_t base, const uint32_t *indices, u
 }
 
 // pointer-producing lowering; returns SVSL_IR_NONE when the expression has no
-// storage (call results, arithmetic, …).
+// storage (call results, arithmetic, ...).
 static uint32_t lower_lvalue(build_t *b, const svsl_ast_expr_t *e) {
 	switch (e->kind) {
 	case svsl_expr_ident:
@@ -426,7 +426,7 @@ static uint32_t bitfield_encode(build_t *b, const svsl_field_t *f, uint32_t v, s
 	if (f->bit_format == svsl_bitfmt_raw && (rsc == svsl_scalar_float16 || rsc == svsl_scalar_half))
 		return emit_intr1(b, "f32tof16", uint_t, convert_value(b, v, f32_t, loc), loc);
 	if (f->bit_format == svsl_bitfmt_raw && rsc == svsl_scalar_float32)
-		return emit_intr1(b, "asuint", uint_t, convert_value(b, v, f32_t, loc), loc); // float bits → word
+		return emit_intr1(b, "asuint", uint_t, convert_value(b, v, f32_t, loc), loc); // float bits -> word
 	if (rsc == svsl_scalar_bool) {
 		uint32_t one  = emit_const_int(b, svsl_scalar_uint32, 1, loc);
 		uint32_t zero = emit_const_int(b, svsl_scalar_uint32, 0, loc);
@@ -926,7 +926,7 @@ static bool body_is_tail_return_only(const svsl_ast_stmt_t *body) {
 }
 
 // True if any return sits inside a loop or switch. Such a return can't break
-// straight to the function wrapper — structured CF forbids a multi-level break —
+// straight to the function wrapper - structured CF forbids a multi-level break -
 // so the wrapper needs a `returned` flag whose break cascades outward one level
 // per enclosing construct (matches glslang's early-return lowering).
 static bool return_inside_loop(const svsl_ast_stmt_t *s, bool in_loop) {
@@ -986,7 +986,7 @@ static uint32_t lower_user_call(build_t *b, const svsl_ast_expr_t *e) {
 		bool opaque = pt->kind == svsl_type_texture || pt->kind == svsl_type_sampler ||
 		              pt->kind == svsl_type_image || pt->kind == svsl_type_buffer ||
 		              pt->kind == svsl_type_subpass;
-		if (opaque) { // resolves to the caller's resource — the prototype-killer fix
+		if (opaque) { // resolves to the caller's resource - the prototype-killer fix
 			param_vars[i] = RES_MARK | (uint32_t)resolve_resource(b, e->call.args[i]);
 			continue;
 		}
@@ -1508,9 +1508,7 @@ static void lower_stmt(build_t *b, const svsl_ast_stmt_t *s) {
 			svsl_type_id_t type = var->init ? var->init->sema_type : SVSL_TYPE_NONE;
 			if (type == SVSL_TYPE_NONE) {
 				// no initializer: sema stored the local's type on the checker stack in
-				// declaration order — replay the resolution
-				extern svsl_type_id_t svsl_sema_resolve_type(svsl_arena_t *, svsl_program_t *,
-				                                             svsl_diag_list_t *, const svsl_ast_type_t *);
+				// declaration order - replay the resolution
 				type = svsl_sema_resolve_type(b->arena, b->prog, b->diags, var->type);
 			}
 			uint32_t v = emit(b, (svsl_ir_inst_t){ .op = svsl_ir_var, .type = type,
@@ -1590,9 +1588,8 @@ static void lower_stmt(build_t *b, const svsl_ast_stmt_t *s) {
 			const svsl_ast_case_t *cs = &s->switch_stmt.cases[i];
 			// literal value (default = marker 0), matched positionally with ir_case ops.
 			// Fold named constants (enum members, static-const ints), not just literals.
-			extern bool svsl_sema_const_eval_int(svsl_program_t *, const svsl_ast_expr_t *, int64_t *);
 			uint32_t lit = 0;
-			int64_t  v;
+			int64_t  v   = 0;
 			if (cs->value && svsl_sema_const_eval_int(b->prog, cs->value, &v))
 				lit = (uint32_t)v;
 			lits[lit_count++] = lit;

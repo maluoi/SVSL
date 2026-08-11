@@ -54,7 +54,7 @@ bool svsl_semantic_lookup(svsl_str_t semantic, svsl_sem_io_ io, svsl_semantic_in
 		return true;
 	}
 	// builtin only in the right stage/direction; elsewhere (SV_VertexID passed
-	// VS→PS as a varying) these are plain numbered IO
+	// VS->PS as a varying) these are plain numbered IO
 	struct row { const char *name; SpvBuiltIn builtin; uint8_t io_mask; };
 	#define IO(x) (1u << (x))
 	static const struct row rows[] = {
@@ -81,5 +81,5 @@ bool svsl_semantic_lookup(svsl_str_t semantic, svsl_sem_io_ io, svsl_semantic_in
 			return true;
 		}
 	}
-	return false; // NORMAL0, TEXCOORD2, COLOR1, … — plain numbered IO
+	return false; // NORMAL0, TEXCOORD2, COLOR1, ... - plain numbered IO
 }

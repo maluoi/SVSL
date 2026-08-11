@@ -21,7 +21,7 @@ uint32_t svsl_f32_to_f16_bits(float f) {
 	int32_t  exp  = (int32_t)((x >> 23) & 0xFF) - 127 + 15;
 	uint32_t man  = x & 0x7FFFFF;
 	if (((x >> 23) & 0xFF) == 0xFF) return sign | 0x7C00 | (man ? 0x200 : 0); // inf/nan
-	if (exp >= 31) return sign | 0x7C00;                                      // overflow → inf
+	if (exp >= 31) return sign | 0x7C00;                                      // overflow -> inf
 	if (exp <= 0) {                                                           // subnormal/zero
 		if (exp < -10) return sign;
 		man |= 0x800000;
@@ -34,7 +34,7 @@ uint32_t svsl_f32_to_f16_bits(float f) {
 	}
 	uint32_t half = sign | ((uint32_t)exp << 10) | (man >> 13);
 	uint32_t rest = man & 0x1FFF;                                     // discarded bits
-	// round half to even (tie → keep the even LSB); carry ripples into the exponent correctly
+	// round half to even (tie -> keep the even LSB); carry ripples into the exponent correctly
 	if (rest > 0x1000 || (rest == 0x1000 && (half & 1))) half++;
 	return half;
 }

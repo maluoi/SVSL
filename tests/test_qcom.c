@@ -1,6 +1,6 @@
 // QCOM extension tests (VK_QCOM_image_processing[2], VK_QCOM_tile_shading):
 // no desktop runtime implements these, so the emitted words are the testable
-// surface — capabilities, extensions, decorations, storage classes, execution
+// surface - capabilities, extensions, decorations, storage classes, execution
 // modes, the SPIR-V 1.4 bump for image processing, and the sks feature bits.
 
 #include "test.h"

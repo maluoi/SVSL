@@ -1,6 +1,7 @@
 #include "reflect.h"
 
 #include "../util/array.h"
+#include "../util/attr.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -13,6 +14,7 @@ typedef struct printer_t {
 	text_buf_t    out;
 } printer_t;
 
+static void put(printer_t *p, const char *fmt, ...) SVSL_PRINTF(2, 3);
 static void put(printer_t *p, const char *fmt, ...) {
 	char    tmp[512];
 	va_list args;

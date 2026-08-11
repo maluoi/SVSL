@@ -6,7 +6,9 @@
 #include <string.h>
 
 // table rows initialize the fields they need; zero-fill for the rest is the point
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#if defined(__GNUC__) || defined(__clang__)
+	#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#endif
 
 #define P1(a)          { a, 0 }
 #define P2(a, b)       { a, b, 0 }
@@ -46,8 +48,8 @@ static const svsl_intrinsic_t intrinsic_table[] = {
 	{ "degrees", P1(GENF), svsl_ires_gen, EXT(GLSLstd450Degrees) }, { "radians", P1(GENF), svsl_ires_gen, EXT(GLSLstd450Radians) },
 	{ "ldexp",   P2(GENF, SAME), svsl_ires_gen, EM(svsl_emit_ldexp) },
 	{ "sincos",  {0}, svsl_ires_special, .tag = svsl_intr_sincos }, // (x, out s, out c)
-	{ "modf",    {0}, svsl_ires_special, .tag = svsl_intr_modf }, // (x, out ip) → frac
-	{ "frexp",   {0}, svsl_ires_special, .tag = svsl_intr_frexp }, // (x, out exp) → mantissa
+	{ "modf",    {0}, svsl_ires_special, .tag = svsl_intr_modf }, // (x, out ip) -> frac
+	{ "frexp",   {0}, svsl_ires_special, .tag = svsl_intr_frexp }, // (x, out exp) -> mantissa
 	{ "frexp_mant", P1(GENF), svsl_ires_gen, EM(svsl_emit_frexp_mant) },  // internal halves of frexp
 	{ "frexp_exp",  P1(GENF), svsl_ires_float_shape, EM(svsl_emit_frexp_exp) },
 	{ "lit",   {0}, svsl_ires_special, .tag = svsl_intr_legacy }, // legacy D3D9, rejected with a message
@@ -97,7 +99,7 @@ static const svsl_intrinsic_t intrinsic_table[] = {
 	{ "reversebits",  P1(GENI), svsl_ires_gen,        CORE(SpvOpBitReverse) },
 	{ "firstbithigh", P1(GENI), svsl_ires_int_shape,  EXT3(GLSLstd450FindSMsb, GLSLstd450FindSMsb, GLSLstd450FindUMsb) },
 	{ "firstbitlow",  P1(GENI), svsl_ires_int_shape,  EXT(GLSLstd450FindILsb) },
-	// (value, offset, bits) → the [offset, offset+bits) field, right-justified;
+	// (value, offset, bits) -> the [offset, offset+bits) field, right-justified;
 	// signed value sign-extends. insert replaces that field of base with value's
 	// low bits. offset/bits are uint scalars; map to OpBitFieldU/SExtract / Insert.
 	{ "bitfield_extract", P3(GENI, UINT, UINT),       svsl_ires_gen, EM(svsl_emit_bitfield_extract) },
@@ -296,7 +298,7 @@ static const method_row_t method_table[] = {
 	{ "BlockMatchGatherSADQCOM", svsl_method_block_match, svsl_block_match_gather_sad },
 	{ "BlockMatchGatherSSDQCOM", svsl_method_block_match, svsl_block_match_gather_ssd },
 	// aux = the emit atomic op index (svsl_intr_atomic_ order: add,sub,min,max,and,or,xor,exchange);
-	// index 1 (sub) is skipped — images have no InterlockedSub — so the image-atomic path indexes
+	// index 1 (sub) is skipped - images have no InterlockedSub - so the image-atomic path indexes
 	// signed_ops[]/unsigned_ops[] identically to buffer atomics.
 	{ "InterlockedAdd",     svsl_method_atomic,                 0 },
 	{ "InterlockedMin",     svsl_method_atomic,                 2 },

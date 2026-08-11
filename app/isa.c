@@ -1,11 +1,11 @@
-// svsl_isa — headless RDNA ISA measurement. Compiles a .spv stage into a real
+// svsl_isa - headless RDNA ISA measurement. Compiles a .spv stage into a real
 // RADV pipeline and reports the hardware cost the GPU actually pays: VGPR/SGPR
-// register usage (→ occupancy), instruction count, and code size. This is the
-// perf currency SPIR-V word count only loosely proxies — the driver re-optimizes
+// register usage (-> occupancy), instruction count, and code size. This is the
+// perf currency SPIR-V word count only loosely proxies - the driver re-optimizes
 // SPIR-V, so only the emitted ISA tells you whether a change made a shader faster.
 //
 // Uses VK_KHR_pipeline_executable_properties (RADV/ACO exposes it) to read the
-// statistics straight off the compiled pipeline — no RADV_DEBUG=asm scraping.
+// statistics straight off the compiled pipeline - no RADV_DEBUG=asm scraping.
 //
 //   svsl_isa a.vert.spv b.frag.spv c.comp.spv ...
 //
@@ -86,7 +86,7 @@ static VkDescriptorType descriptor_type(const type_info_t *ti, uint32_t storage)
 	case TK_SAMPLED_IMAGE: return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	case TK_IMAGE:         return ti->sampled == 2 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
 	                                                : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	default:               return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; // struct in UniformConstant → SSBO
+	default:               return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; // struct in UniformConstant -> SSBO
 	}
 }
 
@@ -131,7 +131,7 @@ static int reflect(const uint32_t *w, size_t n, reflect_t *out) {
 		p += len;
 	}
 
-	// pass 2: variables → descriptor bindings
+	// pass 2: variables -> descriptor bindings
 	for (size_t p = 5; p < n; ) {
 		uint32_t word = w[p], len = word >> 16, op = word & 0xffff;
 		if (len == 0 || p + len > n) break;
@@ -339,7 +339,7 @@ static void measure(const char *file) {
 	} else {
 		int frag = r.stage == VK_SHADER_STAGE_FRAGMENT_BIT;
 		// Pair a fragment with its sibling vertex shader (same basename, .vert.spv)
-		// so interpolated inputs are defined — otherwise RADV treats them as
+		// so interpolated inputs are defined - otherwise RADV treats them as
 		// undefined and DCEs the dependent work, making the measurement useless.
 		// Fall back to the trivial embedded VS only if no sibling is found.
 		VkShaderModule vs_mod = mod;

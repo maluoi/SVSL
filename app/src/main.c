@@ -1,4 +1,4 @@
-// svsl_view — batch visual comparison of svslc against skshaderc.
+// svsl_view - batch visual comparison of svslc against skshaderc.
 //   svsl_view -test <dir> [<dir>...]   compare every shader, exit nonzero on regression
 //   svsl_view -file <shader>           compare a single shader, with SPIR-V diff
 //   svsl_view -output <dir>            image directory (default: compare/ next to the binary)

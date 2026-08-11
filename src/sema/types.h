@@ -68,11 +68,11 @@ typedef struct svsl_member_t {
 } svsl_member_t;
 
 // a packed struct's logical bit fields; the `members` array meanwhile holds the
-// physical backing (uint32 × backing_words), so all layout/emit code sees an
+// physical backing (uint32 * backing_words), so all layout/emit code sees an
 // ordinary struct and only field *resolution* consults this.
 typedef struct svsl_field_t {
 	svsl_str_t     name;
-	svsl_type_id_t type;       // resolve type — what `p.field` reads as / is assigned
+	svsl_type_id_t type;       // resolve type - what `p.field` reads as / is assigned
 	int16_t        bit_offset; // LSB position within the backing words
 	uint8_t        bit_width;
 	uint8_t        bit_format; // svsl_bitfmt_
@@ -97,7 +97,7 @@ typedef struct svsl_types_t {
 	int16_t       scalar_cache[svsl_scalar_half + 1];
 } svsl_types_t;
 
-// interning — returns existing id when an equal type is already present
+// interning - returns existing id when an equal type is already present
 svsl_type_id_t svsl_type_intern(svsl_types_t *types, svsl_type_t type);
 svsl_type_id_t svsl_type_scalar_id(svsl_types_t *types, svsl_scalar_ scalar);
 svsl_type_id_t svsl_type_vector_id(svsl_types_t *types, svsl_scalar_ scalar, int32_t count);
@@ -109,7 +109,7 @@ const svsl_type_t *svsl_type_get(const svsl_types_t *types, svsl_type_id_t id);
 // IEEE 754 binary16 bit pattern for a float (round-to-nearest-even)
 uint32_t svsl_f32_to_f16_bits(float f);
 
-// scalar/vector/matrix name → parts: "float4x4" → (float32, 4, 4); "half3" → (half, 3)
+// scalar/vector/matrix name -> parts: "float4x4" -> (float32, 4, 4); "half3" -> (half, 3)
 // rows=cols=0 for scalars; cols=0 for vectors (count in *out_rows)
 bool svsl_scalar_name_parse(svsl_str_t name, svsl_scalar_ *out_scalar,
                             int32_t *out_rows, int32_t *out_cols);
@@ -117,5 +117,5 @@ bool svsl_scalar_name_parse(svsl_str_t name, svsl_scalar_ *out_scalar,
 int32_t     svsl_scalar_size(svsl_scalar_ scalar); // bytes in buffers (half = 4)
 const char *svsl_type_name  (const svsl_types_t *types, svsl_type_id_t id); // arena-owned, for diagnostics
 
-// texture/sampler/image/buffer/subpass/tileimage — types that must bind as resources
+// texture/sampler/image/buffer/subpass/tileimage - types that must bind as resources
 bool svsl_type_is_resource(const svsl_type_t *t);

@@ -68,7 +68,7 @@ static uint16_t sks_binding(const svsl_binding_t *bind) {
 
 // Reflected variable type. Bools reflect differently by storage context: buffer
 // members store as uint 0/1, while spec constants stay OpTypeBool and reflect as
-// int (VkBool32) — matching sksc. Pass as_spec for the spec-constant context.
+// int (VkBool32) - matching sksc. Pass as_spec for the spec-constant context.
 static uint16_t var_type_of(const svsl_types_t *types, svsl_type_id_t id, bool as_spec, uint16_t *out_count) {
 	const svsl_type_t *t     = svsl_type_get(types, id);
 	int32_t            elems = 1;
@@ -175,7 +175,7 @@ enum {
 	// has_storage_without_format flag. Read and write are separate Vulkan
 	// features with different coverage (write is ~universal, read lags on older
 	// mobile), and now that an undeclared format means Unknown most compute
-	// shaders set this bit — so a write-only shader over-requires the read
+	// shaders set this bit - so a write-only shader over-requires the read
 	// feature. Splitting the bit needs a matching sk_renderer change; see
 	// docs/BACKLOG.md.
 	sks_feat_formatless       = 13, // StorageImageRead/WriteWithoutFormat
@@ -183,9 +183,9 @@ enum {
 	sks_feat_float_atomics    = 15, // (+SPV_EXT_shader_atomic_float[2])
 	sks_feat_scalar_layout    = 16, // VK_EXT_scalar_block_layout: a pack1/pack8 buffer
 	                                // layout breaks core relaxed rules. Not derivable
-	                                // from the SPIR-V (no capability) — sema flags it.
+	                                // from the SPIR-V (no capability) - sema flags it.
 	// VK_QCOM_image_processing carries one Vulkan feature per op family, so
-	// each gets its own bit — a runtime that only enables textureBoxFilter can
+	// each gets its own bit - a runtime that only enables textureBoxFilter can
 	// still pass box-filter shaders
 	sks_feat_qcom_sample_weighted = 17, // TextureSampleWeightedQCOM
 	sks_feat_qcom_box_filter      = 18, // TextureBoxFilterQCOM
@@ -196,7 +196,7 @@ enum {
 	// core-optional 1.2 shaderOutputLayer): SV_RenderTargetArrayIndex written
 	// from the vertex stage, the legacy instanced-stereo pattern
 	sks_feat_output_layer         = 22, // ShaderViewportIndexLayerEXT
-	// VkPhysicalDeviceFeatures.geometryShader — in practice a fragment stage
+	// VkPhysicalDeviceFeatures.geometryShader - in practice a fragment stage
 	// *reading* SV_RenderTargetArrayIndex (SPIR-V 1.3 gates Layer input on it)
 	sks_feat_geometry             = 23, // Geometry
 	sks_feat_unknown          = 63, // capability/extension with no assigned bit
@@ -241,7 +241,7 @@ static const feat_row_t feature_caps[] = {
 	{ SpvCapabilityShaderViewportIndexLayerEXT,      sks_feat_output_layer },
 	{ SpvCapabilityGeometry,                         sks_feat_geometry },
 };
-// capabilities every Vulkan 1.1 runtime satisfies — no bit, never unknown
+// capabilities every Vulkan 1.1 runtime satisfies - no bit, never unknown
 static const uint32_t baseline_caps[] = {
 	SpvCapabilityShader, SpvCapabilityImageQuery, SpvCapabilitySampled1D,
 	SpvCapabilityImage1D, SpvCapabilityInputAttachment, SpvCapabilityDerivativeControl,
@@ -548,7 +548,7 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 	wi32(&w, ops_v[0]); wi32(&w, ops_v[1]); wi32(&w, ops_v[2]);
 	wi32(&w, ops_p[0]); wi32(&w, ops_p[1]); wi32(&w, ops_p[2]);
 	wu32(&w, (uint32_t)prog->wave_size);
-	wu32(&w, (uint32_t)prog->tile_apron[0]); // v11: //--apron → render pass tileApronSize
+	wu32(&w, (uint32_t)prog->tile_apron[0]); // v11: //--apron -> render pass tileApronSize
 	wu32(&w, (uint32_t)prog->tile_apron[1]);
 
 	// QCOM image-processing classification, recorded per stage by the emitters;

@@ -2,10 +2,10 @@
 // straight-line run, a pure value op whose (op, type, operands) exactly matches
 // an earlier one reuses that earlier result. The forward-only-reference
 // invariant means the earlier definition always dominates, and resetting the
-// table at every control-flow boundary keeps reuse within a single region — so
+// table at every control-flow boundary keeps reuse within a single region - so
 // no dominance analysis is needed. Value-preserving: the reused value is
 // bit-identical because the operand SSA ids are identical. See
-// docs/OPTIMIZATION_PLAN.md §4 (#4, #10).
+// docs/OPTIMIZATION_PLAN.md section 4 (#4, #10).
 //
 // Only side-effect-free, memory-independent ops participate. Loads and samples
 // are memory-dependent (handled by forwarding); intrinsics are skipped until
@@ -28,8 +28,8 @@ static bool cse_pure(svsl_ir_op_ op) {
 	case svsl_ir_log_and: case svsl_ir_log_or:
 	case svsl_ir_select: case svsl_ir_convert: case svsl_ir_mat_mul:
 	case svsl_ir_bitfield_extract: case svsl_ir_bitfield_insert:
-	case svsl_ir_ptr:       // global-address producer (buffer member, resource, …)
-	case svsl_ir_chain:     // pure address computation — safe to share
+	case svsl_ir_ptr:       // global-address producer (buffer member, resource, ...)
+	case svsl_ir_chain:     // pure address computation - safe to share
 	case svsl_ir_intrinsic: // only value-producing (non-void) ones; guarded below
 		return true;
 	default:
@@ -72,7 +72,7 @@ bool svsl_ir_cse(svsl_arena_t *arena, svsl_ir_func_t *fn, const svsl_types_t *ty
 	while (cap < (uint32_t)count * 2) cap <<= 1;
 	uint32_t  mask   = cap - 1;
 	uint32_t *bucket = svsl_arena_alloc(arena, (size_t)cap * sizeof(uint32_t));
-	uint32_t *stamp  = svsl_arena_alloc(arena, (size_t)cap * sizeof(uint32_t)); // zeroed → empty
+	uint32_t *stamp  = svsl_arena_alloc(arena, (size_t)cap * sizeof(uint32_t)); // zeroed -> empty
 	uint32_t *remap  = svsl_arena_alloc(arena, (size_t)count * sizeof(uint32_t));
 	for (int32_t i = 0; i < count; i++) remap[i] = (uint32_t)i;
 
@@ -86,21 +86,21 @@ bool svsl_ir_cse(svsl_arena_t *arena, svsl_ir_func_t *fn, const svsl_types_t *ty
 		// redirected to surviving canonical ids before we nop the duplicates
 		svsl_ir_remap_operands(fn, (uint32_t)i, remap, (uint32_t)count);
 
-		if (svsl_ir_ends_run(op)) { gen++; continue; }   // new region → forget prior values
+		if (svsl_ir_ends_run(op)) { gen++; continue; }   // new region -> forget prior values
 		if (!cse_pure(op)) continue;
-		// barriers (void intrinsics) must never be merged — they are side effects
+		// barriers (void intrinsics) must never be merged - they are side effects
 		if (op == svsl_ir_intrinsic &&
 		    !svsl_ir_intrinsic_is_pure(&fn->insts.items[i], types)) continue;
 
 		uint32_t h = cse_hash(fn, (uint32_t)i) & mask;
 		for (uint32_t p = 0;; p = (p + 1) & mask) {
 			uint32_t s = (h + p) & mask;
-			if (stamp[s] != gen) {                       // empty slot → first of its kind
+			if (stamp[s] != gen) {                       // empty slot -> first of its kind
 				stamp[s]  = gen;
 				bucket[s] = (uint32_t)i;
 				break;
 			}
-			if (cse_equal(fn, bucket[s], (uint32_t)i)) {  // redundant → reuse earlier value
+			if (cse_equal(fn, bucket[s], (uint32_t)i)) {  // redundant -> reuse earlier value
 				remap[i] = bucket[s];
 				changed  = true;
 				break;

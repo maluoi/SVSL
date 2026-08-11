@@ -1,7 +1,7 @@
-// svsl_fuzz — dependency-free mutation fuzzer for the compiler front end.
+// svsl_fuzz - dependency-free mutation fuzzer for the compiler front end.
 //
 // Seeds from the shader corpus, mutates deterministically (xorshift PRNG), and
-// runs pp → lex → parse → sema → IR → SPIR-V emission in-process. Diagnostics
+// runs pp -> lex -> parse -> sema -> IR -> SPIR-V emission in-process. Diagnostics
 // are expected on garbage input; crashes, hangs, and sanitizer reports are the
 // findings. Build with ASAN/UBSAN for real coverage.
 //
@@ -40,7 +40,7 @@ typedef struct seed_t {
 
 static seed_t  seeds[MAX_SEEDS];
 static int32_t seed_count = 0;
-static char   *include_src;     // stereokit.hlsli, served for every #include
+static const char *include_src; // stereokit.hlsli, served for every #include
 static int32_t include_len = 0;
 
 static uint64_t rng_state = 1;
@@ -253,7 +253,7 @@ static volatile int64_t current_iter = -1;
 
 static void on_alarm(int sig) {
 	(void)sig;
-	fprintf(stderr, "\nfuzz: HANG at iteration %lld — reproduce with -dump %lld\n",
+	fprintf(stderr, "\nfuzz: HANG at iteration %lld - reproduce with -dump %lld\n",
 	        (long long)current_iter, (long long)current_iter);
 	_exit(2);
 }
@@ -322,6 +322,6 @@ int main(int argc, char **argv) {
 	printf("fuzz: done, %lld runs clean (crash-free; reproduce any case with -seed %llu -dump ITER)\n",
 	       (long long)runs, (unsigned long long)seed);
 	free(buf);
-	if (include_owned) free(include_src);
+	if (include_owned) free((void *)include_src);
 	return 0;
 }
