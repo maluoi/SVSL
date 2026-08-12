@@ -56,7 +56,7 @@ static bool accept_kw(parse_t *p, svsl_kw_ kw) {
 }
 
 static void error_at(parse_t *p, svsl_loc_t loc, const char *fmt, svsl_str_t arg) {
-	svsl_diag_add(p->arena, p->diags, svsl_severity_error, loc, fmt, arg.len, arg.ptr);
+	svsl_diag_add(p->arena, p->diags, svsl_severity_error, loc, fmt, arg.len, arg.ptr ? arg.ptr : "");
 }
 
 static bool expect(parse_t *p, svsl_tok_ kind, const char *what) {

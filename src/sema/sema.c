@@ -18,7 +18,7 @@ typedef struct sema_t {
 } sema_t;
 
 static void err(sema_t *s, svsl_loc_t loc, const char *fmt, svsl_str_t arg) {
-	svsl_diag_add(s->arena, s->diags, svsl_severity_error, loc, fmt, arg.len, arg.ptr);
+	svsl_diag_add(s->arena, s->diags, svsl_severity_error, loc, fmt, arg.len, arg.ptr ? arg.ptr : "");
 }
 
 // --- attribute validation ---------------------------------------------------------

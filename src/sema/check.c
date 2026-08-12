@@ -31,7 +31,7 @@ typedef struct check_t {
 } check_t;
 
 static void cerr(check_t *c, svsl_loc_t loc, const char *fmt, svsl_str_t arg) {
-	svsl_diag_add(c->arena, c->diags, svsl_severity_error, loc, fmt, arg.len, arg.ptr);
+	svsl_diag_add(c->arena, c->diags, svsl_severity_error, loc, fmt, arg.len, arg.ptr ? arg.ptr : "");
 }
 
 // type name for diagnostics; arena-owned, safe to format directly
