@@ -424,6 +424,13 @@ static float3 accum;                // private per-invocation global
 workgroup float4 tile[8][8];        // shared memory ('groupshared' = alias)
 ```
 
+A non-const `static` is writable, per-invocation storage (SPIR-V `Private`, WGSL
+`var<private>`). Its initializer may be any expression valid at module scope (cbuffer
+members, earlier statics, function calls), and runs at the start of every entry point, in
+declaration order. Without one it starts at zero. Because it's writable, a non-const
+`static` is never a compile-time constant: array sizes and other constant contexts need
+`static const`. Resources can't be `static`.
+
 Bare globals with initializers form the implicit `$Global` uniform buffer (singular, matching
 glslang/skshaderc), and their initializers become material defaults in reflection (§12):
 
@@ -844,7 +851,8 @@ A required subgroup size can be declared via metadata: `//--wave_size = 32`
 ### Atomics
 
 On `storagebuffer` members, `workgroup` variables, and storage images. HLSL
-`Interlocked*` forms are porting-warned aliases.
+`Interlocked*` forms are porting-warned aliases. A destination in per-invocation storage
+(a local, parameter, or non-const `static`) is a compile error, as in DXC.
 
 ```c
 T atomic_add(ref T dest, T v)   atomic_sub  atomic_min  atomic_max

@@ -916,9 +916,10 @@ static void test_sema_porting_hints(void) {
 	svsl_arena_t arena = {0};
 	const char *src =
 		"SamplerState s : register(s0);\n"
+		"RWStructuredBuffer<uint> counts : register(u1);\n"
 		"min16float4 tint = {1,1,1,1};\n"           // bare global: resolved twice, deduped to one hint
 		"float4 ps() : SV_Target {\n"
-		"	uint prev; InterlockedAdd(prev, 1u);\n"
+		"	InterlockedAdd(counts[0], 1u);\n"
 		"	return tint;\n"
 		"}\n";
 
@@ -937,13 +938,75 @@ static void test_sema_porting_hints(void) {
 	on.ok = svsl_sema_run(&arena, ast, &pp, "porting.hlsl",
 	                      &(svsl_sema_options_t){ .porting_hints = true }, &on.prog, &on.diags);
 	TEST_CHECK(on.ok);
-	TEST_CHECK(count_porting(&on) == 3); // SamplerState, min16float4, InterlockedAdd - each once
+	TEST_CHECK(count_porting(&on) == 4); // SamplerState, RWStructuredBuffer, min16float4, InterlockedAdd - each once
+	svsl_arena_free(&arena);
+}
+
+static bool has_error(const sema_run_t *r, const char *text) {
+	for (int32_t i = 0; i < r->diags.count; i++)
+		if (r->diags.items[i].severity == svsl_severity_error && strstr(r->diags.items[i].message, text))
+			return true;
+	return false;
+}
+
+// non-const module-scope `static`: writable per-invocation storage; `static const`
+// stays a read-only constant. Initializers are checked in module scope and may be
+// runtime expressions (cbuffer reads, earlier statics, calls).
+static void test_check_static_globals(void) {
+	svsl_arena_t arena = {0};
+
+	sema_run_t r = run_sema(&arena,
+		"cbuffer B : register(b0) { float scale; };\n"
+		"static const int SIZE = 4;\n"
+		"static float gain = scale * 2;\n"
+		"float twice(float v) { return v * 2; }\n"
+		"static float bias = twice(gain);\n"
+		"static float hist[SIZE];\n"
+		"float4 ps() : SV_TARGET { hist[1] += gain; gain = bias; return hist[1] + gain; }\n");
+	TEST_CHECK(r.ok);
+	TEST_CHECK(r.prog.private_globals.count == 3); // gain, bias, hist
+	TEST_CHECK(r.prog.const_globals.count == 1);   // SIZE
+
+	r = run_sema_ex(&arena,
+		"static const float k = 1;\n"
+		"float4 ps() : SV_TARGET { k = 2; return k; }\n", true);
+	TEST_CHECK(has_error(&r, "cannot assign")); // `static const` stays read-only
+
+	r = run_sema_ex(&arena,
+		"static int N = 4;\n"
+		"float4 ps() : SV_TARGET { float a[N]; a[0] = 1; return a[0]; }\n", true);
+	TEST_CHECK(has_error(&r, "declare it 'static const'")); // writable, so not a constant
+
+	r = run_sema_ex(&arena,
+		"static Texture2D t;\n"
+		"float4 ps() : SV_TARGET { return 1; }\n", true);
+	TEST_CHECK(has_error(&r, "resources cannot be 'static'"));
+
+	// atomics need workgroup/buffer/image memory: per-invocation storage is an
+	// error (it used to emit SPIR-V that spirv-val rejects)
+	const char *per_invocation[] = {
+		"static uint g;\n[numthreads(1,1,1)] void cs() { InterlockedAdd(g, 1u); }\n",
+		"[numthreads(1,1,1)] void cs() { uint l = 0; InterlockedAdd(l, 1u); }\n",
+		("void f(inout uint p) { InterlockedAdd(p, 1u); }\n"
+		 "[numthreads(1,1,1)] void cs() { uint l = 0; f(l); }\n"),
+	};
+	for (int32_t i = 0; i < 3; i++) {
+		r = run_sema_ex(&arena, per_invocation[i], true);
+		TEST_CHECK(has_error(&r, "per-invocation storage"));
+	}
+	r = run_sema(&arena,
+		"groupshared uint tile[4];\n"
+		"RWStructuredBuffer<uint> buf : register(u0);\n"
+		"[numthreads(1,1,1)] void cs() { InterlockedAdd(tile[1], 1u); InterlockedAdd(buf[0], tile[1]); }\n");
+	TEST_CHECK(r.ok);
+
 	svsl_arena_free(&arena);
 }
 
 void test_sema(void) {
 	test_check_expressions();
 	test_check_errors_and_warnings();
+	test_check_static_globals();
 	test_check_spirv_asm();
 	test_check_bitfield();
 	test_check_bitfield_struct();

@@ -558,6 +558,35 @@ static void test_ir_loop_exit_shape(void) {
 	}
 }
 
+// private globals (non-const `static`) get one canonical pointer per entry, so
+// the memory passes treat them like locals: straight-line writes forward and
+// die, a conditional write is not forwarded past its merge
+static void test_ir_private_globals(void) {
+	svsl_arena_t arena = {0};
+
+	ir_run_t r = run_ir(&arena,
+		"static float h = 1;\n"
+		"void bump() { h *= 2; }\n"
+		"float4 ps() : SV_TARGET { bump(); bump(); return h; }\n");
+	TEST_CHECK(r.ok);
+	const svsl_ir_func_t *fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_load)  == 0); // 1 * 2 * 2 folds to a constant
+	TEST_CHECK(count_op(fn, svsl_ir_store) == 0); // unread afterwards: dead
+	TEST_CHECK(count_op(fn, svsl_ir_ptr)   == 0); // and the pointer with them
+
+	r = run_ir(&arena,
+		"static float c = 1;\n"
+		"float4 ps(float x : TEXCOORD0) : SV_TARGET { if (x > 0) c = 5; return c; }\n");
+	TEST_CHECK(r.ok);
+	fn = &r.module.funcs[0];
+	int32_t end = find_op(fn, svsl_ir_end_if), load = -1;
+	for (int32_t i = end + 1; i < fn->insts.count; i++)
+		if (fn->insts.items[i].op == svsl_ir_load) { load = i; break; }
+	TEST_CHECK(end >= 0 && load > end); // c is re-read after the merge, not assumed 1 or 5
+	TEST_CHECK(count_op(fn, svsl_ir_ptr) == 1); // one canonical pointer for c
+	svsl_arena_free(&arena);
+}
+
 void test_ir(void) {
 	test_ir_opaque_inline();
 	test_ir_flat_chains();
@@ -573,4 +602,5 @@ void test_ir(void) {
 	test_ir_buffer_dimensions();
 	test_ir_swizzle_stores();
 	test_ir_loop_exit_shape();
+	test_ir_private_globals();
 }
