@@ -587,6 +587,45 @@ static void test_ir_private_globals(void) {
 	svsl_arena_free(&arena);
 }
 
+// a read-only aggregate `in` parameter binds to the caller's storage: no copy
+// var, no whole-array load/store. A parameter the callee writes keeps its copy.
+static int32_t count_whole_array_loads(const ir_run_t *r) {
+	const svsl_ir_func_t *fn = &r->module.funcs[0];
+	int32_t n = 0;
+	for (int32_t i = 0; i < fn->insts.count; i++)
+		if (fn->insts.items[i].op == svsl_ir_load &&
+		    svsl_type_get(&r->prog.types, fn->insts.items[i].type)->kind == svsl_type_array) n++;
+	return n;
+}
+static void test_ir_array_param_by_reference(void) {
+	svsl_arena_t arena = {0};
+
+	ir_run_t r = run_ir(&arena,
+		"float sum(float v[8], int n) { float s = 0; for (int i = 0; i < n; i++) s += v[i]; return s; }\n"
+		"float4 ps(float x : TEXCOORD0) : SV_TARGET {\n"
+		"	float a[8]; for (int i = 0; i < 8; i++) a[i] = x * i;\n"
+		"	return sum(a, (int)x) + sum(a, 3);\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	TEST_CHECK(count_whole_array_loads(&r) == 0);
+	int32_t array_vars = 0;
+	for (int32_t i = 0; i < r.module.funcs[0].insts.count; i++) {
+		const svsl_ir_inst_t *in = &r.module.funcs[0].insts.items[i];
+		if (in->op == svsl_ir_var && svsl_type_get(&r.prog.types, in->type)->kind == svsl_type_array) array_vars++;
+	}
+	TEST_CHECK(array_vars == 1); // just the caller's `a`: neither call made a parameter copy
+
+	r = run_ir(&arena,
+		"float first(float v[8]) { v[0] += 1; return v[0]; }\n" // writes its param: copy required
+		"float4 ps(float x : TEXCOORD0) : SV_TARGET {\n"
+		"	float a[8]; for (int i = 0; i < 8; i++) a[i] = x * i;\n"
+		"	return first(a) + a[0];\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	TEST_CHECK(count_whole_array_loads(&r) == 1);
+	svsl_arena_free(&arena);
+}
+
 void test_ir(void) {
 	test_ir_opaque_inline();
 	test_ir_flat_chains();
@@ -603,4 +642,5 @@ void test_ir(void) {
 	test_ir_swizzle_stores();
 	test_ir_loop_exit_shape();
 	test_ir_private_globals();
+	test_ir_array_param_by_reference();
 }

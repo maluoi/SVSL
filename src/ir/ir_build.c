@@ -982,6 +982,40 @@ static void emit_return_guard(build_t *b, svsl_loc_t loc) {
 	emit_op(b, svsl_ir_end_if, SVSL_TYPE_NONE, 0, 0, 0, loc);
 }
 
+// Whether an `in` argument can bind the callee's parameter straight to the
+// caller's storage instead of a copy. HLSL passes `in` by value, and for an array
+// or struct that copy is a whole-aggregate load + store the driver must prove dead
+// (sk_texenc's ASTC 6x6 encoder copied a float4[36] into every mode function). A
+// reference is indistinguishable when nothing can change the storage while the
+// callee runs:
+//   * the callee never writes the parameter (sema's param_written), and
+//   * the argument is rooted in storage the callee cannot reach - a local or
+//     parameter of an enclosing function (full inlining leaves no pointers, and
+//     out/inout write back only after the call), or read-only memory (const
+//     globals, cbuffer/push-constant members). Writable globals (private,
+//     groupshared, RW buffers) keep the copy: the callee could write them.
+// The argument must also already have the parameter's exact type (no conversion).
+static bool arg_by_reference(const build_t *b, const svsl_func_info_t *info, int32_t param,
+                             const svsl_ast_expr_t *arg) {
+	if (info->param_written[param] || arg->sema_type != info->param_types[param]) return false;
+	svsl_type_kind_ kind = svsl_type_get(&b->prog->types, info->param_types[param])->kind;
+	if (kind != svsl_type_array && kind != svsl_type_struct) return false; // scalars/vectors forward
+	const svsl_ast_expr_t *root = svsl_ast_lvalue_root(arg);
+	if (root->kind != svsl_expr_ident) return false;
+	switch ((svsl_ref_)root->sema_ref.kind) {
+	case svsl_ref_local:
+	case svsl_ref_param:
+	case svsl_ref_const_global:
+		return true;
+	case svsl_ref_buffer_member: {
+		svsl_block_kind_ bk = b->prog->buffers.items[root->sema_ref.a].kind;
+		return bk == svsl_block_uniform || bk == svsl_block_pushconstant;
+	}
+	default:
+		return false;
+	}
+}
+
 static uint32_t lower_user_call(build_t *b, const svsl_ast_expr_t *e) {
 	if (b->depth >= IR_MAX_INLINE_DEPTH) { berr(b, e->loc, "inlining too deep"); return 0; }
 	const svsl_func_info_t *info = &b->prog->functions.items[e->call.callee->sema_ref.a];
@@ -1003,11 +1037,15 @@ static uint32_t lower_user_call(build_t *b, const svsl_ast_expr_t *e) {
 			param_vars[i] = RES_MARK | (uint32_t)resolve_resource(b, e->call.args[i]);
 			continue;
 		}
+		uint8_t dir = func->params[i]->dir;
+		if (dir != svsl_dir_out && dir != svsl_dir_inout && arg_by_reference(b, info, i, e->call.args[i])) {
+			uint32_t ptr = lower_lvalue(b, e->call.args[i]);
+			if (ptr != SVSL_IR_NONE) { param_vars[i] = ptr; continue; }
+		}
 		uint32_t var = emit(b, (svsl_ir_inst_t){ .op = svsl_ir_var, .type = info->param_types[i],
 		                                         .args = { 0, 0, 0, SVSL_IR_NONE },
 		                                         .loc = e->loc, .name = func->params[i]->name });
 		param_vars[i] = var;
-		uint8_t dir = func->params[i]->dir;
 		if (dir == svsl_dir_out || dir == svsl_dir_inout) {
 			uint32_t ptr = lower_lvalue(b, e->call.args[i]);
 			if (ptr == SVSL_IR_NONE) { berr(b, e->call.args[i]->loc, "out argument needs storage"); return 0; }

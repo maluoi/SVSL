@@ -343,6 +343,9 @@ typedef struct svsl_ast_t {
 	int32_t           decl_count;
 } svsl_ast_t;
 
+// The expression an lvalue's member/index chain is rooted at (`a[i].b` -> `a`).
+const svsl_ast_expr_t *svsl_ast_lvalue_root(const svsl_ast_expr_t *e);
+
 // --- dump (for golden tests and --dump-ast debugging) ----------------------------------
 
 // Renders the AST as a compact s-expression text, NUL-terminated, arena-owned.

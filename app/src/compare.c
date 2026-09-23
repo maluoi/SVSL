@@ -585,6 +585,18 @@ static const compute_cfg_t compute_cfgs[] = {
 	               {  5, 1000 }, {  6, 0x264E4F5D }, {  7, 22 },                     // t = 0
 	               { 35, 129 }, { 36, 28 }, { 38, 0x264E4F61 },                     // t = 4
 	               { 56, 21 }, { 59, 169 }, { 60, 43 }, { 62, 0x264E4F64 }, { 63, 62 } } }, // t = 7
+	{ .file    = "check_array_param", // aggregate `in` params: by-reference vs required copies
+	  .passes  = { { .dispatch = { 1, 1, 1 } } },
+	  .buffers = { { "results", 40, fill_zero }, { "pairs", 4, fill_zero } },
+	  // 10 words per thread t; local_vals = {t, t+1, 3t, 9}:
+	  // [0] sum4 = 12t+38 [1] + v[3] = 12t+47 [2] scramble 63 + (t+1) [3] untouched t
+	  // [4] call-time pair (t+10)+(t+20) [5] clobbered 999 [6] t=0: call-time shared 40
+	  // [7] call-time 6 + later 2000 [8] call-time 3t + written-back 3000
+	  // [9] cbuffer read (fill-dependent: covered by the reference compare only)
+	  .expect  = { {  0, 38 }, {  1, 47 }, {  2, 64 }, {  4, 30 }, {  5, 999 },
+	               {  6, 40 }, {  7, 2006 }, {  8, 3000 },                          // t = 0
+	               { 30, 74 }, { 31, 83 }, { 32, 67 }, { 33, 3 }, { 34, 36 },
+	               { 35, 999 }, { 37, 2006 }, { 38, 3009 } } },                     // t = 3
 	{ .file    = "check_pack_half_vec", // vector f32tof16/f16tof32 lowering
 	  .passes  = { { .dispatch = { 1, 1, 1 } } },
 	  .buffers = { { "result", 9, fill_zero } },

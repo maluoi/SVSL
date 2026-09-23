@@ -105,7 +105,9 @@ typedef struct svsl_global_t {
 typedef struct svsl_func_info_t {
 	const svsl_ast_func_t *func;
 	svsl_type_id_t         return_type;
-	svsl_type_id_t        *param_types; // param_count entries
+	svsl_type_id_t        *param_types;   // param_count entries
+	uint8_t               *param_written; // param_count entries: 1 = the body writes it (assignment,
+	                                      // ++/--, out/inout or atomic argument) - see check_write_target
 	bool                   checked;
 } svsl_func_info_t;
 

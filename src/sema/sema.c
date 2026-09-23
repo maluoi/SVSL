@@ -1568,7 +1568,8 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 		svsl_func_info_t info = {
 			.func        = func,
 			.return_type = resolve_type(&s, func->return_type),
-			.param_types = svsl_arena_alloc(arena, (size_t)(func->param_count > 0 ? func->param_count : 1) * sizeof(svsl_type_id_t)) };
+			.param_types   = svsl_arena_alloc(arena, (size_t)(func->param_count > 0 ? func->param_count : 1) * sizeof(svsl_type_id_t)),
+			.param_written = svsl_arena_alloc(arena, (size_t)(func->param_count > 0 ? func->param_count : 1)) };
 		for (int32_t p = 0; p < func->param_count; p++)
 			info.param_types[p] = resolve_type(&s, func->params[p]->type);
 

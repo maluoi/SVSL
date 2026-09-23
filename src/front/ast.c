@@ -432,3 +432,9 @@ const char *svsl_ast_dump(svsl_arena_t *arena, const svsl_ast_t *ast) {
 	svsl_array_push(arena, &d.out, '\0');
 	return d.out.items;
 }
+
+const svsl_ast_expr_t *svsl_ast_lvalue_root(const svsl_ast_expr_t *e) {
+	while (e->kind == svsl_expr_member || e->kind == svsl_expr_index)
+		e = e->kind == svsl_expr_member ? e->member.object : e->index.object;
+	return e;
+}

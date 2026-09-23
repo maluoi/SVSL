@@ -187,16 +187,22 @@ static bool expr_is_lvalue(check_t *c, const svsl_ast_expr_t *e) {
 	}
 }
 
-// the identifier an lvalue's member/index chain is rooted at
-static const svsl_ast_expr_t *lvalue_root(const svsl_ast_expr_t *e) {
-	while (e->kind == svsl_expr_member || e->kind == svsl_expr_index)
-		e = e->kind == svsl_expr_member ? e->member.object : e->index.object;
-	return e;
+// Validates a write target (assignment, ++/--, out/inout or atomic argument) and
+// records writes to the current function's parameters: a parameter the body never
+// writes lets aggregate arguments pass by reference instead of by copy (ir_build's
+// lower_user_call). Every write site goes through here, so the flag is complete.
+static bool check_write_target(check_t *c, const svsl_ast_expr_t *e) {
+	if (!expr_is_lvalue(c, e)) return false;
+	const svsl_ast_expr_t *root = svsl_ast_lvalue_root(e);
+	if (root->kind == svsl_expr_ident && root->sema_ref.kind == svsl_ref_param && c->func_index >= 0)
+		c->prog->functions.items[c->func_index].param_written[root->sema_ref.a] = 1;
+	return true;
 }
+
 // storage only this invocation sees (locals, params, private globals): no
 // atomics - Vulkan allows them on workgroup, buffer, and image memory only
 static bool lvalue_is_per_invocation(const svsl_ast_expr_t *e) {
-	const svsl_ast_expr_t *root = lvalue_root(e);
+	const svsl_ast_expr_t *root = svsl_ast_lvalue_root(e);
 	if (root->kind != svsl_expr_ident) return false;
 	return root->sema_ref.kind == svsl_ref_local || root->sema_ref.kind == svsl_ref_param ||
 	       root->sema_ref.kind == svsl_ref_private_global;
@@ -556,7 +562,7 @@ static svsl_type_id_t check_method_call(check_t *c, svsl_ast_expr_t *e) {
 		if (mip_form && !convert_to(c, args[0], svsl_type_scalar_id(types, svsl_scalar_uint32)))
 			return SVSL_TYPE_NONE;
 		for (int32_t i = mip_form ? 1 : 0; i < arg_count; i++) {
-			if (!expr_is_lvalue(c, args[i]) ||
+			if (!check_write_target(c, args[i]) ||
 			    svsl_type_get(types, args[i]->sema_type)->kind != svsl_type_scalar) {
 				svsl_diag_add(c->arena, c->diags, svsl_severity_error, args[i]->loc,
 				              "GetDimensions argument %d must be a writable scalar variable", i + 1);
@@ -649,7 +655,7 @@ static svsl_type_id_t check_method_call(check_t *c, svsl_ast_expr_t *e) {
 		svsl_type_id_t scalar = svsl_type_scalar_id(types, elem_scal);
 		if (!convert_to(c, args[1], scalar)) return SVSL_TYPE_NONE;
 		if (arg_count == 3) { // out-param form returns void
-			if (!expr_is_lvalue(c, args[2]))
+			if (!check_write_target(c, args[2]))
 				cerr(c, args[2]->loc, "atomic out-argument must be writable%.*s", (svsl_str_t){0});
 			return svsl_type_intern(types, (svsl_type_t){ .kind = svsl_type_void });
 		}
@@ -769,7 +775,7 @@ static svsl_type_id_t check_special_intrinsic(check_t *c, svsl_ast_expr_t *e, co
 			return SVSL_TYPE_NONE;
 		svsl_type_id_t g = args[0]->sema_type;
 		for (int32_t i = 1; i < want; i++) {
-			if (!expr_is_lvalue(c, args[i]) || args[i]->sema_type != g) {
+			if (!check_write_target(c, args[i]) || args[i]->sema_type != g) {
 				svsl_diag_add(c->arena, c->diags, svsl_severity_error, args[i]->loc,
 				              "'%s' output argument must be a writable '%s'",
 				              intr->name, svsl_type_name(types, g));
@@ -833,15 +839,15 @@ static svsl_type_id_t check_special_intrinsic(check_t *c, svsl_ast_expr_t *e, co
 				              tname(c, dest));
 			return SVSL_TYPE_NONE;
 		}
-		if (!expr_is_lvalue(c, args[0]))
+		if (!check_write_target(c, args[0]))
 			cerr(c, args[0]->loc, "atomic destination must be writable%.*s", (svsl_str_t){0});
 		else if (!img_dest && lvalue_is_per_invocation(args[0]))
 			cerr(c, args[0]->loc, "atomic destination must be groupshared memory, a RW buffer, or a "
-			     "storage image - '%.*s' is per-invocation storage", lvalue_root(args[0])->ident);
+			     "storage image - '%.*s' is per-invocation storage", svsl_ast_lvalue_root(args[0])->ident);
 		for (int32_t i = 1; i < base_args; i++)
 			if (!convert_to(c, args[i], dest)) return SVSL_TYPE_NONE;
 		if (is_alias && arg_count == base_args + 1) { // Interlocked* out-param form
-			if (!expr_is_lvalue(c, args[base_args]))
+			if (!check_write_target(c, args[base_args]))
 				cerr(c, args[base_args]->loc, "atomic out-argument must be writable%.*s", (svsl_str_t){0});
 			return svsl_type_intern(types, (svsl_type_t){ .kind = svsl_type_void });
 		}
@@ -1018,7 +1024,7 @@ static svsl_type_id_t check_user_call(check_t *c, svsl_ast_expr_t *e) {
 	for (int32_t i = 0; i < e->call.arg_count; i++) {
 		uint8_t dir = info->func->params[i]->dir;
 		if (dir == svsl_dir_out || dir == svsl_dir_inout) {
-			if (!expr_is_lvalue(c, e->call.args[i]) || swizzle_write_has_dup(e->call.args[i]))
+			if (!check_write_target(c, e->call.args[i]) || swizzle_write_has_dup(e->call.args[i]))
 				cerr(c, e->call.args[i]->loc, "argument for out parameter '%.*s' must be writable",
 				     info->func->params[i]->name);
 			// out args keep their own type; a copy-back conversion happens at inline time
@@ -1056,7 +1062,7 @@ static svsl_type_id_t check_binary(check_t *c, svsl_ast_expr_t *e) {
 	if (lt == SVSL_TYPE_NONE || rt == SVSL_TYPE_NONE) return SVSL_TYPE_NONE;
 
 	if (binary_is_assign(op)) {
-		if (!expr_is_lvalue(c, e->binary.lhs))
+		if (!check_write_target(c, e->binary.lhs))
 			cerr(c, e->binary.lhs->loc, "cannot assign to this expression%.*s", (svsl_str_t){0});
 		else if (swizzle_write_has_dup(e->binary.lhs))
 			cerr(c, e->binary.lhs->loc, "swizzle '.%.*s' writes a component more than once",
@@ -1177,7 +1183,7 @@ static svsl_type_id_t check_expr(check_t *c, svsl_ast_expr_t *e) {
 			break;
 		}
 		if ((e->unary.op == svsl_tok_plusplus || e->unary.op == svsl_tok_minusminus) &&
-		    (!expr_is_lvalue(c, e->unary.operand) || swizzle_write_has_dup(e->unary.operand)))
+		    (!check_write_target(c, e->unary.operand) || swizzle_write_has_dup(e->unary.operand)))
 			cerr(c, e->loc, "'++'/'--' needs a writable value%.*s", (svsl_str_t){0});
 		result = ot;
 		break;
@@ -1185,7 +1191,7 @@ static svsl_type_id_t check_expr(check_t *c, svsl_ast_expr_t *e) {
 	case svsl_expr_post: {
 		svsl_type_id_t ot = check_expr(c, e->post.operand);
 		if (ot == SVSL_TYPE_NONE) break;
-		if (!expr_is_lvalue(c, e->post.operand) || swizzle_write_has_dup(e->post.operand))
+		if (!check_write_target(c, e->post.operand) || swizzle_write_has_dup(e->post.operand))
 			cerr(c, e->loc, "'++'/'--' needs a writable value%.*s", (svsl_str_t){0});
 		result = ot;
 		break;
