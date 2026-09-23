@@ -573,6 +573,18 @@ static const compute_cfg_t compute_cfgs[] = {
 	               {  5, 1 },  {  6, 1 },  {  7, 36 },  {  8, 31 }, {  9, 99 },   // t = 0
 	               { 71, 0xFFFFFFF4 }, { 72, 216 }, { 75, 36 }, { 76, 25 },
 	               { 78, 31 }, { 79, 3 } } },                                     // t = 7
+	{ .file    = "check_static_globals", // writable module-scope statics (Private storage)
+	  .passes  = { { .dispatch = { 1, 1, 1 } } },
+	  .buffers = { { "results", 64, fill_zero } },
+	  // 8 words per thread t, replayed on the CPU. seed: 7, two LCG steps
+	  // (x*1103515245+12345) = 0x264E4F5D; derived = 7*3+1 + sum(0..t-1);
+	  // from_cb = bits(0.25f) >> 20 = 1000; hist {1,2,3,4}, [t&3] += 10, [0] = 100 if t > 3
+	  // [0] acc.sum = 3t [1] count 2 [2] seed [3] hist dot (1,2,3,4) [4] derived
+	  // [5] from_cb [6] t + seed [7] acc.sum ^ derived
+	  .expect  = { {  1, 2 }, {  2, 0x264E4F5D }, {  3, 40 }, {  4, 22 },
+	               {  5, 1000 }, {  6, 0x264E4F5D }, {  7, 22 },                     // t = 0
+	               { 35, 129 }, { 36, 28 }, { 38, 0x264E4F61 },                     // t = 4
+	               { 56, 21 }, { 59, 169 }, { 60, 43 }, { 62, 0x264E4F64 }, { 63, 62 } } }, // t = 7
 	{ .file    = "check_pack_half_vec", // vector f32tof16/f16tof32 lowering
 	  .passes  = { { .dispatch = { 1, 1, 1 } } },
 	  .buffers = { { "result", 9, fill_zero } },

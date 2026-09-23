@@ -35,6 +35,7 @@ typedef struct build_t {
 	lower_ctx_t      *ctx;   // NULL at entry-function level
 	int32_t           depth;
 	u32_list_t        local_stack;      // mirrors the checker's scope stack
+	uint32_t         *private_ptrs;     // one canonical pointer per private global (entry prologue)
 	bool              failed;
 } build_t;
 
@@ -261,6 +262,8 @@ static uint32_t lower_lvalue(build_t *b, const svsl_ast_expr_t *e) {
 		switch (e->sema_ref.kind) {
 		case svsl_ref_local:
 			return b->local_stack.items[e->sema_ref.a];
+		case svsl_ref_private_global:
+			return b->private_ptrs[e->sema_ref.a];
 		case svsl_ref_param:
 			if (b->ctx) {
 				uint32_t v = b->ctx->param_vars[e->sema_ref.a];
@@ -1652,6 +1655,30 @@ static void lower_stmt(build_t *b, const svsl_ast_stmt_t *s) {
 
 // --- entry ---------------------------------------------------------------------------------
 
+// Entry prologue for private (non-const `static`) globals. Each gets exactly one
+// pointer instruction, at depth 0 ahead of the body, and every reference resolves
+// to it - so to the memory passes a private global is a single root, like a local
+// var (which is what Private storage is: per-invocation, dead once the fully
+// inlined entry returns). Initializers then run in declaration order, as glslang
+// does; an uninitialized one keeps the variable's zero initializer (HLSL/DXC
+// semantics - glslang leaves it undefined, which zero satisfies).
+static void lower_private_globals(build_t *b) {
+	int32_t count = b->prog->private_globals.count;
+	b->private_ptrs = svsl_arena_alloc(b->arena, (size_t)(count > 0 ? count : 1) * sizeof(uint32_t));
+	for (int32_t i = 0; i < count; i++) {
+		const svsl_global_t *g = &b->prog->private_globals.items[i];
+		b->private_ptrs[i] = emit(b, (svsl_ir_inst_t){ .op = svsl_ir_ptr, .type = g->type,
+		                                               .args = { svsl_ref_private_global, (uint32_t)i, 0, SVSL_IR_NONE },
+		                                               .loc = g->var->loc, .name = g->name });
+	}
+	for (int32_t i = 0; i < count; i++) {
+		const svsl_global_t *g = &b->prog->private_globals.items[i];
+		if (!g->var->init) continue;
+		uint32_t value = lower_init(b, g->var->init, g->type);
+		emit_op(b, svsl_ir_store, SVSL_TYPE_NONE, b->private_ptrs[i], value, 0, g->var->loc);
+	}
+}
+
 bool svsl_ir_build(svsl_arena_t *arena, svsl_program_t *prog, svsl_opt_level_ opt_level,
                    svsl_ir_module_t *out_module, svsl_diag_list_t *ref_diags) {
 	int32_t errors_before = ref_diags->error_count;
@@ -1668,6 +1695,7 @@ bool svsl_ir_build(svsl_arena_t *arena, svsl_program_t *prog, svsl_opt_level_ op
 		for (int32_t f = 0; f < prog->functions.count; f++)
 			if (prog->functions.items[f].func == prog->entries.items[i].func)
 				b.entry_info = &prog->functions.items[f];
+		lower_private_globals(&b);
 		lower_stmt(&b, prog->entries.items[i].func->body);
 
 		// ensure a trailing return (void entries often have no explicit one)

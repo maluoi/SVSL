@@ -139,6 +139,18 @@ uint32_t svsl_spv_const(svsl_spv_t *spv, uint32_t type_id, uint64_t bits, bool w
 	return id;
 }
 
+uint32_t svsl_spv_const_null(svsl_spv_t *spv, uint32_t type_id) {
+	for (int32_t i = 0; i < spv->const_cache.count; i++) {
+		const svsl_spv_type_key_t *entry = &spv->const_cache.items[i];
+		if (entry->op == SpvOpConstantNull && entry->a == type_id) return entry->id;
+	}
+	uint32_t id = svsl_spv_id(spv);
+	svsl_array_push(spv->arena, &spv->const_cache,
+	                ((svsl_spv_type_key_t){ .op = SpvOpConstantNull, .a = type_id, .id = id }));
+	svsl_spv_inst2(spv, &spv->types, SpvOpConstantNull, type_id, id);
+	return id;
+}
+
 const uint32_t *svsl_spv_finalize(svsl_spv_t *spv, int32_t *out_word_count) {
 	svsl_spv_stream_t out = {0};
 	svsl_array_push(spv->arena, &out, SpvMagicNumber);

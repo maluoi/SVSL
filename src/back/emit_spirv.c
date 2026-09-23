@@ -50,6 +50,7 @@ typedef struct emit_t {
 	svsl_array_t(uint64_t) qcom_decorated; // (var id << 32 | decoration) emitted so far
 	uint32_t *workgroup_ids;
 	uint32_t *const_global_ids;
+	uint32_t *private_ids;      // one Private OpVariable per private (non-const static) global
 	uint32_t *param_shadow;     // entry params -> function-local shadow vars
 	// scalar-replaced struct params: read-only inputs accessed only by constant
 	// member chains skip the shadow var + whole-struct construct entirely; each
@@ -676,6 +677,19 @@ static void create_globals(emit_t *e) {
 		svsl_spv_inst3(spv, &spv->types, SpvOpVariable, ptr, var, SpvStorageClassWorkgroup);
 		svsl_spv_inst_str(spv, &spv->debug, SpvOpName, (uint32_t[]){ var }, 1, g->name);
 		e->workgroup_ids[i] = var;
+	}
+
+	// private globals: zero-initialized Private variables (initializers are
+	// stores in each entry's prologue - see ir_build's lower_private_globals)
+	for (int32_t i = 0; i < prog->private_globals.count; i++) {
+		const svsl_global_t *g    = &prog->private_globals.items[i];
+		uint32_t             type = spv_type_for(e, g->type);
+		uint32_t             ptr  = spv_ptr_type(e, SpvStorageClassPrivate, type);
+		uint32_t             var  = svsl_spv_id(spv);
+		svsl_spv_inst4(spv, &spv->types, SpvOpVariable, ptr, var, SpvStorageClassPrivate,
+		               svsl_spv_const_null(spv, type));
+		svsl_spv_inst_str(spv, &spv->debug, SpvOpName, (uint32_t[]){ var }, 1, g->name);
+		e->private_ids[i] = var;
 	}
 
 	// const globals with constant initializers -> Private variables
@@ -1510,6 +1524,7 @@ bool svsl_spirv_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 	e.qcom_res_use      = svsl_arena_alloc(arena, (size_t)(prog->resources.count > 0 ? prog->resources.count : 1));
 	e.workgroup_ids     = svsl_arena_alloc(arena, (size_t)(prog->workgroup_vars.count > 0 ? prog->workgroup_vars.count : 1) * 4);
 	e.const_global_ids  = svsl_arena_alloc(arena, (size_t)(prog->const_globals.count > 0 ? prog->const_globals.count : 1) * 4);
+	e.private_ids       = svsl_arena_alloc(arena, (size_t)(prog->private_globals.count > 0 ? prog->private_globals.count : 1) * 4);
 	int32_t pcount      = fn->entry->func->param_count > 0 ? fn->entry->func->param_count : 1;
 	e.param_shadow      = svsl_arena_alloc(arena, (size_t)pcount * 4);
 	e.param_sroa        = svsl_arena_alloc(arena, (size_t)pcount);

@@ -53,6 +53,7 @@ typedef struct wgsl_t {
 	uint8_t *struct_used;    // per prog->types.structs entry
 	int32_t *sampler_pair;   // standalone sampler -> first texture it samples, -1
 	const char **const_texts;// per const-global: materialized initializer, NULL = unused/int
+	uint8_t  *priv_used;     // per private global: referenced by this entry -> declared
 	// WGSL atomics are type-level: these mark the storage leaves that must
 	// declare atomic<T> (and whose plain loads/stores become atomicLoad/Store)
 	uint8_t  *res_atomic;    // object-form structured buffer: its elements
@@ -607,6 +608,9 @@ static const char *lvalue(wgsl_t *e, uint32_t id, svsl_type_id_t *out_type) {
 		case svsl_ref_const_global:
 			*out_type = e->prog->const_globals.items[a].type;
 			return ident(e, e->prog->const_globals.items[a].name);
+		case svsl_ref_private_global:
+			*out_type = e->prog->private_globals.items[a].type;
+			return ident(e, e->prog->private_globals.items[a].name);
 		case svsl_ref_spec_const:
 			*out_type = e->prog->spec_consts.items[a].type;
 			return ident(e, e->prog->spec_consts.items[a].name);
@@ -1036,6 +1040,10 @@ static void prescan(wgsl_t *e) {
 		}
 		if (in->op == svsl_ir_ptr && (svsl_ref_)in->args[0] == svsl_ref_workgroup)
 			prescan_type(e, prog->workgroup_vars.items[in->args[1]].type, in->loc);
+		if (in->op == svsl_ir_ptr && (svsl_ref_)in->args[0] == svsl_ref_private_global) {
+			e->priv_used[in->args[1]] = 1;
+			prescan_type(e, prog->private_globals.items[in->args[1]].type, in->loc);
+		}
 	}
 }
 
@@ -2279,6 +2287,13 @@ static void emit_globals(wgsl_t *e) {
 			    type_name_w(e, g->type, g->var->loc), (long long)g->int_value);
 	}
 
+	// private globals: WGSL zero-initializes var<private>; initializers are
+	// assignments at the top of the entry, as in the SPIR-V path
+	for (int32_t i = 0; i < prog->private_globals.count; i++)
+		if (e->priv_used[i])
+			wln(e, "var<private> %s : %s;", ident(e, prog->private_globals.items[i].name),
+			    type_name_w(e, prog->private_globals.items[i].type, prog->private_globals.items[i].var->loc));
+
 	for (int32_t i = 0; i < prog->workgroup_vars.count; i++)
 		wln(e, "var<workgroup> %s : %s;", ident(e, prog->workgroup_vars.items[i].name),
 		    e->wg_atomic[i]
@@ -2404,6 +2419,7 @@ bool svsl_wgsl_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 	for (int32_t i = 0; i < res_n; i++) e.sampler_pair[i] = -1;
 	int32_t cg_n  = prog->const_globals.count > 0 ? prog->const_globals.count : 1;
 	e.const_texts = svsl_arena_alloc(arena, (size_t)cg_n * sizeof(const char *));
+	e.priv_used   = svsl_arena_alloc(arena, (size_t)(prog->private_globals.count > 0 ? prog->private_globals.count : 1));
 	int32_t in_n   = fn->insts.count > 0 ? fn->insts.count : 1;
 	e.buf_mat_load = svsl_arena_alloc(arena, (size_t)in_n);
 	e.buf_mat_raw  = svsl_arena_alloc(arena, (size_t)in_n * sizeof(const char *));

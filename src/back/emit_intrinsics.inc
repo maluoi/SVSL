@@ -796,6 +796,10 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 			result = e->workgroup_ids[inst->args[1]];
 			e->value_class[i] = SpvStorageClassWorkgroup;
 			break;
+		case svsl_ref_private_global:
+			result = e->private_ids[inst->args[1]];
+			e->value_class[i] = SpvStorageClassPrivate;
+			break;
 		case svsl_ref_const_global:
 			result = e->const_global_ids[inst->args[1]];
 			if (!result) eerr(e, inst->loc, "global constant initializer is not foldable");

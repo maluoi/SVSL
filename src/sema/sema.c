@@ -288,6 +288,18 @@ static bool attr_binding(sema_t *s, const svsl_ast_attr_t *attr, svsl_ast_reg_t 
 	return true;
 }
 
+// a module-scope non-const `static`: writable, so never a compile-time constant
+static bool names_writable_static(const sema_t *s, svsl_str_t name) {
+	for (int32_t i = 0; i < s->ast->decl_count; i++) {
+		if (s->ast->decls[i]->kind != svsl_decl_var) continue;
+		const svsl_ast_var_t *var = &s->ast->decls[i]->var;
+		if ((var->flags & svsl_var_flag_static) && !(var->flags & svsl_var_flag_const) &&
+		    svsl_str_eq(var->name, name))
+			return true;
+	}
+	return false;
+}
+
 // full type including the declarator's array dimensions (outer-to-inner)
 static svsl_type_id_t resolve_type(sema_t *s, const svsl_ast_type_t *ref) {
 	svsl_type_id_t id = resolve_base_type(s, ref);
@@ -296,7 +308,12 @@ static svsl_type_id_t resolve_type(sema_t *s, const svsl_ast_type_t *ref) {
 		int64_t count = 0;
 		if (ref->array_dims[i]) {
 			if (!const_eval_int(s, ref->array_dims[i], &count) || count <= 0) {
-				err(s, ref->loc, "array size for '%.*s' is not a positive constant", ref->name);
+				const svsl_ast_expr_t *dim = ref->array_dims[i];
+				if (dim->kind == svsl_expr_ident && names_writable_static(s, dim->ident))
+					err(s, dim->loc, "array size '%.*s' is a writable 'static'; declare it "
+					    "'static const' to use it as a constant", dim->ident);
+				else
+					err(s, ref->loc, "array size for '%.*s' is not a positive constant", ref->name);
 				count = 1;
 			}
 		}
@@ -1139,11 +1156,12 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 	}, .porting = opt_options && opt_options->porting_hints, .ast = ast };
 	sema_t s = { .arena = arena, .prog = out_program, .diags = ref_diags, .ast = ast };
 
-	// static-const integers first: struct members and arrays may size off them
+	// static-const integers first: struct members and arrays may size off them.
+	// A non-const `static` is writable, so never a constant.
 	for (int32_t i = 0; i < ast->decl_count; i++) {
 		if (ast->decls[i]->kind != svsl_decl_var) continue;
 		const svsl_ast_var_t *var = &ast->decls[i]->var;
-		if (!(var->flags & (svsl_var_flag_static | svsl_var_flag_const))) continue;
+		if (!(var->flags & svsl_var_flag_const)) continue;
 		if (var->flags & svsl_var_flag_specialization) continue;
 		if (!var->init) continue;
 		int64_t v;
@@ -1181,6 +1199,19 @@ bool svsl_sema_run(svsl_arena_t *arena, const svsl_ast_t *ast, const svsl_pp_res
 		if (var->flags & svsl_var_flag_workgroup) {
 			svsl_array_push(arena, &s.prog->workgroup_vars, (svsl_global_t){
 				.name = var->name, .type = resolve_type(&s, var->type), .var = var });
+			continue;
+		}
+		if ((var->flags & svsl_var_flag_static) && !(var->flags & svsl_var_flag_const)) {
+			// per-invocation writable global (SPIR-V Private). Its initializer is
+			// checked with the function bodies and runs at the top of each entry.
+			svsl_type_id_t type = infer_array_size(&s, resolve_type(&s, var->type), var);
+			if (type == SVSL_TYPE_NONE) continue;
+			if (svsl_type_is_resource(svsl_type_get(&s.prog->types, type))) {
+				err(&s, var->loc, "resources cannot be 'static' ('%.*s')", var->name);
+				continue;
+			}
+			svsl_array_push(arena, &s.prog->private_globals, (svsl_global_t){
+				.name = var->name, .type = type, .var = var });
 			continue;
 		}
 		if (var->flags & (svsl_var_flag_static | svsl_var_flag_const)) {

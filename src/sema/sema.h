@@ -93,7 +93,7 @@ typedef struct svsl_vertex_input_t {
 	svsl_str_t     semantic;
 } svsl_vertex_input_t;
 
-// static/const and workgroup globals (not reflected; used by bodies and IR)
+// const, private (non-const `static`) and workgroup globals (not reflected; used by bodies and IR)
 typedef struct svsl_global_t {
 	svsl_str_t            name;
 	svsl_type_id_t        type;
@@ -137,7 +137,8 @@ typedef struct svsl_program_t {
 	svsl_array_t(svsl_entry_t)        entries;
 	svsl_array_t(svsl_spec_const_t)   spec_consts;
 	svsl_array_t(svsl_vertex_input_t) vertex_inputs;
-	svsl_array_t(svsl_global_t)       const_globals;
+	svsl_array_t(svsl_global_t)       const_globals;   // `const` / `static const`: read-only
+	svsl_array_t(svsl_global_t)       private_globals; // non-const `static`: per-invocation, writable
 	svsl_array_t(svsl_global_t)       workgroup_vars;
 	svsl_array_t(svsl_enum_t)         enums;
 	svsl_array_t(svsl_enum_const_t)   enum_consts;

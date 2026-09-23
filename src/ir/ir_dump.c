@@ -111,8 +111,10 @@ static void dump_inst(dump_t *d, uint32_t id) {
 	case svsl_ir_ptr: {
 		static const char *kinds[] = { "?", "local", "param", "buffer", "resource",
 		                               "spec", "const_global", "workgroup", "func",
-		                               "intrinsic", "method", "builtin", "swizzle", "mat_elem" };
-		put(d, " %s %u %u", kinds[inst->args[0] < 14 ? inst->args[0] : 0],
+		                               "intrinsic", "method", "builtin", "swizzle", "mat_elem",
+		                               "bitfield", "enum_const", "private" }; // svsl_ref_ order
+		uint32_t    nkinds  = (uint32_t)(sizeof(kinds) / sizeof(kinds[0]));
+		put(d, " %s %u %u", kinds[inst->args[0] < nkinds ? inst->args[0] : 0],
 		    inst->args[1], inst->args[2]);
 		break;
 	}

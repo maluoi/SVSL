@@ -4,10 +4,11 @@
 // same local, parameter, or read-only global (cbuffer/pushconstant) location.
 //
 // Forwarding tracks the value currently at a pointer, keyed by exact pointer id,
-// only for *forwardable roots*: function-local vars, entry parameters, and
-// read-only globals (uniform/pushconstant buffers, const globals, read-only
-// structured buffers). Those are the storages we can reason about soundly:
-//   * distinct vars/params never alias (private storage, no escaping pointers);
+// only for *forwardable roots*: function-local vars, entry parameters, private
+// globals, and read-only globals (uniform/pushconstant buffers, const globals,
+// read-only structured buffers). Those are the storages we can reason about soundly:
+//   * distinct vars/params/private globals never alias (per-invocation storage,
+//     no escaping pointers, one pointer instruction per private global);
 //   * read-only globals are never written, so their loads are always reusable.
 // A per-root generation, bumped on every store to a root, invalidates only the
 // entries that share that root (same storage object -> may alias; different root
@@ -43,8 +44,14 @@ static uint32_t root_ptr(const svsl_ir_func_t *fn, uint32_t p) {
 	return p;
 }
 
-static bool is_local_var(const svsl_ir_func_t *fn, uint32_t p) {
-	return p < (uint32_t)fn->insts.count && fn->insts.items[p].op == svsl_ir_var;
+// Storage only this invocation can see, and only until the entry returns: local
+// vars, and private globals (one canonical pointer each - see ir_build's
+// lower_private_globals). Unread stores to it are dead.
+static bool is_invocation_local(const svsl_ir_func_t *fn, uint32_t p) {
+	if (p >= (uint32_t)fn->insts.count) return false;
+	const svsl_ir_inst_t *in = &fn->insts.items[p];
+	return in->op == svsl_ir_var ||
+	       (in->op == svsl_ir_ptr && (svsl_ref_)in->args[0] == svsl_ref_private_global);
 }
 
 // Region-nesting change contributed by a marker op (0 for else/case/terminators).
@@ -67,6 +74,7 @@ static bool forwardable_root(const svsl_ir_func_t *fn, const svsl_program_t *pro
 		return b->kind == svsl_block_uniform || b->kind == svsl_block_pushconstant;
 	}
 	case svsl_ref_const_global:
+	case svsl_ref_private_global: // written only by this invocation, through one canonical pointer
 		return true;
 	case svsl_ref_resource:
 		return prog->resources.items[in->args[1]].kind == svsl_res_structured; // read-only
@@ -141,7 +149,7 @@ bool svsl_ir_forward(svsl_arena_t *arena, svsl_ir_func_t *fn, const svsl_program
 				break;
 			}
 			// single-index load off a var whose whole value is live and dominates
-			if (p != r && is_local_var(fn, r) &&
+			if (p != r && is_invocation_local(fn, r) &&
 			    e_cf[r] != 0 && e_gen[r] == root_gen[r] && (e_dur[r] || e_cf[r] == cf)) {
 				const svsl_ir_inst_t *ch = &fn->insts.items[p];
 				if (ch->op == svsl_ir_chain && ch->args[0] == r && ch->aux_count == 1) {
@@ -245,7 +253,7 @@ static bool dse_overwriting(svsl_arena_t *arena, svsl_ir_func_t *fn) {
 		}
 		if (op == svsl_ir_store) {
 			uint32_t p = inst->args[0];
-			if (!is_local_var(fn, root_ptr(fn, p))) continue; // writable globals may be observed
+			if (!is_invocation_local(fn, root_ptr(fn, p))) continue; // writable globals may be observed
 			if (last[p] != SVSL_IR_NONE) {                    // prior store to p, unread -> dead
 				svsl_ir_inst_t *dead = &fn->insts.items[last[p]];
 				dead->op = svsl_ir_nop; dead->type = SVSL_TYPE_NONE; dead->aux_count = 0;
@@ -286,12 +294,12 @@ bool svsl_ir_dse(svsl_arena_t *arena, svsl_ir_func_t *fn) {
 		for (int32_t a = 0; a < 4; a++)
 			if (mask & (1u << a)) {
 				uint32_t r = root_ptr(fn, inst->args[a]);
-				if (is_local_var(fn, r)) read[r] = 1;
+				if (is_invocation_local(fn, r)) read[r] = 1;
 			}
 		if (svsl_ir_aux_holds_values(inst))
 			for (uint32_t k = 0; k < inst->aux_count; k++) {
 				uint32_t r = root_ptr(fn, fn->aux.items[inst->aux + k]);
-				if (is_local_var(fn, r)) read[r] = 1;
+				if (is_invocation_local(fn, r)) read[r] = 1;
 			}
 	}
 
@@ -299,7 +307,7 @@ bool svsl_ir_dse(svsl_arena_t *arena, svsl_ir_func_t *fn) {
 		svsl_ir_inst_t *inst = &fn->insts.items[i];
 		if (inst->op != svsl_ir_store) continue;
 		uint32_t r = root_ptr(fn, inst->args[0]);
-		if (is_local_var(fn, r) && !read[r]) {
+		if (is_invocation_local(fn, r) && !read[r]) {
 			inst->op        = svsl_ir_nop;
 			inst->type      = SVSL_TYPE_NONE;
 			inst->aux_count = 0;

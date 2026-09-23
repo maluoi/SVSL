@@ -127,6 +127,7 @@ typedef enum svsl_ref_ {
 	svsl_ref_matrix_elem,   // member: a = row, b = col
 	svsl_ref_bitfield,      // member: a = struct index, b = packed-field index
 	svsl_ref_enum_const,    // a = enum-constant index (a named integer constant)
+	svsl_ref_private_global, // a = private-global index (writable module-scope `static`)
 } svsl_ref_;
 
 typedef struct svsl_sema_ref_t {

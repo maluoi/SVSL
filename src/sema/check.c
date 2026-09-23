@@ -158,6 +158,7 @@ static bool expr_is_lvalue(check_t *c, const svsl_ast_expr_t *e) {
 		switch (e->sema_ref.kind) {
 		case svsl_ref_local:
 		case svsl_ref_workgroup:
+		case svsl_ref_private_global:
 			return true;
 		case svsl_ref_param: {
 			return true; // params are mutable locals in HLSL (in = copy)
@@ -186,6 +187,21 @@ static bool expr_is_lvalue(check_t *c, const svsl_ast_expr_t *e) {
 	}
 }
 
+// the identifier an lvalue's member/index chain is rooted at
+static const svsl_ast_expr_t *lvalue_root(const svsl_ast_expr_t *e) {
+	while (e->kind == svsl_expr_member || e->kind == svsl_expr_index)
+		e = e->kind == svsl_expr_member ? e->member.object : e->index.object;
+	return e;
+}
+// storage only this invocation sees (locals, params, private globals): no
+// atomics - Vulkan allows them on workgroup, buffer, and image memory only
+static bool lvalue_is_per_invocation(const svsl_ast_expr_t *e) {
+	const svsl_ast_expr_t *root = lvalue_root(e);
+	if (root->kind != svsl_expr_ident) return false;
+	return root->sema_ref.kind == svsl_ref_local || root->sema_ref.kind == svsl_ref_param ||
+	       root->sema_ref.kind == svsl_ref_private_global;
+}
+
 // duplicate components make a swizzle unwritable (c.xx = ...)
 static bool swizzle_write_has_dup(const svsl_ast_expr_t *e) {
 	if (e->kind != svsl_expr_member || e->sema_ref.kind != svsl_ref_swizzle) return false;
@@ -209,7 +225,7 @@ static svsl_type_id_t resolve_ident(check_t *c, svsl_ast_expr_t *e) {
 			return c->locals.items[i].type;
 		}
 	}
-	for (int32_t i = 0; i < c->func->param_count; i++) {
+	for (int32_t i = 0; c->func && i < c->func->param_count; i++) { // no func: a global initializer
 		if (svsl_str_eq(c->func->params[i]->name, name)) {
 			e->sema_ref = (svsl_sema_ref_t){ .kind = svsl_ref_param, .a = i };
 			return c->prog->functions.items[c->func_index].param_types[i];
@@ -234,6 +250,12 @@ static svsl_type_id_t resolve_ident(check_t *c, svsl_ast_expr_t *e) {
 		if (svsl_str_eq(c->prog->const_globals.items[i].name, name)) {
 			e->sema_ref = (svsl_sema_ref_t){ .kind = svsl_ref_const_global, .a = i };
 			return c->prog->const_globals.items[i].type;
+		}
+	}
+	for (int32_t i = 0; i < c->prog->private_globals.count; i++) {
+		if (svsl_str_eq(c->prog->private_globals.items[i].name, name)) {
+			e->sema_ref = (svsl_sema_ref_t){ .kind = svsl_ref_private_global, .a = i };
+			return c->prog->private_globals.items[i].type;
 		}
 	}
 	for (int32_t i = 0; i < c->prog->enum_consts.count; i++) {
@@ -813,6 +835,9 @@ static svsl_type_id_t check_special_intrinsic(check_t *c, svsl_ast_expr_t *e, co
 		}
 		if (!expr_is_lvalue(c, args[0]))
 			cerr(c, args[0]->loc, "atomic destination must be writable%.*s", (svsl_str_t){0});
+		else if (!img_dest && lvalue_is_per_invocation(args[0]))
+			cerr(c, args[0]->loc, "atomic destination must be groupshared memory, a RW buffer, or a "
+			     "storage image - '%.*s' is per-invocation storage", lvalue_root(args[0])->ident);
 		for (int32_t i = 1; i < base_args; i++)
 			if (!convert_to(c, args[i], dest)) return SVSL_TYPE_NONE;
 		if (is_alias && arg_count == base_args + 1) { // Interlocked* out-param form
@@ -1006,8 +1031,10 @@ static svsl_type_id_t check_user_call(check_t *c, svsl_ast_expr_t *e) {
 	}
 	e->call.callee->sema_ref = (svsl_sema_ref_t){ .kind = svsl_ref_function, .a = best };
 
-	svsl_array_push(c->arena, &c->call_edges, c->func_index);
-	svsl_array_push(c->arena, &c->call_edges, best);
+	if (c->func_index >= 0) { // a global initializer's calls can't form a cycle
+		svsl_array_push(c->arena, &c->call_edges, c->func_index);
+		svsl_array_push(c->arena, &c->call_edges, best);
+	}
 	return info->return_type;
 }
 
@@ -1328,6 +1355,19 @@ static void check_block(check_t *c, svsl_ast_stmt_t **stmts, int32_t count) {
 	c->depth--;
 }
 
+static void check_init(check_t *c, svsl_ast_expr_t *init, svsl_type_id_t type) {
+	if (init->kind != svsl_expr_init_list) {
+		if (check_expr(c, init) != SVSL_TYPE_NONE)
+			convert_to(c, init, type);
+		return;
+	}
+	// initializer list: check items only (IR assembles them)
+	for (int32_t k = 0; k < init->init_list.count; k++)
+		if (init->init_list.items[k]->kind != svsl_expr_init_list)
+			check_expr(c, init->init_list.items[k]);
+	init->sema_type = type;
+}
+
 static void check_var_decl(check_t *c, svsl_ast_stmt_t *s) {
 	for (int32_t i = 0; i < s->var_decl.count; i++) {
 		svsl_ast_var_t *var  = s->var_decl.vars[i];
@@ -1339,15 +1379,7 @@ static void check_var_decl(check_t *c, svsl_ast_stmt_t *s) {
 			cerr(c, var->loc, "resources cannot be declared locally ('%.*s')", var->name);
 			continue;
 		}
-		if (var->init && var->init->kind != svsl_expr_init_list) {
-			if (check_expr(c, var->init) != SVSL_TYPE_NONE)
-				convert_to(c, var->init, type);
-		} else if (var->init) { // initializer list: check items only (IR assembles them)
-			for (int32_t k = 0; k < var->init->init_list.count; k++)
-				if (var->init->init_list.items[k]->kind != svsl_expr_init_list)
-					check_expr(c, var->init->init_list.items[k]);
-			var->init->sema_type = type;
-		}
+		if (var->init) check_init(c, var->init, type);
 		svsl_array_push(c->arena, &c->locals, (check_local_t){
 			.name = var->name, .type = type, .depth = c->depth });
 	}
@@ -1445,7 +1477,14 @@ static bool find_cycle(check_t *c, int32_t func, uint8_t *state) {
 }
 
 void svsl_check_functions(svsl_arena_t *arena, svsl_program_t *prog, svsl_diag_list_t *ref_diags) {
-	check_t c = { .arena = arena, .prog = prog, .diags = ref_diags };
+	check_t c = { .arena = arena, .prog = prog, .diags = ref_diags, .func_index = -1 };
+
+	// private-global initializers, in module scope (no locals or params); they
+	// run at the top of each entry point, in declaration order
+	for (int32_t i = 0; i < prog->private_globals.count; i++) {
+		const svsl_ast_var_t *var = prog->private_globals.items[i].var;
+		if (var->init) check_init(&c, var->init, prog->private_globals.items[i].type);
+	}
 
 	for (int32_t f = 0; f < prog->functions.count; f++) {
 		svsl_func_info_t *info = &prog->functions.items[f];
