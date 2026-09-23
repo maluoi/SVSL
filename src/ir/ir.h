@@ -132,6 +132,12 @@ void svsl_ir_optimize(svsl_arena_t *arena, svsl_ir_func_t *fn,
 // driver can iterate to a fixpoint. Dead instructions become nops; indices stay
 // stable, so users never need patching.
 bool svsl_ir_fold   (svsl_ir_func_t *fn, const svsl_types_t *types); // constant folding
+
+// Integer constant conversion (sign-/zero-extend or truncate by the scalar kinds),
+// in svsl_ir_const's encoding: signed results sign-extended to 64 bits, unsigned
+// zero-extended. False unless both kinds are integers. Shared by lowering (so
+// `uint i = 0` / `i < 4` carry real constants even at -O0) and the fold pass.
+bool svsl_ir_int_convert_bits(uint64_t bits, svsl_scalar_ from, svsl_scalar_ to, uint64_t *out_bits);
 bool svsl_ir_peephole(svsl_arena_t *arena, svsl_ir_func_t *fn,       // pattern simplification
                       const svsl_types_t *types, svsl_opt_level_ level);
 bool svsl_ir_forward(svsl_arena_t *arena, svsl_ir_func_t *fn,        // store->load + redundant-load

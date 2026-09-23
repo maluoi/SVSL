@@ -233,14 +233,31 @@ Multisampled textures cannot be `Sample`d; fetch a specific sample with `Load`.
 argument is the **native spelling of `[[vk::image_format]]`**:
 
 ```c
-Image2D<float4>         img;            // format inferred/unknown
-Image2D<float4, rgba8>  img8;           // explicit format
+Image2D<float4>           img;          // no declared format: agnostic (SPIR-V Unknown)
+Image2D<float4, rgba8>    img8;         // explicit format
+Image2D<float4, unknown>  imgx;         // explicitly agnostic
 Image3D<T,F>  ImageCube<T,F>  Image1DArray<T,F>  Image2DArray<T,F>  ImageCubeArray<T,F>
 ```
 Format names are glslang's canonical layout-format spellings — what `skshaderc` accepts:
 `rgba32f rgba16f rg32f r32f rgba8 rgba8_snorm r11f_g11f_b10f rgb10_a2 rgba16 rgba32i rgba32ui
-r32i r32ui r16ui r8ui ...` (full set in `src/tables/formats.c`). `RWTexture*<T>` = HLSL
-aliases of `Image*<T>`.
+r32i r32ui r16ui r8ui ...` (full set in `src/tables/formats.c`), plus `unknown`.
+`RWTexture*<T>` = HLSL aliases of `Image*<T>`.
+
+**Omitting the format means the image is format-agnostic**, like DXC: the bound view's
+format drives the hardware's load/store conversion and the same shader works against any
+compatible view. A declared format is a promise the shader is only legal against a view of
+exactly that format. Agnostic images need the device features behind
+`StorageImageRead/WriteWithoutFormat`, which are declared per actual usage — a write-only
+image asks only for the write feature. Two consequences:
+
+- **Image atomics need a declared `r32f`, `r32i`, or `r32ui` format** (`Image2D<uint, r32ui>`).
+  Vulkan limits the image an atomic addresses to those three, so both an agnostic image and a
+  narrower declared format (`r8ui`, `r16ui`, …) are compile errors with `Interlocked*`.
+- **WGSL targets need an explicit format.** WebGPU makes the texel format part of the
+  storage texture type, so an *undeclared* format falls back to the texel-type inference
+  (`float4` → `rgba32float`) for WGSL only, while a declared `unknown` — a statement that
+  the format genuinely varies — skips the stage with a diagnostic. `#ifdef TARGET_WGSL`
+  (§11) is the way to give WebGPU a concrete format and Vulkan an agnostic one.
 
 **Subpass inputs** (input attachments) — tile-local reads of a previous render-pass
 attachment at the current fragment position; no sampler, no bandwidth cost on tilers.
@@ -543,7 +560,7 @@ memory round-trip — mark that local `precise` too.
 | `[[vk::binding(b, s)]]` | `register(b, s)` |
 | `[[vk::push_constant]]` | `pushconstant { }` |
 | `[[vk::constant_id(N)]]` | `[specialization(N)]`, or bare `specialization` (auto-id) |
-| `[[vk::image_format("rgba8")]]` | `Image2D<float4, rgba8>` |
+| `[[vk::image_format("rgba8")]]` | `Image2D<float4, rgba8>` (`"unknown"` / `unknown` for format-agnostic) |
 | `[[vk::input_attachment_index(N)]]` | `SubpassInput<T, N>`, or `SubpassInput<T>` (auto-index) |
 | `[[vk::location(N)]]` | `[location(N)]` |
 | `[[vk::offset(N)]]` | `[offset(N)]` |
@@ -858,7 +875,23 @@ Relaxed emits no memory-semantics bits (bit-identical to glslang); a stated orde
 emits its ordering bits combined with the destination's storage-class memory bit.
 `seq_cst` is rejected — the Vulkan memory model has no sequential consistency, so
 `acq_rel` is the strongest available. Order is native-only; the `Interlocked*`
-aliases keep their HLSL out-parameter form.
+aliases keep their HLSL out-parameter form — so a third argument is an order name
+on `atomic_*` and an out-parameter on `Interlocked*`, including on the storage-image
+destinations below.
+
+Storage images take both spellings, and the subscript and method forms lower
+identically:
+
+```c
+Image2D<uint, r32ui> counter;
+atomic_add(counter[p], 1u, acq_rel);     // native, ordered (ImageMemory semantics)
+InterlockedAdd(counter[p], 1u);          // HLSL free function
+counter.InterlockedAdd(p, 1u, prior);    // HLSL method, out-parameter form
+```
+
+`atomic_compare_exchange` has no storage-image form — the image atomic carries
+image, coord, and value with no comparator slot; use a buffer or `workgroup`
+destination.
 
 ### Barriers
 
@@ -887,6 +920,23 @@ original file/line through it):
 
 `include "file"` (no `#`) is the language-level form; it resolves through the same
 callback but is processed as a declaration, not textual paste, and is idempotent.
+
+**Target predefines.** Exactly one of `TARGET_SPIRV` or `TARGET_WGSL` is defined to `1`,
+naming the container's output language, so source can differ per target:
+
+```c
+#ifdef TARGET_WGSL
+Image2DArray<float4, rgba16f> dst;      // WebGPU needs a concrete texel format
+#else
+Image2DArray<float4, unknown> dst;      // Vulkan takes the view's format
+#endif
+```
+
+A container carries **one** language: the target is fixed before the preprocessor runs, and
+one container has a single reflection table, which could not describe two sources that
+declare different resources. Requesting both languages is an error — build twice (`svslc -t s`
+and `-t w`). These are ordinary predefines: a `-D` of the same name overrides them, and
+`#undef` works.
 
 ---
 

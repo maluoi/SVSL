@@ -46,6 +46,20 @@ static int64_t sign_ext(uint64_t bits, int32_t w) {
 	return (int64_t)((v ^ m) - m);
 }
 
+static bool scalar_is_int(svsl_scalar_ s) {
+	return s >= svsl_scalar_int8 && s <= svsl_scalar_uint64;
+}
+
+bool svsl_ir_int_convert_bits(uint64_t bits, svsl_scalar_ from, svsl_scalar_ to, uint64_t *out_bits) {
+	if (!scalar_is_int(from) || !scalar_is_int(to)) return false;
+	int32_t  fw = int_bit_width(from), tw = int_bit_width(to);
+	uint64_t v  = int_is_signed(from) ? (uint64_t)sign_ext(bits, fw)
+	                                  : bits & (fw >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << fw) - 1));
+	*out_bits = int_is_signed(to) ? (uint64_t)sign_ext(v, tw)
+	                              : v & (tw >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << tw) - 1));
+	return true;
+}
+
 static void replace_with_const(svsl_ir_inst_t *inst, uint64_t bits, bool *ref_changed) {
 	*ref_changed    = true;
 	inst->op        = svsl_ir_const;
@@ -138,6 +152,10 @@ bool svsl_ir_fold(svsl_ir_func_t *fn, const svsl_types_t *types) {
 			if (!const_bits(fn, inst->args[0], &a)) break;
 			const svsl_type_t *from = svsl_type_get(types, fn->insts.items[inst->args[0]].type);
 			if (from->kind != svsl_type_scalar) break;
+			if (svsl_ir_int_convert_bits(a, from->scalar, t->scalar, &v)) { // int <-> int
+				replace_with_const(inst, v, &changed);
+				break;
+			}
 			bool from_float = from->scalar == svsl_scalar_half || from->scalar == svsl_scalar_float32 ||
 			                  from->scalar == svsl_scalar_float16 || from->scalar == svsl_scalar_float64;
 			if (!from_float && foldable_float &&

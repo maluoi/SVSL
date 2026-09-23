@@ -85,6 +85,7 @@ typedef struct emit_t {
 
 	// pre-scan results: matching info for if/else
 	uint8_t *if_has_else; // per inst index of svsl_ir_if
+	uint8_t *loop_exit;   // per inst index: loop_exit_ role (see analyze_loop_exits)
 
 	bool    needs_depth_replacing;
 	uint8_t depth_mode; // conservative depth: 1 = DepthGreater, 2 = DepthLess
@@ -1233,6 +1234,72 @@ static void analyze_emit_liveness(emit_t *e, uint8_t *referenced) {
 	}
 }
 
+// Loop-top exit tests. `for`/`while` lower to `loop; <cond>; if (!cond) break;
+// end_if; <body>`. Emitted literally, that is a selection construct wrapped around
+// a break block. glslang instead ends the block after the loop header with one
+// conditional branch straight to the loop merge, and drivers key their loop
+// analysis on that shape: Adreno (Quest 3) never finished compiling sk_texenc's
+// ASTC 6x6 encoder in the selection form, and builds it in ~3.6s in glslang's
+// (docs/dev/case-study-astc-encoders.md). So a loop's first `if`, when it holds
+// only a `break`, is emitted as that exit branch. A `log_not` condition with no
+// other user folds into the branch by swapping its targets. Encoding only: the
+// IR keeps the plain if/break form every pass already understands.
+typedef enum loop_exit_ {
+	loop_exit_none = 0,
+	loop_exit_branch, // svsl_ir_if emitted as the conditional exit branch
+	loop_exit_skip,   // that if's break/end_if, or its folded log_not: emit nothing
+} loop_exit_;
+
+static int32_t next_live(const svsl_ir_func_t *fn, int32_t i) {
+	for (i++; i < fn->insts.count; i++)
+		if (fn->insts.items[i].op != svsl_ir_nop) return i;
+	return fn->insts.count;
+}
+
+static void analyze_loop_exits(emit_t *e) {
+	const svsl_ir_func_t *fn    = e->fn;
+	int32_t               n     = fn->insts.count;
+	bool                  found = false;
+	for (int32_t i = 0; i < n; i++) {
+		if (fn->insts.items[i].op != svsl_ir_loop) continue;
+		int32_t k = next_live(fn, i); // first control-flow op in the loop body
+		while (k < n && !svsl_ir_ends_run((svsl_ir_op_)fn->insts.items[k].op)) k = next_live(fn, k);
+		if (k >= n || fn->insts.items[k].op != svsl_ir_if) continue;
+		if (e->if_has_else[k] || fn->insts.items[k].args[1] != 0) continue; // else arm, or a [branch]/[flatten] hint to keep
+		int32_t brk = next_live(fn, k);
+		if (brk >= n || fn->insts.items[brk].op != svsl_ir_break) continue;
+		int32_t end = next_live(fn, brk);
+		if (end >= n || fn->insts.items[end].op != svsl_ir_end_if) continue;
+		e->loop_exit[k]   = loop_exit_branch;
+		e->loop_exit[brk] = loop_exit_skip;
+		e->loop_exit[end] = loop_exit_skip;
+		found = true;
+	}
+	if (!found) return;
+
+	// a negated condition used only by its exit branch is folded into it
+	uint8_t *uses = svsl_arena_alloc(e->arena, (size_t)n);
+	for (int32_t i = 0; i < n; i++) {
+		const svsl_ir_inst_t *inst = &fn->insts.items[i];
+		if (inst->op == svsl_ir_nop) continue;
+		uint32_t mask = svsl_ir_value_arg_mask(inst);
+		for (int32_t a = 0; a < 4; a++)
+			if ((mask & (1u << a)) && inst->args[a] < (uint32_t)n && uses[inst->args[a]] < 2)
+				uses[inst->args[a]]++;
+		if (svsl_ir_aux_holds_values(inst))
+			for (uint32_t k = 0; k < inst->aux_count; k++) {
+				uint32_t v = fn->aux.items[inst->aux + k];
+				if (v < (uint32_t)n && uses[v] < 2) uses[v]++;
+			}
+	}
+	for (int32_t k = 0; k < n; k++) {
+		if (e->loop_exit[k] != loop_exit_branch) continue;
+		uint32_t cond = fn->insts.items[k].args[0];
+		if (fn->insts.items[cond].op == svsl_ir_log_not && uses[cond] == 1)
+			e->loop_exit[cond] = loop_exit_skip;
+	}
+}
+
 #include "emit_intrinsics.inc"
 
 static void emit_body(emit_t *e, uint32_t fn_id, uint32_t void_type, uint32_t fn_type) {
@@ -1259,6 +1326,7 @@ static void emit_body(emit_t *e, uint32_t fn_id, uint32_t void_type, uint32_t fn
 			}
 		}
 	}
+	analyze_loop_exits(e); // needs if_has_else
 
 	const svsl_func_info_t *entry_info = svsl_program_func_info(e->prog, entry->func);
 	svsl_type_id_t          ret_type   = entry_info ? entry_info->return_type : SVSL_TYPE_NONE;
@@ -1409,6 +1477,7 @@ static void emit_body(emit_t *e, uint32_t fn_id, uint32_t void_type, uint32_t fn
 		if (op == svsl_ir_load && inst->args[0] == e->output_sroa_var) continue; // whole output load elided
 		if ((op == svsl_ir_const || op == svsl_ir_ptr || op == svsl_ir_undef) && !referenced[i])
 			continue; // a constant/pointer left orphaned by chain re-inlining or SROA
+		if (e->loop_exit[i] == loop_exit_skip) continue; // folded into a loop exit branch
 		emit_inst(e, i, inst, rt, ret_type);
 	}
 
@@ -1429,6 +1498,7 @@ bool svsl_spirv_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 	e.value_class       = svsl_arena_alloc(arena, (size_t)inst_count * 4);
 	e.value_spec        = svsl_arena_alloc(arena, (size_t)inst_count);
 	e.if_has_else       = svsl_arena_alloc(arena, (size_t)inst_count);
+	e.loop_exit         = svsl_arena_alloc(arena, (size_t)inst_count);
 	e.type_cap          = prog->types.types.count > 0 ? prog->types.types.count : 1;
 	e.type_ids          = svsl_arena_alloc(arena, (size_t)e.type_cap * 4);
 	for (int32_t l = 0; l < 4; l++)

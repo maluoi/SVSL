@@ -561,6 +561,18 @@ static const compute_cfg_t compute_cfgs[] = {
 	               { 18, .value = 0, .eps = 0.1f }, // [4] flag: !(4>3) = 0
 	               { 29, 1 },                       // [7] pair.y: 7>5
 	               { 31, 0x40600000 } } },          // [7] v = 3.5f
+	{ .file    = "check_loop_exit", // loop-top exit branches (glslang header-exit shape)
+	  .passes  = { { .dispatch = { 1, 1, 1 } } },
+	  .buffers = { { "results", 80, fill_zero } },
+	  // 10 words per thread t, each a loop form replayed on the CPU:
+	  // [0] sum i*t+1 (i<4)  [1] j=7..0 odd:+j even:-t  [2] c=t+1, *=3 while <100
+	  // [3] d=t, +=7 until >20  [4] e=t, +=5 until >=12  [5] sum m (m<t+2)
+	  // [6] odd n summed, break past 3t  [7] sum p*4+q+t (q<=p<3)
+	  // [8] k=t: break >30, k=2k+1 while <50  [9] first k<16 with (t+1)k>20, else 99
+	  .expect  = { {  0, 4 },  {  1, 16 }, {  2, 243 }, {  3, 21 }, {  4, 15 },
+	               {  5, 1 },  {  6, 1 },  {  7, 36 },  {  8, 31 }, {  9, 99 },   // t = 0
+	               { 71, 0xFFFFFFF4 }, { 72, 216 }, { 75, 36 }, { 76, 25 },
+	               { 78, 31 }, { 79, 3 } } },                                     // t = 7
 	{ .file    = "check_pack_half_vec", // vector f32tof16/f16tof32 lowering
 	  .passes  = { { .dispatch = { 1, 1, 1 } } },
 	  .buffers = { { "result", 9, fill_zero } },

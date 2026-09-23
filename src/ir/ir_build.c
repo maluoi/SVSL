@@ -162,7 +162,17 @@ static uint32_t convert_value(build_t *b, uint32_t value, svsl_type_id_t to, svs
 	if (f->scalar != t->scalar) {
 		svsl_type_id_t mid = fc == 1 ? svsl_type_scalar_id(types, t->scalar)
 		                             : svsl_type_vector_id(types, t->scalar, fc);
-		value = emit_op(b, svsl_ir_convert, mid, value, 0, 0, loc);
+		// an integer literal/constant changing integer type is just new bits: emit
+		// the constant directly (glslang types literals the same way), so loop
+		// bounds like `i < 4` on a uint compare against a real OpConstant
+		const svsl_ir_inst_t *src = &b->fn->insts.items[value];
+		uint64_t bits;
+		if (fc == 1 && src->op == svsl_ir_const &&
+		    svsl_ir_int_convert_bits((uint64_t)src->args[0] | ((uint64_t)src->args[1] << 32),
+		                             f->scalar, t->scalar, &bits))
+			value = emit_const_bits(b, mid, bits, loc);
+		else
+			value = emit_op(b, svsl_ir_convert, mid, value, 0, 0, loc);
 		from  = mid;
 	}
 	if (fc == tc) return value;

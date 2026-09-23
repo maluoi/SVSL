@@ -537,6 +537,19 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 	switch (op) {
 	case svsl_ir_if: {
 		ensure_block(e);
+		if (e->loop_exit[i] == loop_exit_branch) { // see analyze_loop_exits
+			struct cf_frame *f    = &e->cf[e->cf_depth - 1]; // the loop: no CF op since its header
+			uint32_t         body = svsl_spv_id(spv);
+			uint32_t         cond = inst->args[0];
+			if (e->loop_exit[cond] == loop_exit_skip) // folded `!c`: stay in the loop while c
+				svsl_spv_inst3(spv, fs, SpvOpBranchConditional,
+				               e->value_ids[e->fn->insts.items[cond].args[0]], body, f->merge);
+			else
+				svsl_spv_inst3(spv, fs, SpvOpBranchConditional, e->value_ids[cond], f->merge, body);
+			e->terminated = true;
+			begin_block(e, body);
+			return;
+		}
 		uint32_t merge = svsl_spv_id(spv);
 		uint32_t then  = svsl_spv_id(spv);
 		uint32_t other = e->if_has_else[i] ? svsl_spv_id(spv) : merge;
