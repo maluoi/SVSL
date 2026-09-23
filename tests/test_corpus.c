@@ -4,6 +4,7 @@
 // against the Vulkan 1.1 environment.
 
 #include "test.h"
+#include "test_spv.h"
 
 #include "front/lexer.h"
 #include "front/parser.h"
@@ -163,6 +164,48 @@ static void corpus_check_dir(const char *subdir, int32_t *ref_count) {
 	}
 }
 
+// The shader that exposed Adreno's loop-shape and array-copy sensitivity
+// (docs/dev/case-study-astc-encoders.md): sk_texenc's original ASTC 6x6 encoder.
+// Its SPIR-V must keep glslang's loop exit shape on every [unroll] loop, never
+// copy a whole array (mode functions take float4[36] parameters), and never
+// bitcast a literal - each of those regressions cost minutes-long or runaway
+// pipeline creation on Quest 3, which no desktop test would notice.
+static void test_corpus_texenc_regression(void) {
+	char path[1024];
+	snprintf(path, sizeof(path), "%s/shaders/texenc/astc6x6_compress.hlsl", SVSL_TEST_DIR);
+	svsl_arena_t arena = {0};
+	char        *src   = read_file(&arena, path, NULL);
+	TEST_CHECK(src != NULL);
+	if (!src) { svsl_arena_free(&arena); return; }
+
+	for (int32_t level = svsl_opt_none; level <= svsl_opt_aggressive; level++) {
+		svsl_pp_options_t opt = { .include_cb = corpus_include, .include_user = &arena };
+		test_spv_t        spv;
+		test_spv_compile(&arena, src, path, &opt, (svsl_opt_level_)level, &spv);
+		TEST_CHECK(spv.ok && spv.blob_count == 1);
+		if (!spv.ok || spv.blob_count != 1) continue;
+		const svsl_spirv_blob_t *b = &spv.blobs[0];
+		int32_t unroll_loops = 0;
+		for (int32_t i = 5; i < b->word_count; ) {
+			uint32_t wc = b->words[i] >> 16;
+			if (wc == 0) break;
+			if ((b->words[i] & 0xFFFF) == SpvOpLoopMerge && (b->words[i + 3] & SpvLoopControlUnrollMask))
+				unroll_loops++;
+			i += (int32_t)wc;
+		}
+		int32_t exits = test_spv_loop_exits(b, NULL);
+		TEST_CHECK(unroll_loops >= 60);           // the encoder's [unroll] for-loops
+		TEST_CHECK(exits >= unroll_loops);        // each exits from its condition block
+		TEST_CHECK(test_spv_count(b, SpvOpLogicalNot, -1, -1) == 0); // no `!cond` + selection exits
+		TEST_CHECK(test_spv_array_loads(b) == 0); // no whole-array parameter copies
+		TEST_CHECK(test_spv_const_bitcasts(b) == 0);
+		if (exits < unroll_loops || test_spv_array_loads(b) != 0 || test_spv_const_bitcasts(b) != 0)
+			printf("  texenc -O%d: %d [unroll] loops, %d exits, %d array loads, %d const bitcasts\n", level,
+			       unroll_loops, exits, test_spv_array_loads(b), test_spv_const_bitcasts(b));
+	}
+	svsl_arena_free(&arena);
+}
+
 static void test_corpus_metadata(void) {
 	// spot-check that a known shader's metadata comes through
 	char path[1024];
@@ -194,8 +237,11 @@ void test_corpus(void) {
 	corpus_check_dir("ported",    &count);
 	corpus_check_dir("morrowind", &count);
 	corpus_check_dir("checks",    &count);
+	corpus_check_dir("texenc",    &count);
 	printf("  corpus: %d shaders\n", count);
-	TEST_CHECK(count >= 121); // 17 builtin + 11 examples + 72 ported + 19 morrowind + checks
+	TEST_CHECK(count >= 127); // 17 builtin + 11 examples + 72 ported + 19 morrowind + 6 texenc + checks
+
+	test_corpus_texenc_regression();
 
 	test_corpus_metadata();
 }

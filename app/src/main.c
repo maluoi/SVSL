@@ -114,15 +114,17 @@ int main(int argc, char **argv) {
 		}
 	}
 	if (test_dir_count == 0 && !single_file) { // default: the pinned corpus
-		static char builtin_dir[1024], examples_dir[1024], morrowind_dir[1024], checks_dir[1024];
+		static char builtin_dir[1024], examples_dir[1024], morrowind_dir[1024], checks_dir[1024], texenc_dir[1024];
 		snprintf(builtin_dir, sizeof(builtin_dir), "%s/builtin", SVSL_SHADER_DIR);
 		snprintf(examples_dir, sizeof(examples_dir), "%s/examples", SVSL_SHADER_DIR);
 		snprintf(morrowind_dir, sizeof(morrowind_dir), "%s/morrowind", SVSL_SHADER_DIR);
 		snprintf(checks_dir, sizeof(checks_dir), "%s/checks", SVSL_SHADER_DIR);
+		snprintf(texenc_dir, sizeof(texenc_dir), "%s/texenc", SVSL_SHADER_DIR);
 		test_dirs[test_dir_count++] = builtin_dir;
 		test_dirs[test_dir_count++] = examples_dir;
 		test_dirs[test_dir_count++] = morrowind_dir;
 		test_dirs[test_dir_count++] = checks_dir;
+		test_dirs[test_dir_count++] = texenc_dir;
 	}
 	if (!out_dir) { // default: compare/ next to the binary, so results are easy to find
 		static char default_out[1024];

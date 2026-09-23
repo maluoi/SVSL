@@ -680,8 +680,16 @@ static void create_globals(emit_t *e) {
 	}
 
 	// private globals: zero-initialized Private variables (initializers are
-	// stores in each entry's prologue - see ir_build's lower_private_globals)
+	// stores in each entry's prologue - see ir_build's lower_private_globals).
+	// Only the ones this entry still references after optimization are declared.
+	uint8_t *private_used = svsl_arena_alloc(e->arena, (size_t)(prog->private_globals.count > 0 ? prog->private_globals.count : 1));
+	for (int32_t i = 0; i < e->fn->insts.count; i++) {
+		const svsl_ir_inst_t *in = &e->fn->insts.items[i];
+		if (in->op == svsl_ir_ptr && (svsl_ref_)in->args[0] == svsl_ref_private_global)
+			private_used[in->args[1]] = 1;
+	}
 	for (int32_t i = 0; i < prog->private_globals.count; i++) {
+		if (!private_used[i]) continue;
 		const svsl_global_t *g    = &prog->private_globals.items[i];
 		uint32_t             type = spv_type_for(e, g->type);
 		uint32_t             ptr  = spv_ptr_type(e, SpvStorageClassPrivate, type);
@@ -1248,16 +1256,18 @@ static void analyze_emit_liveness(emit_t *e, uint8_t *referenced) {
 	}
 }
 
-// Loop-top exit tests. `for`/`while` lower to `loop; <cond>; if (!cond) break;
-// end_if; <body>`. Emitted literally, that is a selection construct wrapped around
-// a break block. glslang instead ends the block after the loop header with one
-// conditional branch straight to the loop merge, and drivers key their loop
-// analysis on that shape: Adreno (Quest 3) never finished compiling sk_texenc's
-// ASTC 6x6 encoder in the selection form, and builds it in ~3.6s in glslang's
-// (docs/dev/case-study-astc-encoders.md). So a loop's first `if`, when it holds
-// only a `break`, is emitted as that exit branch. A `log_not` condition with no
-// other user folds into the branch by swapping its targets. Encoding only: the
-// IR keeps the plain if/break form every pass already understands.
+// Loop exit tests. `for`/`while` lower their condition to `if (!cond) break;`
+// (flagged svsl_ir_flag_loop_exit by ir_build). Emitted literally, that is a
+// selection construct wrapped around a break block. glslang instead ends the
+// condition's block with one conditional branch straight to the loop merge, and
+// drivers key their loop analysis on that shape: Adreno (Quest 3) could not
+// compile a large encoder in the selection form in any usable time
+// (docs/dev/case-study-astc-encoders.md has the measurements). So each flagged
+// test is emitted as that exit branch - usually right after the header, or after
+// whatever constructs the condition itself lowered to (an inlined call's early
+// return). A `log_not` condition with no other user folds into the branch by
+// swapping its targets. Encoding only: the IR keeps the plain if/break form every
+// pass already understands.
 typedef enum loop_exit_ {
 	loop_exit_none = 0,
 	loop_exit_branch, // svsl_ir_if emitted as the conditional exit branch
@@ -1274,12 +1284,10 @@ static void analyze_loop_exits(emit_t *e) {
 	const svsl_ir_func_t *fn    = e->fn;
 	int32_t               n     = fn->insts.count;
 	bool                  found = false;
-	for (int32_t i = 0; i < n; i++) {
-		if (fn->insts.items[i].op != svsl_ir_loop) continue;
-		int32_t k = next_live(fn, i); // first control-flow op in the loop body
-		while (k < n && !svsl_ir_ends_run((svsl_ir_op_)fn->insts.items[k].op)) k = next_live(fn, k);
-		if (k >= n || fn->insts.items[k].op != svsl_ir_if) continue;
-		if (e->if_has_else[k] || fn->insts.items[k].args[1] != 0) continue; // else arm, or a [branch]/[flatten] hint to keep
+	for (int32_t k = 0; k < n; k++) {
+		const svsl_ir_inst_t *in = &fn->insts.items[k];
+		if (in->op != svsl_ir_if || !(in->flags & svsl_ir_flag_loop_exit)) continue;
+		if (e->if_has_else[k] || in->args[1] != 0) continue; // defensive: build never makes these
 		int32_t brk = next_live(fn, k);
 		if (brk >= n || fn->insts.items[brk].op != svsl_ir_break) continue;
 		int32_t end = next_live(fn, brk);

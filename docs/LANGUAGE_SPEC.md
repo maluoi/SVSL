@@ -427,7 +427,8 @@ workgroup float4 tile[8][8];        // shared memory ('groupshared' = alias)
 A non-const `static` is writable, per-invocation storage (SPIR-V `Private`, WGSL
 `var<private>`). Its initializer may be any expression valid at module scope (cbuffer
 members, earlier statics, function calls), and runs at the start of every entry point, in
-declaration order. Without one it starts at zero. Because it's writable, a non-const
+declaration order. Without one it starts at zero. An initializer may use only statics
+declared *before* it (a later one hasn't been initialized yet, so it's a compile error). Because it's writable, a non-const
 `static` is never a compile-time constant: array sizes and other constant contexts need
 `static const`. Resources can't be `static`.
 
@@ -674,7 +675,13 @@ Statements: `if/else`, `for`, `while`, `do`, `switch/case/default`, `break`, `co
 - `demote` — demote to helper invocation (`DemoteToHelperInvocation` capability):
   derivatives keep working after it, unlike `discard`. `is_helper_invocation()` queries.
 
-Functions support `in` (default), `out`, `inout` parameters. **Resource types (textures,
+Functions support `in` (default), `out`, `inout` parameters. Arguments evaluate left to
+right, but a plain lvalue argument (a variable, element, member, or swizzle of one) is only
+*addressed* in that pass. Its value is read once every argument has run, as the call starts,
+so `f(x, x++)` passes the incremented `x` and `f(a, fill(a))` sees what `fill` wrote. An
+argument that needs a conversion, or is a computed value, is evaluated at its own position.
+`inout` arguments copy in at the same point, and `out`/`inout` arguments write back after the
+call returns. This matches glslang. **Resource types (textures,
 images, samplers) may be passed as function parameters** — calls are fully inlined during
 compilation, so the resource resolves to its global declaration:
 

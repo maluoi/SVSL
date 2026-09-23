@@ -28,6 +28,8 @@ typedef struct check_t {
 	int32_t                     depth;
 
 	svsl_array_t(int32_t) call_edges; // pairs (caller, callee)
+
+	int32_t init_private; // checking private global #n's initializer: only 0..n-1 have run; -1 otherwise
 } check_t;
 
 static void cerr(check_t *c, svsl_loc_t loc, const char *fmt, svsl_str_t arg) {
@@ -260,6 +262,10 @@ static svsl_type_id_t resolve_ident(check_t *c, svsl_ast_expr_t *e) {
 	}
 	for (int32_t i = 0; i < c->prog->private_globals.count; i++) {
 		if (svsl_str_eq(c->prog->private_globals.items[i].name, name)) {
+			// initializers run in declaration order: a later static still holds zero
+			if (c->init_private >= 0 && i >= c->init_private)
+				cerr(c, e->loc, "static '%.*s' is used in an initializer before its own "
+				     "initializer has run (declare it earlier)", name);
 			e->sema_ref = (svsl_sema_ref_t){ .kind = svsl_ref_private_global, .a = i };
 			return c->prog->private_globals.items[i].type;
 		}
@@ -1483,14 +1489,16 @@ static bool find_cycle(check_t *c, int32_t func, uint8_t *state) {
 }
 
 void svsl_check_functions(svsl_arena_t *arena, svsl_program_t *prog, svsl_diag_list_t *ref_diags) {
-	check_t c = { .arena = arena, .prog = prog, .diags = ref_diags, .func_index = -1 };
+	check_t c = { .arena = arena, .prog = prog, .diags = ref_diags, .func_index = -1, .init_private = -1 };
 
 	// private-global initializers, in module scope (no locals or params); they
 	// run at the top of each entry point, in declaration order
 	for (int32_t i = 0; i < prog->private_globals.count; i++) {
 		const svsl_ast_var_t *var = prog->private_globals.items[i].var;
+		c.init_private = i;
 		if (var->init) check_init(&c, var->init, prog->private_globals.items[i].type);
 	}
+	c.init_private = -1;
 
 	for (int32_t f = 0; f < prog->functions.count; f++) {
 		svsl_func_info_t *info = &prog->functions.items[f];

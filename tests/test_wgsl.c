@@ -725,6 +725,7 @@ void test_wgsl(void) {
 	wgsl_sweep_dir("ported",    &emitted, &skipped);
 	wgsl_sweep_dir("morrowind", &emitted, &skipped);
 	wgsl_sweep_dir("checks",    &emitted, &skipped);
+	wgsl_sweep_dir("texenc",    &emitted, &skipped);
 	printf("  wgsl corpus: %d emitted, %d skipped%s%s\n", emitted, skipped,
 	       have_naga() ? " (naga-validated)" : "",
 	       have_tint() ? " (tint-validated)" : "");

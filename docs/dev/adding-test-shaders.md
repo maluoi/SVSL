@@ -14,6 +14,7 @@ end before declaring a new test done.
 | `tests/shaders/builtin/`   | pinned StereoKit builtins   | no — overwritten by `refresh.sh` |
 | `tests/shaders/examples/`  | pinned StereoKit examples   | no — overwritten by `refresh.sh` |
 | `tests/shaders/morrowind/` | pinned SKMorrowind corpus   | no — overwritten by `refresh.sh` |
+| `tests/shaders/texenc/`    | frozen sk_renderer GPU texture encoders (the Adreno regression case) | no — keep the original form; not refreshed |
 | `tests/shaders/include/`   | headers only, never compiled directly | — |
 
 Never add a hand-written test to a pinned directory — the next `refresh.sh`
@@ -24,7 +25,7 @@ deletes it. Give check shaders a `//--name = check/<feature>` first-line tag.
 Two harnesses pick shaders up:
 
 1. **Corpus compile test** (`ctest --test-dir build`, `test_corpus.c`): every
-   `.hlsl`/`.svsl` in all five directories runs the full pipeline and, when
+   `.hlsl`/`.svsl` in all six directories runs the full pipeline and, when
    `spirv-val` is on PATH, validates. This is free — the file existing is enough.
    It proves *compiles + valid SPIR-V*, nothing about behavior.
 2. **svsl_view** (`./build/app/svsl_view -test tests/shaders`): compiles with
@@ -178,6 +179,7 @@ looks wrong, temporarily read buffers back between passes in `run_compute`.
 | `skip compute-only (no test config)` | your shader is NOT tested — write the config |
 | `FAILED: outputs untouched` | the dispatch didn't run or wrote nothing: look for `[skr:crit] ... missing binding` (buffer name mismatch? parameter in a named cbuffer? — §5) |
 | `no reference (skshaderc can't compile)` on a *render* shader | expected for SVSL-native syntax; only compile+validate covers it |
+| `(WARNING: blank render)` on an `ok` line | both images are one flat color, so the match proves nothing. Either the output really is near-uniform (make it vary across the surface), or nothing drew: a render shader reading a *named* `cbuffer` came out black in both pipelines, and moving the value to a loose `$Global` uniform fixed it (`check_static_stages`) |
 | golden mismatch | rerun with `-file` for per-entry expected/got lines |
 | bit-exact fails after a toolchain bump | check whether skshaderc's optimizer changed, and the divergence list in §3, before suspecting svslc |
 | `(smoke only)` in an ok line | the entry has no goldens — add some |

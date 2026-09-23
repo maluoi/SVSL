@@ -147,6 +147,36 @@ static uint32_t emit_zero(build_t *b, svsl_type_id_t type, svsl_loc_t loc) {
 
 // --- conversions ------------------------------------------------------------------
 
+// An integer constant, or a vector constructed from integer constants, re-typed
+// to another integer scalar kind: new constants, no conversion op. SVSL_IR_NONE
+// when `value` isn't such a constant.
+static uint32_t int_const_convert(build_t *b, uint32_t value, svsl_scalar_ from, svsl_scalar_ to,
+                                  svsl_type_id_t to_type, svsl_loc_t loc) {
+	const svsl_ir_inst_t *src = &b->fn->insts.items[value];
+	uint64_t bits;
+	if (src->op == svsl_ir_const) {
+		if (!svsl_ir_int_convert_bits((uint64_t)src->args[0] | ((uint64_t)src->args[1] << 32), from, to, &bits))
+			return SVSL_IR_NONE;
+		return emit_const_bits(b, to_type, bits, loc);
+	}
+	if (src->op != svsl_ir_construct || src->aux_count > 4) return SVSL_IR_NONE;
+	uint64_t converted[4]; // every part must qualify before any constant is emitted
+	uint32_t count = src->aux_count;
+	for (uint32_t k = 0; k < count; k++) {
+		const svsl_ir_inst_t *part = &b->fn->insts.items[b->fn->aux.items[src->aux + k]];
+		if (part->op != svsl_ir_const ||
+		    !svsl_ir_int_convert_bits((uint64_t)part->args[0] | ((uint64_t)part->args[1] << 32), from, to, &converted[k]))
+			return SVSL_IR_NONE;
+	}
+	svsl_type_id_t scalar_type = svsl_type_scalar_id(&b->prog->types, to);
+	uint32_t       parts[4];
+	for (uint32_t k = 0; k < count; k++)
+		parts[k] = emit_const_bits(b, scalar_type, converted[k], loc);
+	return emit(b, (svsl_ir_inst_t){ .op = svsl_ir_construct, .type = to_type,
+	                                 .args = { 0, 0, 0, SVSL_IR_NONE },
+	                                 .aux = aux_push(b, parts, count), .aux_count = count, .loc = loc });
+}
+
 static uint32_t convert_value(build_t *b, uint32_t value, svsl_type_id_t to, svsl_loc_t loc) {
 	if (value == SVSL_IR_NONE) return value; // void call results
 	svsl_type_id_t from = value_type(b, value);
@@ -166,14 +196,8 @@ static uint32_t convert_value(build_t *b, uint32_t value, svsl_type_id_t to, svs
 		// an integer literal/constant changing integer type is just new bits: emit
 		// the constant directly (glslang types literals the same way), so loop
 		// bounds like `i < 4` on a uint compare against a real OpConstant
-		const svsl_ir_inst_t *src = &b->fn->insts.items[value];
-		uint64_t bits;
-		if (fc == 1 && src->op == svsl_ir_const &&
-		    svsl_ir_int_convert_bits((uint64_t)src->args[0] | ((uint64_t)src->args[1] << 32),
-		                             f->scalar, t->scalar, &bits))
-			value = emit_const_bits(b, mid, bits, loc);
-		else
-			value = emit_op(b, svsl_ir_convert, mid, value, 0, 0, loc);
+		uint32_t folded = int_const_convert(b, value, f->scalar, t->scalar, mid, loc);
+		value = folded != SVSL_IR_NONE ? folded : emit_op(b, svsl_ir_convert, mid, value, 0, 0, loc);
 		from  = mid;
 	}
 	if (fc == tc) return value;
@@ -468,6 +492,7 @@ static uint32_t lower_binary(build_t *b, const svsl_ast_expr_t *e);
 static uint32_t lower_call(build_t *b, const svsl_ast_expr_t *e);
 static uint32_t lower_ctor(build_t *b, const svsl_ast_expr_t *e);
 static uint32_t lower_init(build_t *b, const svsl_ast_expr_t *e, svsl_type_id_t type);
+static uint32_t swizzle_value(build_t *b, uint32_t vec, const svsl_ast_expr_t *e);
 
 static svsl_ir_op_ binop_ir(svsl_tok_ op) {
 	switch (op) {
@@ -994,10 +1019,10 @@ static void emit_return_guard(build_t *b, svsl_loc_t loc) {
 //     out/inout write back only after the call), or read-only memory (const
 //     globals, cbuffer/push-constant members). Writable globals (private,
 //     groupshared, RW buffers) keep the copy: the callee could write them.
-// The argument must also already have the parameter's exact type (no conversion).
+// The caller also requires the pointer's type to be the parameter's exact type.
 static bool arg_by_reference(const build_t *b, const svsl_func_info_t *info, int32_t param,
                              const svsl_ast_expr_t *arg) {
-	if (info->param_written[param] || arg->sema_type != info->param_types[param]) return false;
+	if (info->param_written[param]) return false;
 	svsl_type_kind_ kind = svsl_type_get(&b->prog->types, info->param_types[param])->kind;
 	if (kind != svsl_type_array && kind != svsl_type_struct) return false; // scalars/vectors forward
 	const svsl_ast_expr_t *root = svsl_ast_lvalue_root(arg);
@@ -1026,38 +1051,74 @@ static uint32_t lower_user_call(build_t *b, const svsl_ast_expr_t *e) {
 		(size_t)(func->param_count > 0 ? func->param_count : 1) * sizeof(uint32_t));
 	uint32_t *out_ptrs = svsl_arena_alloc(b->arena,
 		(size_t)(func->param_count > 0 ? func->param_count : 1) * sizeof(uint32_t));
+	uint32_t *read_ptrs = svsl_arena_alloc(b->arena,
+		(size_t)(func->param_count > 0 ? func->param_count : 1) * sizeof(uint32_t));
+	const svsl_ast_expr_t **read_swz = svsl_arena_alloc(b->arena,
+		(size_t)(func->param_count > 0 ? func->param_count : 1) * sizeof(*read_swz));
 
+	// Arguments evaluate left to right, but a plain lvalue argument (`x`, `a[i]`,
+	// `s.m`, `v.x`, `v.xy`) is only *addressed* in that pass - its value is read once
+	// every argument has run, as the call starts. That is glslang's order, and what
+	// the author means by `f(x, x++)` or `f(a, fill(a))`: the callee sees the updated
+	// x / a. An argument that needs a conversion, or isn't an lvalue, is a value at
+	// its own position (glslang evaluates those in order too).
 	for (int32_t i = 0; i < func->param_count; i++) {
-		out_ptrs[i] = SVSL_IR_NONE;
-		const svsl_type_t *pt = svsl_type_get(&b->prog->types, info->param_types[i]);
+		out_ptrs[i]  = SVSL_IR_NONE;
+		read_ptrs[i] = SVSL_IR_NONE;
+		read_swz[i]  = NULL;
+		const svsl_ast_expr_t *arg = e->call.args[i];
+		const svsl_type_t     *pt  = svsl_type_get(&b->prog->types, info->param_types[i]);
 		bool opaque = pt->kind == svsl_type_texture || pt->kind == svsl_type_sampler ||
 		              pt->kind == svsl_type_image || pt->kind == svsl_type_buffer ||
 		              pt->kind == svsl_type_subpass;
 		if (opaque) { // resolves to the caller's resource - the prototype-killer fix
-			param_vars[i] = RES_MARK | (uint32_t)resolve_resource(b, e->call.args[i]);
+			param_vars[i] = RES_MARK | (uint32_t)resolve_resource(b, arg);
 			continue;
 		}
 		uint8_t dir = func->params[i]->dir;
-		if (dir != svsl_dir_out && dir != svsl_dir_inout && arg_by_reference(b, info, i, e->call.args[i])) {
-			uint32_t ptr = lower_lvalue(b, e->call.args[i]);
-			if (ptr != SVSL_IR_NONE) { param_vars[i] = ptr; continue; }
+		bool    out = dir == svsl_dir_out || dir == svsl_dir_inout;
+		// a multi-component swizzle has no pointer: address its object, swizzle on read
+		const svsl_ast_expr_t *swz = !out && arg->kind == svsl_expr_member &&
+		                             arg->sema_ref.kind == svsl_ref_swizzle && arg->sema_ref.b > 1 ? arg : NULL;
+		uint32_t ptr = lower_lvalue(b, swz ? swz->member.object : arg);
+		if (out && ptr == SVSL_IR_NONE) { berr(b, arg->loc, "out argument needs storage"); return 0; }
+		// the value's own type (sema's annotation already holds the converted one)
+		svsl_type_id_t natural = SVSL_TYPE_NONE;
+		if (ptr != SVSL_IR_NONE) {
+			natural = b->fn->insts.items[ptr].type;
+			if (swz) natural = svsl_type_vector_id(&b->prog->types,
+				svsl_type_get(&b->prog->types, natural)->scalar, swz->sema_ref.b);
 		}
-		uint32_t var = emit(b, (svsl_ir_inst_t){ .op = svsl_ir_var, .type = info->param_types[i],
-		                                         .args = { 0, 0, 0, SVSL_IR_NONE },
-		                                         .loc = e->loc, .name = func->params[i]->name });
-		param_vars[i] = var;
-		if (dir == svsl_dir_out || dir == svsl_dir_inout) {
-			uint32_t ptr = lower_lvalue(b, e->call.args[i]);
-			if (ptr == SVSL_IR_NONE) { berr(b, e->call.args[i]->loc, "out argument needs storage"); return 0; }
-			out_ptrs[i] = ptr;
-			if (dir == svsl_dir_inout) {
-				uint32_t init = emit_op(b, svsl_ir_load, info->param_types[i], ptr, 0, 0, e->loc);
-				emit_op(b, svsl_ir_store, SVSL_TYPE_NONE, var, init, 0, e->loc);
-			}
-		} else {
-			uint32_t value = lower_expr(b, e->call.args[i]);
-			emit_op(b, svsl_ir_store, SVSL_TYPE_NONE, var, value, 0, e->loc);
+		bool exact = natural == info->param_types[i];
+		if (!out && exact && !swz && arg_by_reference(b, info, i, arg)) {
+			param_vars[i] = ptr; // read in place while the callee runs
+			continue;
 		}
+		param_vars[i] = emit(b, (svsl_ir_inst_t){ .op = svsl_ir_var, .type = info->param_types[i],
+		                                          .args = { 0, 0, 0, SVSL_IR_NONE },
+		                                          .loc = e->loc, .name = func->params[i]->name });
+		if (out) out_ptrs[i] = ptr;
+		if (dir == svsl_dir_out) continue;
+		if (exact) { // in / inout lvalue: copied in below
+			read_ptrs[i] = ptr;
+			read_swz[i]  = swz;
+			continue;
+		}
+		uint32_t value;
+		if (ptr == SVSL_IR_NONE) {
+			value = lower_expr(b, arg);
+		} else { // converted lvalue: read it now, through the pointer already built
+			value = emit_op(b, svsl_ir_load, b->fn->insts.items[ptr].type, ptr, 0, 0, arg->loc);
+			if (swz) value = swizzle_value(b, value, swz);
+			value = convert_value(b, value, info->param_types[i], arg->loc);
+		}
+		emit_op(b, svsl_ir_store, SVSL_TYPE_NONE, param_vars[i], value, 0, e->loc);
+	}
+	for (int32_t i = 0; i < func->param_count; i++) { // copy-in, now that every argument has run
+		if (read_ptrs[i] == SVSL_IR_NONE) continue;
+		uint32_t value = emit_op(b, svsl_ir_load, b->fn->insts.items[read_ptrs[i]].type, read_ptrs[i], 0, 0, e->loc);
+		if (read_swz[i]) value = swizzle_value(b, value, read_swz[i]);
+		emit_op(b, svsl_ir_store, SVSL_TYPE_NONE, param_vars[i], value, 0, e->loc);
 	}
 
 	const svsl_type_t *rt = svsl_type_get(&b->prog->types, info->return_type);
@@ -1152,6 +1213,24 @@ static uint32_t construct(build_t *b, svsl_type_id_t type, const uint32_t *parts
 	return emit(b, (svsl_ir_inst_t){ .op = svsl_ir_construct, .type = type,
 	                                 .args = { 0, 0, 0, SVSL_IR_NONE },
 	                                 .aux = aux, .aux_count = count, .loc = loc });
+}
+
+// A swizzle node (`.xy`, `.x`, `.xxx` on a scalar) applied to its object's value.
+// Shuffles/extracts keep the object's component type; the caller converts.
+static uint32_t swizzle_value(build_t *b, uint32_t vec, const svsl_ast_expr_t *e) {
+	const svsl_type_t *ot   = svsl_type_get(&b->prog->types, value_type(b, vec));
+	svsl_scalar_       scal = ot->scalar;
+	if (ot->kind == svsl_type_scalar) { // f.xxx broadcast on a scalar
+		if (e->sema_ref.b == 1) return vec;
+		uint32_t parts[4] = { vec, vec, vec, vec };
+		return construct(b, svsl_type_vector_id(&b->prog->types, scal, e->sema_ref.b),
+		                 parts, (uint32_t)e->sema_ref.b, e->loc);
+	}
+	if (e->sema_ref.b == 1)
+		return emit_op(b, svsl_ir_extract, svsl_type_scalar_id(&b->prog->types, scal), vec,
+		               (uint32_t)(e->sema_ref.a & 0xF), 0, e->loc);
+	return emit_op(b, svsl_ir_shuffle, svsl_type_vector_id(&b->prog->types, scal, e->sema_ref.b), vec,
+	               (uint32_t)e->sema_ref.a, (uint32_t)e->sema_ref.b, e->loc);
 }
 
 static uint32_t lower_ctor(build_t *b, const svsl_ast_expr_t *e) {
@@ -1303,24 +1382,7 @@ static uint32_t lower_expr(build_t *b, const svsl_ast_expr_t *e) {
 					return finish(b, e, emit_op(b, svsl_ir_load,
 					                            b->fn->insts.items[ptr].type, ptr, 0, 0, e->loc));
 			}
-			uint32_t vec = lower_expr(b, e->member.object);
-			// shuffles/extracts keep the object's component type; finish() converts
-			const svsl_type_t *ot   = svsl_type_get(&b->prog->types, value_type(b, vec));
-			svsl_scalar_       scal = ot->scalar;
-			if (ot->kind == svsl_type_scalar) { // f.xxx broadcast on a scalar
-				if (e->sema_ref.b == 1) return finish(b, e, vec);
-				uint32_t parts[4] = { vec, vec, vec, vec };
-				return finish(b, e, construct(b,
-					svsl_type_vector_id(&b->prog->types, scal, e->sema_ref.b),
-					parts, (uint32_t)e->sema_ref.b, e->loc));
-			}
-			if (e->sema_ref.b == 1)
-				return finish(b, e, emit_op(b, svsl_ir_extract,
-				                            svsl_type_scalar_id(&b->prog->types, scal), vec,
-				                            (uint32_t)(e->sema_ref.a & 0xF), 0, e->loc));
-			return finish(b, e, emit_op(b, svsl_ir_shuffle,
-			                            svsl_type_vector_id(&b->prog->types, scal, e->sema_ref.b), vec,
-			                            (uint32_t)e->sema_ref.a, (uint32_t)e->sema_ref.b, e->loc));
+			return finish(b, e, swizzle_value(b, lower_expr(b, e->member.object), e));
 		}
 		uint32_t ptr = lower_lvalue(b, e);
 		if (ptr != SVSL_IR_NONE)
@@ -1543,6 +1605,18 @@ static uint32_t loop_control(const svsl_ast_attrs_t *a) {
 	return m;
 }
 
+// A for/while condition's exit test: `if (!cond) break;`, flagged so the SPIR-V
+// emitter writes it as the loop's conditional exit branch (see emit_spirv.c's
+// analyze_loop_exits). The flag, not the test's position, identifies it: a
+// condition that inlines a call can put whole constructs ahead of it.
+static void emit_loop_exit(build_t *b, uint32_t cond, svsl_loc_t loc) {
+	uint32_t not_ = emit_op(b, svsl_ir_log_not, value_type(b, cond), cond, 0, 0, loc);
+	uint32_t test = emit_op(b, svsl_ir_if, SVSL_TYPE_NONE, not_, 0, 0, loc);
+	b->fn->insts.items[test].flags |= svsl_ir_flag_loop_exit;
+	emit_op(b, svsl_ir_break, SVSL_TYPE_NONE, 0, 0, 0, loc);
+	emit_op(b, svsl_ir_end_if, SVSL_TYPE_NONE, 0, 0, 0, loc);
+}
+
 static void lower_stmt(build_t *b, const svsl_ast_stmt_t *s) {
 	if (!s) return;
 	switch (s->kind) {
@@ -1589,13 +1663,7 @@ static void lower_stmt(build_t *b, const svsl_ast_stmt_t *s) {
 		int32_t mark = b->local_stack.count;
 		lower_stmt(b, s->for_stmt.init);
 		emit_op(b, svsl_ir_loop, SVSL_TYPE_NONE, loop_control(&s->attrs), 0, 0, s->loc);
-		if (s->for_stmt.cond) {
-			uint32_t cond = lower_expr(b, s->for_stmt.cond);
-			uint32_t not_ = emit_op(b, svsl_ir_log_not, value_type(b, cond), cond, 0, 0, s->loc);
-			emit_op(b, svsl_ir_if, SVSL_TYPE_NONE, not_, 0, 0, s->loc);
-			emit_op(b, svsl_ir_break, SVSL_TYPE_NONE, 0, 0, 0, s->loc);
-			emit_op(b, svsl_ir_end_if, SVSL_TYPE_NONE, 0, 0, 0, s->loc);
-		}
+		if (s->for_stmt.cond) emit_loop_exit(b, lower_expr(b, s->for_stmt.cond), s->loc);
 		lower_stmt(b, s->for_stmt.body);
 		emit_op(b, svsl_ir_loop_continue, SVSL_TYPE_NONE, 0, 0, 0, s->loc);
 		if (s->for_stmt.inc) lower_expr(b, s->for_stmt.inc);
@@ -1607,11 +1675,7 @@ static void lower_stmt(build_t *b, const svsl_ast_stmt_t *s) {
 	}
 	case svsl_stmt_while: {
 		emit_op(b, svsl_ir_loop, SVSL_TYPE_NONE, loop_control(&s->attrs), 0, 0, s->loc);
-		uint32_t cond = lower_expr(b, s->while_stmt.cond);
-		uint32_t not_ = emit_op(b, svsl_ir_log_not, value_type(b, cond), cond, 0, 0, s->loc);
-		emit_op(b, svsl_ir_if, SVSL_TYPE_NONE, not_, 0, 0, s->loc);
-		emit_op(b, svsl_ir_break, SVSL_TYPE_NONE, 0, 0, 0, s->loc);
-		emit_op(b, svsl_ir_end_if, SVSL_TYPE_NONE, 0, 0, 0, s->loc);
+		emit_loop_exit(b, lower_expr(b, s->while_stmt.cond), s->loc);
 		lower_stmt(b, s->while_stmt.body);
 		emit_op(b, svsl_ir_loop_continue, SVSL_TYPE_NONE, 0, 0, 0, s->loc);
 		emit_op(b, svsl_ir_end_loop, SVSL_TYPE_NONE, SVSL_IR_NONE, 0, 0, s->loc);

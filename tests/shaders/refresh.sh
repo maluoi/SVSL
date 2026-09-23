@@ -5,6 +5,11 @@
 # ported/ is NOT refreshed: those started as a one-time import from the frozen
 # ~/projects/spirv_sl prototype and are maintained here (lightly ported to v1
 # syntax where the prototype used its own pre-v1 spellings).
+#
+# texenc/ is NOT refreshed either: frozen copies of sk_renderer's GPU texture
+# encoders at commit 1a7e43bd (example/tools/compress/shaders/), before they were
+# reworked to dodge SVSL's array-parameter copies. They are the Adreno regression
+# case (docs/dev/case-study-astc-encoders.md) and must stay in that original form.
 set -euo pipefail
 
 dir="$(cd "$(dirname "$0")" && pwd)"

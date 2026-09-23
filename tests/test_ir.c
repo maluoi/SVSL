@@ -1,13 +1,12 @@
 #include "test.h"
+#include "test_spv.h"
 
-#include "back/emit_spirv.h"
 #include "front/lexer.h"
 #include "front/parser.h"
 #include "front/pp.h"
 #include "ir/ir.h"
 #include "sema/sema.h"
 #include "util/arena.h"
-#include "../vendor/spirv.h"
 
 #include <string.h>
 
@@ -76,12 +75,14 @@ static void test_ir_opaque_inline(void) {
 		// collapse every param-copy/result var; the opaque tex/sampler params
 		// still resolve to the globals (the point of this test). The `* f` splat
 		// is stripped to a scalar operand (emit selects OpVectorTimesScalar).
+		// `uv` is read after the constant: lvalue arguments are read as the call
+		// starts, once every argument has been evaluated.
 		"func ps pixel\n"
-		"  %1 = param float2 #0 ; uv\n"
-		"  %2 = load float2 %1\n"
-		"  %5 = const float 0.5\n"
-		"  %9 = tex float4 tex method=0 sampler=tex_s (%2)\n"
-		"  %12 = mul float4 %9 %5\n"
+		"  %0 = param float2 #0 ; uv\n"
+		"  %3 = const float 0.5\n"
+		"  %5 = load float2 %0\n"
+		"  %9 = tex float4 tex method=0 sampler=tex_s (%5)\n"
+		"  %12 = mul float4 %9 %3\n"
 		"  return %12\n"));
 	svsl_arena_free(&arena);
 }
@@ -493,67 +494,176 @@ static void test_ir_swizzle_stores(void) {
 }
 
 // for/while conditions emit as glslang's loop header exit: the block after the
-// header ends in one OpBranchConditional to the loop merge - no OpLogicalNot,
-// no selection construct around a break block - and integer literal bounds are
-// real constants, not OpBitcasts. Adreno's compiler never finished a large
-// [unroll] encoder in the old shape (docs/dev/case-study-astc-encoders.md); pin
-// the shape at -O0 (lowering alone) and -O1.
+// header ends in one OpBranchConditional to the loop merge - no OpLogicalNot, no
+// selection construct around a break block - and integer literal bounds are real
+// constants, not OpBitcasts. Adreno's compiler could not handle the old shape
+// (docs/dev/case-study-astc-encoders.md). Each case runs at -O0 (lowering alone)
+// and -O1, and every module must pass spirv-val.
+typedef struct loop_shape_t {
+	int32_t loops, exits, exits_true_to_merge, nots, sel_merges, bitcasts;
+	int32_t unroll_masks, dont_unroll_masks;
+} loop_shape_t;
+
+static loop_shape_t loop_shape(const svsl_spirv_blob_t *b) {
+	loop_shape_t r = {0};
+	r.nots       = test_spv_count(b, SpvOpLogicalNot, -1, -1);
+	r.sel_merges = test_spv_count(b, SpvOpSelectionMerge, -1, -1);
+	r.bitcasts   = test_spv_count(b, SpvOpBitcast, -1, -1);
+	for (int32_t i = 5; i < b->word_count; ) {
+		uint32_t wc = b->words[i] >> 16;
+		if (wc == 0) break;
+		if ((b->words[i] & 0xFFFF) == SpvOpLoopMerge) {
+			r.loops++;
+			if (b->words[i + 3] & SpvLoopControlUnrollMask)     r.unroll_masks++;
+			if (b->words[i + 3] & SpvLoopControlDontUnrollMask) r.dont_unroll_masks++;
+		}
+		i += (int32_t)wc;
+	}
+	r.exits = test_spv_loop_exits(b, &r.exits_true_to_merge);
+	return r;
+}
+
 static void test_ir_loop_exit_shape(void) {
+	#define LOOP_SRC(body) \
+		"RWStructuredBuffer<uint> o : register(u0);\n" \
+		"[numthreads(8,1,1)] void cs(uint3 id : SV_DispatchThreadID) {\n" \
+		"	uint s = id.x, t = id.x;\n" body "\n	o[id.x] = s;\n}\n"
+	static const struct {
+		const char  *name;
+		const char  *src;
+		loop_shape_t want; // loops, exits, exits_true_to_merge, nots, sel_merges, bitcasts, unroll, dont_unroll
+	} cases[] = {
+		{ "for, uint literal bound, [unroll]",
+		  LOOP_SRC("[unroll] for (uint i = 0; i < 4; i++) s += i * t;"),
+		  { 1, 1, 0, 0, 0, 0, 1, 0 } },
+		{ "while, runtime condition",
+		  LOOP_SRC("while (s < 100) s = s * 2 + 1;"),
+		  { 1, 1, 0, 0, 0, 0, 0, 0 } },
+		{ "[loop] keeps DontUnroll",
+		  LOOP_SRC("[loop] for (int i = 7; i >= 0; i--) s = s * 3 + t;"),
+		  { 1, 1, 0, 0, 0, 0, 0, 1 } },
+		{ "user-written top break stays a selection (as in glslang)",
+		  LOOP_SRC("for (;;) { if (s > 20) break; s += 7; }"),
+		  { 1, 0, 0, 0, 1, 0, 0, 0 } },
+		{ "top if carrying [branch] keeps its selection",
+		  LOOP_SRC("for (;;) { [branch] if (s > 20) break; s += 7; }"),
+		  { 1, 0, 0, 0, 1, 0, 0, 0 } },
+		{ "[flatten] on a loop body's if keeps its hint",
+		  LOOP_SRC("for (uint i = 0; i < 8; i++) { [flatten] if (s > 20) s -= 3; s += 7; }"),
+		  { 1, 1, 0, 0, 1, 0, 0, 0 } },
+		{ "do-while: the back edge exits, a body break stays a selection",
+		  LOOP_SRC("do { if (s > 30) break; s = s * 2 + 1; } while (s < 50);"),
+		  { 1, 1, 0, 0, 1, 0, 0, 0 } }, // back edge: OpBranchConditional %c %header %merge
+		{ "condition inlining an early-return call: exit after the wrapper loop",
+		  "RWStructuredBuffer<uint> o : register(u0);\n"
+		  "bool keep_going(uint v, uint lim) { if (v > 1000) return false; return v < lim; }\n"
+		  "[numthreads(8,1,1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		  "	uint s = id.x;\n"
+		  "	while (keep_going(s, 90)) s = s * 3 + 1;\n"
+		  "	o[id.x] = s;\n"
+		  "}\n",
+		  { 2, 1, 0, 0, 1, 0, 0, 0 } }, // outer loop + the call's wrapper; its `if` keeps a selection
+		{ "for condition inlining an early-return call",
+		  "RWStructuredBuffer<uint> o : register(u0);\n"
+		  "uint limit(uint v) { if (v > 5) return 5; return v + 2; }\n"
+		  "[numthreads(8,1,1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		  "	uint s = 0;\n"
+		  "	for (uint i = 0; i < limit(id.x); i++) s += i;\n"
+		  "	o[id.x] = s;\n"
+		  "}\n",
+		  { 2, 1, 0, 0, 1, 0, 0, 0 } },
+		{ "nested loops both exit from their headers",
+		  LOOP_SRC("for (uint p = 0; p < 3; p++) for (uint q = 0; q <= p; q++) s += p * 4 + q;"),
+		  { 2, 2, 0, 0, 0, 0, 0, 0 } },
+		{ "mid-body break stays a selection",
+		  LOOP_SRC("for (uint n = 0; n < 10; n++) { s += n; if (s > t * 3) break; }"),
+		  { 1, 1, 0, 0, 1, 0, 0, 0 } },
+	};
+	#undef LOOP_SRC
+	for (int32_t c = 0; c < (int32_t)(sizeof(cases) / sizeof(cases[0])); c++) {
+		for (int32_t level = svsl_opt_none; level <= svsl_opt_default; level++) {
+			svsl_arena_t arena = {0};
+			test_spv_t   spv;
+			test_spv_compile(&arena, cases[c].src, NULL, NULL, (svsl_opt_level_)level, &spv);
+			TEST_CHECK(spv.ok && test_spv_validate(&spv));
+			if (!spv.ok) { printf("  case: %s\n", cases[c].name); svsl_arena_free(&arena); continue; }
+			loop_shape_t got = loop_shape(&spv.blobs[0]), want = cases[c].want;
+			bool match = got.loops == want.loops && got.exits == want.exits &&
+			             got.exits_true_to_merge == want.exits_true_to_merge && got.nots == want.nots &&
+			             got.sel_merges == want.sel_merges && got.bitcasts == want.bitcasts &&
+			             got.unroll_masks == want.unroll_masks && got.dont_unroll_masks == want.dont_unroll_masks;
+			TEST_CHECK(match);
+			if (!match)
+				printf("  case '%s' -O%d: loops %d exits %d true->merge %d nots %d sel %d bitcast %d unroll %d dont %d\n",
+				       cases[c].name, level, got.loops, got.exits, got.exits_true_to_merge, got.nots,
+				       got.sel_merges, got.bitcasts, got.unroll_masks, got.dont_unroll_masks);
+			svsl_arena_free(&arena);
+		}
+	}
+}
+
+// integer constant re-typing (shared by lowering and fold): sign-/zero-extension
+// and truncation by the scalar kinds, in the const encoding (signed results
+// sign-extended to 64 bits, unsigned zero-extended)
+static void test_ir_int_convert_bits(void) {
+	static const struct {
+		uint64_t     bits;
+		svsl_scalar_ from, to;
+		uint64_t     want;
+	} cases[] = {
+		{ 0xFFFFFFFFFFFFFFFFull, svsl_scalar_int32,  svsl_scalar_uint32, 0x00000000FFFFFFFFull }, // -1 -> 0xFFFFFFFF
+		{ 0x00000000FFFFFFFFull, svsl_scalar_uint32, svsl_scalar_int32,  0xFFFFFFFFFFFFFFFFull }, // same bits, signed
+		{ 0xFFFFFFFFFFFFFFFFull, svsl_scalar_int32,  svsl_scalar_int64,  0xFFFFFFFFFFFFFFFFull }, // sign-extends
+		{ 0x00000000FFFFFFFFull, svsl_scalar_uint32, svsl_scalar_uint64, 0x00000000FFFFFFFFull }, // zero-extends
+		{ 0x00000000FFFFFFFFull, svsl_scalar_uint32, svsl_scalar_int64,  0x00000000FFFFFFFFull }, // zero-ext, positive
+		{ 0x0000000100000005ull, svsl_scalar_int64,  svsl_scalar_int32,  5                     }, // truncates
+		{ 0x00000000FFFFFFFEull, svsl_scalar_int64,  svsl_scalar_int16,  0xFFFFFFFFFFFFFFFEull }, // truncate to -2
+		{ 0x000000000000FFFEull, svsl_scalar_int16,  svsl_scalar_uint16, 0x000000000000FFFEull },
+		{ 200,                   svsl_scalar_uint8,  svsl_scalar_int8,   0xFFFFFFFFFFFFFFC8ull }, // 200 -> -56
+		{ 0xFFFFFFFFFFFFFFFFull, svsl_scalar_int8,   svsl_scalar_uint32, 0x00000000FFFFFFFFull }, // -1 widens signed
+		{ 0x0000000000000080ull, svsl_scalar_uint8,  svsl_scalar_uint32, 0x80                  },
+		{ 0x8000000000000000ull, svsl_scalar_uint64, svsl_scalar_int64,  0x8000000000000000ull },
+		{ 7,                     svsl_scalar_int32,  svsl_scalar_int32,  7                     }, // identity
+	};
+	for (int32_t i = 0; i < (int32_t)(sizeof(cases) / sizeof(cases[0])); i++) {
+		uint64_t got = 0;
+		bool     ok  = svsl_ir_int_convert_bits(cases[i].bits, cases[i].from, cases[i].to, &got);
+		TEST_CHECK(ok && got == cases[i].want);
+		if (!ok || got != cases[i].want)
+			printf("  int convert case %d: got %016llx want %016llx\n", i,
+			       (unsigned long long)got, (unsigned long long)cases[i].want);
+	}
+	uint64_t unused;
+	TEST_CHECK(!svsl_ir_int_convert_bits(1, svsl_scalar_float32, svsl_scalar_int32, &unused)); // not int
+	TEST_CHECK(!svsl_ir_int_convert_bits(1, svsl_scalar_int32, svsl_scalar_float32, &unused));
+	TEST_CHECK(!svsl_ir_int_convert_bits(1, svsl_scalar_bool,  svsl_scalar_uint32, &unused));  // bool: a select
+}
+
+// integer literals re-typed at lowering: no conversion ops even at -O0, for
+// scalars and constant vectors alike
+static void test_ir_literal_typing(void) {
 	const char *src =
-		"RWStructuredBuffer<uint> o : register(u0);\n"
-		"[numthreads(8,1,1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
-		"	uint s = 0;\n"
-		"	[unroll] for (uint i = 0; i < 4; i++) s += i * id.x;\n"
-		"	while (s < 100) s = s * 2 + 1;\n"
-		"	o[id.x] = s;\n"
+		"RWStructuredBuffer<uint4> o : register(u0);\n"
+		"[numthreads(1,1,1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	uint  a = 3;\n"
+		"	uint2 v = int2(1, 2);\n"
+		"	int64 w = 5;\n"
+		"	for (uint i = 0; i < 4; i++) a += i;\n"
+		"	o[id.x] = uint4(v, a, (uint)w);\n"
 		"}\n";
 	for (int32_t level = svsl_opt_none; level <= svsl_opt_default; level++) {
-		svsl_arena_t      arena = {0};
-		svsl_diag_list_t  diags = {0};
-		svsl_pp_result_t  pp;
-		svsl_token_list_t tokens = {0};
-		svsl_program_t    prog;
-		svsl_ir_module_t  mod   = {0};
-		svsl_spirv_blob_t blob  = {0};
-		svsl_pp_run(&arena, src, "ir_test.hlsl", NULL, &pp, &diags);
-		svsl_lex(&arena, &pp, &tokens, &diags);
-		svsl_sema_run(&arena, svsl_parse(&arena, &tokens, &diags), &pp, "ir_test.hlsl", NULL, &prog, &diags);
-		TEST_CHECK(diags.error_count == 0 &&
-		           svsl_ir_build(&arena, &prog, (svsl_opt_level_)level, &mod, &diags) &&
-		           svsl_spirv_emit(&arena, &prog, &mod.funcs[0], &blob, &diags));
-		if (blob.word_count == 0) { svsl_arena_free(&arena); continue; }
-
-		int32_t loops = 0, exits = 0, nots = 0, sel_merges = 0, bitcasts = 0;
-		for (int32_t i = 5; i < blob.word_count; ) {
-			uint32_t wc = blob.words[i] >> 16, op = blob.words[i] & 0xFFFF;
-			if (wc == 0) break;
-			if (op == SpvOpLogicalNot)     nots++;
-			if (op == SpvOpSelectionMerge) sel_merges++;
-			if (op == SpvOpBitcast)        bitcasts++;
-			if (op == SpvOpLoopMerge) { // skip the header's OpBranch and the body label,
-				loops++;                // then find the body block's terminator
-				uint32_t merge = blob.words[i + 1];
-				int32_t  k     = i + (int32_t)wc;
-				k += (int32_t)(blob.words[k] >> 16); // OpBranch body
-				k += (int32_t)(blob.words[k] >> 16); // OpLabel body
-				while (k < blob.word_count) {
-					uint32_t kop = blob.words[k] & 0xFFFF;
-					if (kop == SpvOpBranchConditional) {
-						if (blob.words[k + 2] == merge || blob.words[k + 3] == merge) exits++;
-						break;
-					}
-					if (kop == SpvOpBranch || kop == SpvOpSelectionMerge || kop == SpvOpLoopMerge ||
-					    kop == SpvOpReturn || kop == SpvOpLabel) break;
-					k += (int32_t)(blob.words[k] >> 16);
-				}
-			}
-			i += (int32_t)wc;
+		svsl_arena_t arena = {0};
+		test_spv_t   spv;
+		test_spv_compile(&arena, src, NULL, NULL, (svsl_opt_level_)level, &spv);
+		TEST_CHECK(spv.ok && test_spv_validate(&spv));
+		if (spv.ok) {
+			const svsl_ir_func_t *fn = &spv.ir.funcs[0];
+			int32_t converts = 0; // only the explicit runtime (uint)w may convert
+			for (int32_t i = 0; i < fn->insts.count; i++)
+				if (fn->insts.items[i].op == svsl_ir_convert) converts++;
+			TEST_CHECK(converts <= 1);
+			if (level == svsl_opt_default) TEST_CHECK(converts == 0); // w is a constant: folds
 		}
-		TEST_CHECK(loops == 2);
-		TEST_CHECK(exits == 2);      // both conditions exit straight from the header block
-		TEST_CHECK(nots == 0);       // `!(i < 4)` folded into the branch targets
-		TEST_CHECK(sel_merges == 0); // no selection construct around a break
-		TEST_CHECK(bitcasts == 0);   // `uint i = 0`, `i < 4`: literals typed as uint constants
 		svsl_arena_free(&arena);
 	}
 }
@@ -589,6 +699,23 @@ static void test_ir_private_globals(void) {
 
 // a read-only aggregate `in` parameter binds to the caller's storage: no copy
 // var, no whole-array load/store. A parameter the callee writes keeps its copy.
+// variables made for a callee parameter's by-value copy (they carry its name)
+static int32_t count_param_copies(const svsl_ir_func_t *fn, const char *param) {
+	int32_t n = 0;
+	for (int32_t i = 0; i < fn->insts.count; i++)
+		if (fn->insts.items[i].op == svsl_ir_var && svsl_str_eq_cstr(fn->insts.items[i].name, param)) n++;
+	return n;
+}
+static int32_t count_whole_aggregate_loads(const ir_run_t *r) {
+	const svsl_ir_func_t *fn = &r->module.funcs[0];
+	int32_t n = 0;
+	for (int32_t i = 0; i < fn->insts.count; i++) {
+		if (fn->insts.items[i].op != svsl_ir_load) continue;
+		svsl_type_kind_ k = svsl_type_get(&r->prog.types, fn->insts.items[i].type)->kind;
+		if (k == svsl_type_array || k == svsl_type_struct) n++;
+	}
+	return n;
+}
 static int32_t count_whole_array_loads(const ir_run_t *r) {
 	const svsl_ir_func_t *fn = &r->module.funcs[0];
 	int32_t n = 0;
@@ -623,6 +750,123 @@ static void test_ir_array_param_by_reference(void) {
 		"}\n");
 	TEST_CHECK(r.ok);
 	TEST_CHECK(count_whole_array_loads(&r) == 1);
+
+	// by reference only when nothing can change the storage during the call
+	static const struct { const char *name, *src; bool copy; } cases[] = {
+		{ "written through a nested inout call", "void g(inout float v[4]) { v[0] = 1; }\n"
+		  "float f(float v[4]) { g(v); return v[0]; }\n"
+		  "float4 ps(float x : TEXCOORD0) : SV_TARGET { float a[4] = { x, 2, 3, 4 }; return f(a) + a[0]; }\n", true },
+		{ "written through an element member", "float f(float2 v[2]) { v[1].y = 3; return v[1].y; }\n"
+		  "float4 ps(float x : TEXCOORD0) : SV_TARGET { float2 a[2] = { x.xx, x.xx }; return f(a) + a[1].y; }\n", true },
+		{ "read-only through three levels", "float f3(float v[4], int i) { return v[i]; }\n"
+		  "float f2(float v[4], int i) { return f3(v, i) + v[0]; }\n"
+		  "float f1(float v[4], int i) { return f2(v, i) * 2; }\n"
+		  "float4 ps(float x : TEXCOORD0) : SV_TARGET { float a[4] = { x, 2, 3, 4 }; return f1(a, (int)x); }\n", false },
+		{ "row of a 2D array", "float f(float v[4], int i) { return v[i]; }\n"
+		  "float4 ps(float x : TEXCOORD0) : SV_TARGET { float m[2][4]; for (int i = 0; i < 4; i++) { m[0][i] = x; m[1][i] = x * i; } return f(m[1], (int)x); }\n", false },
+		{ "struct member array", "struct s_t { float arr[4]; float k; };\n"
+		  "float f(float v[4], int i) { return v[i]; }\n"
+		  "float4 ps(float x : TEXCOORD0) : SV_TARGET { s_t s; for (int i = 0; i < 4; i++) s.arr[i] = x * i; s.k = x; return f(s.arr, (int)x) + s.k; }\n", false },
+		{ "whole struct", "struct s_t { float arr[4]; float k; };\n"
+		  "float f(s_t v, int i) { return v.arr[i] + v.k; }\n"
+		  "float4 ps(float x : TEXCOORD0) : SV_TARGET { s_t s; for (int i = 0; i < 4; i++) s.arr[i] = x * i; s.k = x; return f(s, (int)x); }\n", false },
+		{ "cbuffer array", "cbuffer P : register(b0) { float w[4]; };\n"
+		  "float f(float v[4], int i) { return v[i]; }\n"
+		  "float4 ps(float x : TEXCOORD0) : SV_TARGET { return f(w, (int)x); }\n", false },
+		{ "private static: the callee could write it", "static float g[4];\n"
+		  "float f(float v[4], int i) { g[0] = 5; return v[i]; }\n"
+		  "float4 ps(float x : TEXCOORD0) : SV_TARGET { g[1] = x; return f(g, (int)x); }\n", true },
+	};
+	// Checked at -O0, where a copy always leaves its variable (named after the
+	// callee's parameter, `v`); at -O1 forwarding may legitimately erase it.
+	for (int32_t c = 0; c < (int32_t)(sizeof(cases) / sizeof(cases[0])); c++) {
+		test_spv_t spv;
+		test_spv_compile(&arena, cases[c].src, NULL, NULL, svsl_opt_none, &spv);
+		TEST_CHECK(spv.ok && test_spv_validate(&spv));
+		if (!spv.ok) { printf("  case: %s\n", cases[c].name); continue; }
+		int32_t copies = count_param_copies(&spv.ir.funcs[0], "v");
+		TEST_CHECK(cases[c].copy ? copies >= 1 : copies == 0);
+		if (cases[c].copy ? copies < 1 : copies != 0)
+			printf("  case '%s': %d copies of parameter v\n", cases[c].name, copies);
+	}
+
+	// groupshared and RW buffers can change under the callee: always copied
+	r = run_ir(&arena,
+		"struct pair_t { uint a; uint b; };\n"
+		"RWStructuredBuffer<pair_t> pairs : register(u0);\n"
+		"groupshared uint shared_vals[4];\n"
+		"uint fa(uint v[4]) { return v[1]; }\n"
+		"uint fs(pair_t p) { return p.b; }\n"
+		"[numthreads(4,1,1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	shared_vals[id.x] = id.x; GroupMemoryBarrierWithGroupSync();\n"
+		"	pairs[id.x].a = fa(shared_vals) + fs(pairs[id.x]);\n"
+		"}\n");
+	TEST_CHECK(r.ok && count_whole_aggregate_loads(&r) == 2);
+	svsl_arena_free(&arena);
+}
+
+// private globals at the SPIR-V level: Private variables zero-initialized with
+// OpConstantNull, declared only in the entries that use them, and initialized
+// in each such entry
+static int32_t count_private_vars(const svsl_spirv_blob_t *b) {
+	int32_t n = 0;
+	for (int32_t i = 5; i < b->word_count; ) {
+		uint32_t wc = b->words[i] >> 16;
+		if (wc == 0) break;
+		if ((b->words[i] & 0xFFFF) == SpvOpVariable && b->words[i + 3] == SpvStorageClassPrivate) n++;
+		i += (int32_t)wc;
+	}
+	return n;
+}
+
+static void test_ir_private_globals_spirv(void) {
+	svsl_arena_t arena = {0};
+	test_spv_t   spv;
+	test_spv_compile(&arena,
+		"cbuffer P : register(b0) { float4 tint_in; };\n"
+		"static float4 tint = tint_in * 2;\n"          // both stages
+		"static float  vs_only;\n"                     // vertex stage only, no initializer
+		"static float  unused_static = 3;\n"           // nobody reads it
+		"float4 vs(float4 p : POSITION) : SV_POSITION { vs_only += p.x; return p * vs_only + tint; }\n"
+		"float4 ps() : SV_TARGET { return tint; }\n", NULL, NULL, svsl_opt_none, &spv);
+	TEST_CHECK(spv.ok && spv.blob_count == 2 && test_spv_validate(&spv));
+	if (spv.ok && spv.blob_count == 2) {
+		for (int32_t s = 0; s < 2; s++) {
+			const svsl_spirv_blob_t *b = &spv.blobs[s];
+			int32_t privates = 0, null_inits = 0;
+			for (int32_t i = 5; i < b->word_count; ) {
+				uint32_t wc = b->words[i] >> 16;
+				if (wc == 0) break;
+				if ((b->words[i] & 0xFFFF) == SpvOpVariable && b->words[i + 3] == SpvStorageClassPrivate) {
+					privates++;
+					int32_t def = wc > 4 ? test_spv_find_def(b, b->words[i + 4]) : -1;
+					if (def >= 0 && (b->words[def] & 0xFFFF) == SpvOpConstantNull) null_inits++;
+				}
+				i += (int32_t)wc;
+			}
+			// -O0 keeps every referenced static: vs has tint + vs_only, ps has tint.
+			// unused_static's prologue store is dead but -O0 has no DSE, so it stays too.
+			TEST_CHECK(privates == (s == 0 ? 3 : 2));
+			TEST_CHECK(null_inits == privates);
+		}
+	}
+	svsl_arena_free(&arena);
+
+	arena = (svsl_arena_t){0};
+	test_spv_compile(&arena,
+		"cbuffer P : register(b0) { float4 tint_in; };\n"
+		"static float4 tint = tint_in * 2;\n"
+		"static float  vs_only;\n"
+		"static float  unused_static = 3;\n"
+		"float4 vs(float4 p : POSITION) : SV_POSITION { vs_only += p.x; return p * vs_only + tint; }\n"
+		"float4 ps() : SV_TARGET { return tint; }\n", NULL, NULL, svsl_opt_default, &spv);
+	TEST_CHECK(spv.ok && spv.blob_count == 2 && test_spv_validate(&spv));
+	if (spv.ok && spv.blob_count == 2) {
+		// -O1 forwards tint and unused_static away. vs_only is read before any store,
+		// so its zero initializer is still observable: it alone stays, in vs only.
+		TEST_CHECK(count_private_vars(&spv.blobs[0]) == 1);
+		TEST_CHECK(count_private_vars(&spv.blobs[1]) == 0);
+	}
 	svsl_arena_free(&arena);
 }
 
@@ -643,4 +887,7 @@ void test_ir(void) {
 	test_ir_loop_exit_shape();
 	test_ir_private_globals();
 	test_ir_array_param_by_reference();
+	test_ir_int_convert_bits();
+	test_ir_literal_typing();
+	test_ir_private_globals_spirv();
 }

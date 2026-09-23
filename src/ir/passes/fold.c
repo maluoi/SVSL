@@ -38,11 +38,15 @@ static bool int_is_signed(svsl_scalar_ s) {
 	return s == svsl_scalar_int8  || s == svsl_scalar_int16 ||
 	       s == svsl_scalar_int32 || s == svsl_scalar_int64;
 }
+// the low `w` bits set (w in 1..64)
+static uint64_t width_mask(int32_t w) {
+	return w >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1);
+}
 // interpret the low `w` bits of `bits` as a two's-complement signed value
 static int64_t sign_ext(uint64_t bits, int32_t w) {
 	if (w >= 64) return (int64_t)bits;
 	uint64_t m = (uint64_t)1 << (w - 1);
-	uint64_t v = bits & (((uint64_t)1 << w) - 1);
+	uint64_t v = bits & width_mask(w);
 	return (int64_t)((v ^ m) - m);
 }
 
@@ -53,10 +57,8 @@ static bool scalar_is_int(svsl_scalar_ s) {
 bool svsl_ir_int_convert_bits(uint64_t bits, svsl_scalar_ from, svsl_scalar_ to, uint64_t *out_bits) {
 	if (!scalar_is_int(from) || !scalar_is_int(to)) return false;
 	int32_t  fw = int_bit_width(from), tw = int_bit_width(to);
-	uint64_t v  = int_is_signed(from) ? (uint64_t)sign_ext(bits, fw)
-	                                  : bits & (fw >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << fw) - 1));
-	*out_bits = int_is_signed(to) ? (uint64_t)sign_ext(v, tw)
-	                              : v & (tw >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << tw) - 1));
+	uint64_t v  = int_is_signed(from) ? (uint64_t)sign_ext(bits, fw) : bits & width_mask(fw);
+	*out_bits   = int_is_signed(to)   ? (uint64_t)sign_ext(v, tw)    : v & width_mask(tw);
 	return true;
 }
 
@@ -107,7 +109,7 @@ bool svsl_ir_fold(svsl_ir_func_t *fn, const svsl_types_t *types) {
 				// fold at the scalar's true width and signedness: add/sub/mul agree in the
 				// low bits either way, but div/rem and any 64-bit type need the real type
 				int32_t  w    = int_bit_width(t->scalar);
-				uint64_t mask = w >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1);
+				uint64_t mask = width_mask(w);
 				uint64_t r;
 				if (int_is_signed(t->scalar)) {
 					int64_t ia = sign_ext(a, w), ib = sign_ext(v, w);
@@ -143,7 +145,7 @@ bool svsl_ir_fold(svsl_ir_func_t *fn, const svsl_types_t *types) {
 			} else if (!is_float) {
 				// unsigned negate (signed -MIN overflows), at the scalar's true width
 				int32_t  w    = int_bit_width(t->scalar);
-				uint64_t mask = w >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1);
+				uint64_t mask = width_mask(w);
 				replace_with_const(inst, ((uint64_t)0 - (a & mask)) & mask, &changed);
 			}
 			break;

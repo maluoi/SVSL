@@ -537,8 +537,10 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 	switch (op) {
 	case svsl_ir_if: {
 		ensure_block(e);
-		if (e->loop_exit[i] == loop_exit_branch) { // see analyze_loop_exits
-			struct cf_frame *f    = &e->cf[e->cf_depth - 1]; // the loop: no CF op since its header
+		// see analyze_loop_exits; the test sits directly in its loop's body, so the
+		// innermost open construct is that loop
+		if (e->loop_exit[i] == loop_exit_branch && e->cf_depth > 0 && e->cf[e->cf_depth - 1].kind == 'l') {
+			struct cf_frame *f    = &e->cf[e->cf_depth - 1];
 			uint32_t         body = svsl_spv_id(spv);
 			uint32_t         cond = inst->args[0];
 			if (e->loop_exit[cond] == loop_exit_skip) // folded `!c`: stay in the loop while c

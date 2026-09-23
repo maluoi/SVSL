@@ -13,6 +13,7 @@ add_executable(svsl_tests
 	test_formats.c
 	test_wgsl.c
 	test_corpus.c
+	test_spv.c
 )
 target_link_libraries     (svsl_tests PRIVATE svsl)
 target_include_directories(svsl_tests PRIVATE ../src)

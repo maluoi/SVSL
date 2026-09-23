@@ -982,6 +982,29 @@ static void test_check_static_globals(void) {
 		"float4 ps() : SV_TARGET { return 1; }\n", true);
 	TEST_CHECK(has_error(&r, "resources cannot be 'static'"));
 
+	// initializers run in declaration order: reading a static whose own
+	// initializer hasn't run yet (or itself) would silently see zero
+	r = run_sema_ex(&arena,
+		"static uint first  = second + 1;\n"
+		"static uint second = 5;\n"
+		"float4 ps() : SV_TARGET { return first; }\n", true);
+	TEST_CHECK(has_error(&r, "before its own initializer has run"));
+	r = run_sema_ex(&arena,
+		"static uint x = x + 1;\n"
+		"float4 ps() : SV_TARGET { return x; }\n", true);
+	TEST_CHECK(has_error(&r, "before its own initializer has run"));
+	r = run_sema(&arena, // earlier statics, and later ones read from function bodies, are fine
+		"static uint a = 2;\n"
+		"static uint b = a * 3;\n"
+		"uint read_c() { return c; }\n"
+		"static uint c = b + 1;\n"
+		"float4 ps() : SV_TARGET { return read_c(); }\n");
+	TEST_CHECK(r.ok);
+	r = run_sema_ex(&arena, // an initializer can't see function-local names
+		"static float y = uv.x;\n"
+		"float4 ps(float2 uv : TEXCOORD0) : SV_TARGET { return y; }\n", true);
+	TEST_CHECK(!r.ok);
+
 	// atomics need workgroup/buffer/image memory: per-invocation storage is an
 	// error (it used to emit SPIR-V that spirv-val rejects)
 	const char *per_invocation[] = {

@@ -17,6 +17,8 @@ static uint  derived = seed * 3 + 1;               // reads an earlier static
 static uint  from_cb = knobs.x >> 20;              // runtime initializer (0.25f bits -> 1000)
 static uint  hist[4] = { 1, 2, 3, 4 };
 static acc_t acc     = { 0, 0 };
+static uint  carry   = 0;                          // carried across loop iterations
+static uint  lsum    = 0;
 
 void accumulate(uint v) {
 	acc.sum   += v;
@@ -29,7 +31,7 @@ uint peek_seed() { return seed; }                  // helper reads the helper-wr
 [numthreads(8, 1, 1)]
 void cs(uint3 id : SV_DispatchThreadID) {
 	uint t    = id.x;
-	uint base = t * 8;
+	uint base = t * 10;
 
 	accumulate(t);
 	accumulate(t * 2);
@@ -48,4 +50,13 @@ void cs(uint3 id : SV_DispatchThreadID) {
 	from_cb = t;                                    // overwrite a runtime-initialized static
 	results[base + 6] = from_cb + seed;
 	results[base + 7] = acc.sum ^ derived;
+
+	// conditional write inside a loop: later iterations must see the carried
+	// value, never one forwarded from before the loop or the previous write site
+	for (uint k = 0; k < 6; k++) {
+		if (k % 3 == t % 3) carry = k * 10;
+		lsum += carry;
+	}
+	results[base + 8] = lsum;
+	results[base + 9] = carry;
 }

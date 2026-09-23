@@ -9,7 +9,8 @@
 
 struct pair_t { uint a; uint b; };
 
-cbuffer Params : register(b0) { uint4 knobs[2]; }; // harness fill: 0.25..1.0 float bits
+cbuffer Params  : register(b0) { uint4 knobs[2]; }; // harness fill: 0.25..1.0 float bits
+cbuffer Weights : register(b2) { float wts[4]; };   // std140: 16-byte element stride
 RWStructuredBuffer<uint>   results : register(u0);
 RWStructuredBuffer<pair_t> pairs   : register(u1);
 
@@ -46,10 +47,20 @@ uint alias_inout(uint v[4], inout uint w[4]) {                 // same array as 
 
 uint from_cbuffer(uint4 k[2]) { return (k[0].x >> 20) + (k[1].y & 0xFu); }
 
+float copy_whole(float w[4]) { float l[4] = w; l[0] += 1; return l[0] + l[2]; } // whole copy in the callee
+float dyn_index(float w[4], uint i) { return w[i & 3]; }
+
+uint lvl3(uint v[4], uint i) { return v[i & 3]; }                // three read-only levels
+uint lvl2(uint v[4], uint i) { return lvl3(v, i) + v[0]; }
+uint lvl1(uint v[4], uint i) { return lvl2(v, i) * 2; }
+
+void bump4(inout uint v[4]) { v[0] += 100; }
+uint written_nested(uint v[4]) { bump4(v); return v[0]; }       // written via inout: must copy
+
 [numthreads(4, 1, 1)]
 void cs(uint3 id : SV_DispatchThreadID) {
 	uint t    = id.x;
-	uint base = t * 10;
+	uint base = t * 16;
 
 	uint local_vals[4] = { t, t + 1, t * 3, 9 };
 	results[base + 0] = sum4(local_vals);
@@ -70,4 +81,14 @@ void cs(uint3 id : SV_DispatchThreadID) {
 	results[base + 7] = private_after_write(priv_vals) + priv_vals[1];
 	results[base + 8] = alias_inout(local_vals, local_vals) + local_vals[2];
 	results[base + 9] = from_cbuffer(knobs);
+
+	float fl[4] = { t * 0.5, 1.5, t + 0.25, 4 };
+	results[base + 10] = asuint(copy_whole(fl));                 // (t*0.5 + 1) + (t + 0.25)
+	results[base + 11] = asuint(dyn_index(wts, t));
+	results[base + 12] = lvl1(local_vals, t);                    // local_vals[2] is 3000 by now
+	results[base + 13] = written_nested(local_vals);
+	results[base + 14] = local_vals[0];                          // untouched by the callee's copy
+	uint grid[2][4];
+	for (uint k = 0; k < 4; k++) { grid[0][k] = 0; grid[1][k] = k * t + 1; }
+	results[base + 15] = sum4(grid[1]);                          // a 2D array's row
 }

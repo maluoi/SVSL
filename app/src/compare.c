@@ -370,6 +370,22 @@ typedef struct compute_cfg_t {
 	struct { int32_t index; uint32_t bits; float value, eps; bool tex; } expect[16];
 } compute_cfg_t;
 
+// sk_texenc's original GPU texture encoders (tests/shaders/texenc/): each encodes a
+// 64x64 region of the harness's 2D checker. No reference: glslang's output differs
+// from SVSL's in ~0.04% of blocks (FMA-fusion choices on near-threshold mode
+// decisions; docs/dev/case-study-astc-encoders.md), so this is a smoke tier -
+// pipeline creation, a real dispatch, and output written. Their SPIR-V shape is
+// pinned by test_corpus_texenc_regression.
+#define TEXENC_CFG(name, block) \
+	{ .file         = name,                                                              \
+	  .passes       = { { .dispatch = { ((64 + block - 1) / block + 7) / 8,                \
+	                                    ((64 + block - 1) / block + 7) / 8, 1 } } },     \
+	  .no_reference = true,                                                              \
+	  .buffers      = { { "output_blocks", ((64 + block - 1) / block) * ((64 + block - 1) / block), fill_zero } }, \
+	  .params       = { { "image_width",  sksc_shader_var_uint, .value = { 64 } },        \
+	                    { "image_height", sksc_shader_var_uint, .value = { 64 } },        \
+	                    { "blocks_x",     sksc_shader_var_uint, .value = { (64 + block - 1) / block } } } }
+
 // the gpu_sort chain: one full LSD radix pass (upsweep -> scan -> downsweep)
 // over deterministic keys, verified against a CPU replay. radix_golden assumes
 // exactly this buffer set: b_sort hash-filled, b_sortPayload ramp-filled.
@@ -561,42 +577,67 @@ static const compute_cfg_t compute_cfgs[] = {
 	               { 18, .value = 0, .eps = 0.1f }, // [4] flag: !(4>3) = 0
 	               { 29, 1 },                       // [7] pair.y: 7>5
 	               { 31, 0x40600000 } } },          // [7] v = 3.5f
-	{ .file    = "check_loop_exit", // loop-top exit branches (glslang header-exit shape)
+	{ .file    = "check_loop_exit", // loop exit branches (glslang header-exit shape)
 	  .passes  = { { .dispatch = { 1, 1, 1 } } },
-	  .buffers = { { "results", 80, fill_zero } },
-	  // 10 words per thread t, each a loop form replayed on the CPU:
+	  .buffers = { { "results", 104, fill_zero } },
+	  // 13 words per thread t, each a loop form replayed on the CPU:
 	  // [0] sum i*t+1 (i<4)  [1] j=7..0 odd:+j even:-t  [2] c=t+1, *=3 while <100
 	  // [3] d=t, +=7 until >20  [4] e=t, +=5 until >=12  [5] sum m (m<t+2)
 	  // [6] odd n summed, break past 3t  [7] sum p*4+q+t (q<=p<3)
 	  // [8] k=t: break >30, k=2k+1 while <50  [9] first k<16 with (t+1)k>20, else 99
+	  // [10] w=t, w=3w+1 while w<90  [11] sum over j<4 of (jt==0 ? 7 : 2jt)
+	  // [12] sum j for j < min(t+2, 5)
 	  .expect  = { {  0, 4 },  {  1, 16 }, {  2, 243 }, {  3, 21 }, {  4, 15 },
-	               {  5, 1 },  {  6, 1 },  {  7, 36 },  {  8, 31 }, {  9, 99 },   // t = 0
-	               { 71, 0xFFFFFFF4 }, { 72, 216 }, { 75, 36 }, { 76, 25 },
-	               { 78, 31 }, { 79, 3 } } },                                     // t = 7
+	               {  5, 1 },  {  8, 31 }, {  9, 99 },  { 10, 121 }, { 11, 28 },
+	               { 12, 1 },                                                       // t = 0
+	               { 92, 0xFFFFFFF4 }, { 93, 216 }, { 101, 202 }, { 102, 91 },
+	               { 103, 10 } } },                                                  // t = 7
 	{ .file    = "check_static_globals", // writable module-scope statics (Private storage)
 	  .passes  = { { .dispatch = { 1, 1, 1 } } },
-	  .buffers = { { "results", 64, fill_zero } },
-	  // 8 words per thread t, replayed on the CPU. seed: 7, two LCG steps
+	  .buffers = { { "results", 80, fill_zero } },
+	  // 10 words per thread t, replayed on the CPU. seed: 7, two LCG steps
 	  // (x*1103515245+12345) = 0x264E4F5D; derived = 7*3+1 + sum(0..t-1);
 	  // from_cb = bits(0.25f) >> 20 = 1000; hist {1,2,3,4}, [t&3] += 10, [0] = 100 if t > 3
 	  // [0] acc.sum = 3t [1] count 2 [2] seed [3] hist dot (1,2,3,4) [4] derived
 	  // [5] from_cb [6] t + seed [7] acc.sum ^ derived
+	  // [8] lsum: carry = 10k at k = t%3, t%3+3, summed each k<6 -> 90 (t%3 = 0), 110 otherwise
+	  // [9] carry = 10 * (t%3 + 3)
 	  .expect  = { {  1, 2 }, {  2, 0x264E4F5D }, {  3, 40 }, {  4, 22 },
-	               {  5, 1000 }, {  6, 0x264E4F5D }, {  7, 22 },                     // t = 0
-	               { 35, 129 }, { 36, 28 }, { 38, 0x264E4F61 },                     // t = 4
-	               { 56, 21 }, { 59, 169 }, { 60, 43 }, { 62, 0x264E4F64 }, { 63, 62 } } }, // t = 7
+	               {  5, 1000 }, {  7, 22 }, {  8, 90 }, {  9, 30 },                   // t = 0
+	               { 43, 129 }, { 44, 28 }, { 48, 110 }, { 49, 40 },                   // t = 4
+	               { 70, 21 }, { 73, 169 }, { 74, 43 }, { 79, 40 } } },                // t = 7
+	TEXENC_CFG("astc4x4_compress",    4),
+	TEXENC_CFG("astc6x6_compress",    6),
+	TEXENC_CFG("astc8x8hdr_compress", 8),
+	TEXENC_CFG("bc1_compress",        4),
+	TEXENC_CFG("bc6h_compress",       4),
+	TEXENC_CFG("bc7_compress",        4),
+	{ .file    = "check_arg_order", // lvalue args read at call time (glslang's order)
+	  .passes  = { { .dispatch = { 1, 1, 1 } } },
+	  .buffers = { { "results", 136, fill_zero } },
+	  // 34 words per thread; thread 0 (x = 7, a = {1,2,3}, y = (7,8), b = {1,2}, s = {3,{4,5}}, z = (3,4));
+	  // derived by hand and cross-checked against skshaderc's folded constants
+	  .expect  = { {  0, 807 },  {  1, 707 }, {  2, 708 }, {  5, 707 }, {  6, 807 },
+	               {  7, 9 },    {  9, 8087 }, { 11, 5 },  { 12, 7 },   { 13, 817 },
+	               { 15, 221 },  { 16, 220 }, { 17, 453 }, { 20, 102 }, { 25, 101 },
+	               { 28, 5034 } } },
+	{ .file    = "check_array_param_std140", // std140 cbuffer array by reference, copied whole
+	  .passes  = { { .dispatch = { 1, 1, 1 } } },
+	  .buffers = { { "results", 8, fill_zero } } }, // fill-dependent floats: bitwise reference compare
 	{ .file    = "check_array_param", // aggregate `in` params: by-reference vs required copies
 	  .passes  = { { .dispatch = { 1, 1, 1 } } },
-	  .buffers = { { "results", 40, fill_zero }, { "pairs", 4, fill_zero } },
-	  // 10 words per thread t; local_vals = {t, t+1, 3t, 9}:
+	  .buffers = { { "results", 64, fill_zero }, { "pairs", 4, fill_zero } },
+	  // 16 words per thread t; local_vals = {t, t+1, 3t, 9}:
 	  // [0] sum4 = 12t+38 [1] + v[3] = 12t+47 [2] scramble 63 + (t+1) [3] untouched t
 	  // [4] call-time pair (t+10)+(t+20) [5] clobbered 999 [6] t=0: call-time shared 40
 	  // [7] call-time 6 + later 2000 [8] call-time 3t + written-back 3000
-	  // [9] cbuffer read (fill-dependent: covered by the reference compare only)
+	  // [9] [11] cbuffer reads (fill-dependent: reference compare only)
+	  // [10] local copy_whole: (t*0.5 + 1) + (t + 0.25), float bits
+	  // [12] 2*(v[t&3] + t) with v[2] = 3000 [13] t + 100 [14] t [15] 2D row sum 20t+10
 	  .expect  = { {  0, 38 }, {  1, 47 }, {  2, 64 }, {  4, 30 }, {  5, 999 },
-	               {  6, 40 }, {  7, 2006 }, {  8, 3000 },                          // t = 0
-	               { 30, 74 }, { 31, 83 }, { 32, 67 }, { 33, 3 }, { 34, 36 },
-	               { 35, 999 }, { 37, 2006 }, { 38, 3009 } } },                     // t = 3
+	               {  6, 40 }, {  7, 2006 }, {  8, 3000 }, { 13, 100 }, { 15, 10 },  // t = 0
+	               { 48, 74 }, { 50, 67 }, { 52, 36 }, { 56, 3009 }, { 60, 24 },
+	               { 63, 70 } } },                                                   // t = 3
 	{ .file    = "check_pack_half_vec", // vector f32tof16/f16tof32 lowering
 	  .passes  = { { .dispatch = { 1, 1, 1 } } },
 	  .buffers = { { "result", 9, fill_zero } },
