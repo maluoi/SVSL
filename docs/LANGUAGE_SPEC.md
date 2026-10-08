@@ -432,6 +432,19 @@ declared *before* it (a later one hasn't been initialized yet, so it's a compile
 `static` is never a compile-time constant: array sizes and other constant contexts need
 `static const`. Resources can't be `static`.
 
+A `static const` initializer is a constant expression: literals, enum constants, earlier
+`static const`s, arithmetic, comparisons, casts, constructors, initializer lists, and `?:`.
+It is evaluated once at compile time, with the same typed semantics as runtime code (`1 / 2`
+is integer division, so `static const float h = 1 / 2;` is `0`), except that float arithmetic
+runs in double precision and rounds once to the declared type (as glslang folds it). A
+`static const` whose initializer isn't constant is an error where it's used.
+
+`const` (with or without `static`) makes a variable read-only, globally or inside a
+function: writing to it, or passing it as an `out`/`inout` argument, is a compile error.
+A function-local `const` array with a constant initializer is the same immutable data as
+a module-scope `static const` table, and compiles to one (a single constant shared by
+every call, never re-initialized per invocation).
+
 Bare globals with initializers form the implicit `$Global` uniform buffer (singular, matching
 glslang/skshaderc), and their initializers become material defaults in reflection (§12):
 
@@ -548,6 +561,22 @@ author intent the backend cannot infer:
 | `[unroll]`  | `for`/`while`/`do` | `OpLoopMerge … Unroll` |
 | `[loop]`    | `for`/`while`/`do` | `OpLoopMerge … DontUnroll` |
 
+At `-O1` and above, the compiler acts on the two `if` hints itself as well. An `if`
+whose arms only compute values and write function-local storage can be converted to
+straight-line code with `select`s (if-conversion). That happens for small arms, for
+arms of any size under `[flatten]`, and never under `[branch]`. An `[flatten]` `if`
+that can't be converted (for example, an arm writes a buffer or texture, samples with
+derivatives, or runs a subgroup op) keeps the `Flatten` mask for the driver. Results are
+bit-identical either way.
+
+`[unroll]` is likewise acted on at `-O1` and above, but selectively. SVSL fully unrolls an
+`[unroll]` loop itself when that makes a large function-local array (32 or more elements)
+indexed only by constants, so the array can live in registers rather than scratch memory.
+This only applies to a counted loop: a counter that starts at a constant and changes only
+in the loop's increment, an exit test the compiler can evaluate, and no other `break` or
+`continue`. Every other `[unroll]` loop keeps the `Unroll`
+mask for the driver. Results are bit-identical either way.
+
 `[fastopt]` has no SPIR-V equivalent and remains advisory. `[unroll(n)]` (a fixed count)
 is not yet distinguished from `[unroll]`.
 
@@ -630,6 +659,12 @@ Case-insensitive (corpus uses both `SV_Position` and `SV_POSITION`).
 | `SV_GroupThreadID` | LocalInvocationId | CS |
 | `SV_GroupID` | WorkgroupId | CS |
 | `SV_GroupIndex` | LocalInvocationIndex | CS |
+
+A system value used outside the stage and direction in its row is a plain numbered
+varying (`SV_VertexID` passed from the vertex to the pixel stage, say). An `SV_` semantic
+that isn't in this table at all is a compile error on any stage input or output: a typo
+or an unsupported system value, never silently a varying. That includes an index too large
+for 32 bits (`SV_Target99999999999`).
 
 The conservative-depth variants promise the written depth is only ≥ (or ≤) the
 rasterized depth, which lets the GPU keep early-Z culling enabled even though the shader

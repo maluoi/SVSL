@@ -1,7 +1,7 @@
 // Usage analysis over lowered IR: which buffers/resources/spec constants each
 // stage touches. Feeds SKS stage_bits. (Vertex-input usage is not derived here:
-// the emitter records each input's presence and location while decorating, and
-// the SKS writer consumes that - see svsl_spirv_blob_t.vs_input_locations.)
+// the emitter records each io slot's presence and location after emission, and
+// the SKS writer consumes that - see svsl_spirv_blob_t.io_locations.)
 
 #pragma once
 

@@ -1,4 +1,5 @@
 #include "pp.h"
+#include "chars.h"
 
 #include "../util/array.h"
 
@@ -16,8 +17,11 @@ typedef struct pp_macro_t {
 	svsl_str_t  body;
 	svsl_str_t *params;      // NULL when object-like
 	int32_t     param_count; // -1 when object-like
+	int32_t     next;        // index + 1 of the previous macro in this one's hash bucket, 0 = none
 	bool        alive;
 } pp_macro_t;
+
+#define PP_MACRO_BUCKETS 256
 
 typedef struct pp_cond_t {
 	bool       parent_active;
@@ -33,6 +37,7 @@ typedef struct pp_t {
 	svsl_diag_list_t        *diags;
 
 	svsl_array_t(pp_macro_t)     macros;
+	int32_t                      macro_bucket[PP_MACRO_BUCKETS]; // index + 1 of each bucket's newest macro
 	svsl_array_t(const char *)   pragma_once;
 	pp_buf_t                     out;
 	svsl_array_t(svsl_pp_line_t) lines;
@@ -62,10 +67,7 @@ static void pp_process_file(pp_t *pp, svsl_str_t src, const char *file_name);
 
 // --- character helpers -------------------------------------------------------
 
-static bool is_ident_start(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
-static bool is_ident_char (char c) { return is_ident_start(c) || (c >= '0' && c <= '9'); }
 static bool is_hspace     (char c) { return c == ' ' || c == '\t' || c == '\r'; }
-static bool is_digit      (char c) { return c >= '0' && c <= '9'; }
 
 static bool pp_active(const pp_t *pp) {
 	return pp->cond_depth == 0 || pp->cond_stack[pp->cond_depth - 1].active;
@@ -73,16 +75,27 @@ static bool pp_active(const pp_t *pp) {
 
 // --- macro table --------------------------------------------------------------
 
+// runs for every identifier in the source, so macros are hashed by name
+static uint32_t pp_macro_hash(svsl_str_t name) {
+	uint32_t h = 2166136261u; // FNV-1a
+	for (int32_t i = 0; i < name.len; i++) h = (h ^ (uint8_t)name.ptr[i]) * 16777619u;
+	return h % PP_MACRO_BUCKETS;
+}
+
+// the newest live definition of `name`, or NULL
 static pp_macro_t *pp_macro_find(pp_t *pp, svsl_str_t name) {
-	// runs for every identifier in the source: reject on the first character
-	// before anything else so a miss costs one compare per macro
-	char c0 = name.len > 0 ? name.ptr[0] : '\0';
-	for (int32_t i = pp->macros.count - 1; i >= 0; i--) {
-		const pp_macro_t *m = &pp->macros.items[i];
-		if (m->alive && m->name.len > 0 && m->name.ptr[0] == c0 && svsl_str_eq(m->name, name))
-			return &pp->macros.items[i];
+	for (int32_t i = pp->macro_bucket[pp_macro_hash(name)]; i != 0; i = pp->macros.items[i - 1].next) {
+		pp_macro_t *m = &pp->macros.items[i - 1];
+		if (m->alive && svsl_str_eq(m->name, name)) return m;
 	}
 	return NULL;
+}
+
+static void pp_macro_add(pp_t *pp, pp_macro_t macro) {
+	uint32_t bucket = pp_macro_hash(macro.name);
+	macro.next      = pp->macro_bucket[bucket];
+	svsl_array_push(pp->arena, &pp->macros, macro);
+	pp->macro_bucket[bucket] = pp->macros.count;
 }
 
 static bool pp_macro_expanding(const pp_t *pp, svsl_str_t name) {
@@ -177,8 +190,10 @@ static void pp_strip_comments(pp_t *pp, svsl_str_t line, const char *file, int32
 			if (i < line.len) { svsl_array_push(pp->arena, &pp->clean, '"'); i++; }
 			continue;
 		}
-		svsl_array_push(pp->arena, &pp->clean, c);
-		i++;
+		int32_t run = i + 1; // plain text up to the next comment or string candidate
+		while (run < line.len && line.ptr[run] != '/' && line.ptr[run] != '"') run++;
+		svsl_array_append(pp->arena, &pp->clean, line.ptr + i, run - i);
+		i = run;
 	}
 }
 
@@ -187,8 +202,7 @@ static void pp_strip_comments(pp_t *pp, svsl_str_t line, const char *file, int32
 static void pp_expand(pp_t *pp, svsl_str_t text, pp_buf_t *out, svsl_loc_t loc);
 
 static void pp_append_str(pp_t *pp, pp_buf_t *out, svsl_str_t s) {
-	for (int32_t i = 0; i < s.len; i++)
-		svsl_array_push(pp->arena, out, s.ptr[i]);
+	svsl_array_append(pp->arena, out, s.ptr, s.len);
 }
 
 // Parses a function-like macro's argument list starting at text[*ref_i] == '('.
@@ -247,9 +261,9 @@ static void pp_expand_macro(pp_t *pp, pp_macro_t *macro, svsl_str_t args[], int3
 		int32_t i = 0;
 		while (i < body.len) {
 			char c = body.ptr[i];
-			if (is_ident_start(c)) {
+			if (svsl_is_ident_start(c)) {
 				int32_t start = i;
-				while (i < body.len && is_ident_char(body.ptr[i])) i++;
+				while (i < body.len && svsl_is_ident_char(body.ptr[i])) i++;
 				svsl_str_t ident = svsl_str_slice(body, start, i);
 				int32_t    param = -1;
 				for (int32_t k = 0; k < macro->param_count; k++)
@@ -285,21 +299,21 @@ static void pp_expand(pp_t *pp, svsl_str_t text, pp_buf_t *out, svsl_loc_t loc) 
 			if (i < text.len) { svsl_array_push(pp->arena, out, '"'); i++; }
 			continue;
 		}
-		if (is_digit(c)) { // numbers can contain ident chars (0xFF, 1e5f) - copy whole
-			while (i < text.len && (is_ident_char(text.ptr[i]) || text.ptr[i] == '.')) {
-				svsl_array_push(pp->arena, out, text.ptr[i]);
-				i++;
-			}
+		if (svsl_is_digit(c)) { // numbers can contain ident chars (0xFF, 1e5f) - copy whole
+			int32_t start = i;
+			while (i < text.len && (svsl_is_ident_char(text.ptr[i]) || text.ptr[i] == '.')) i++;
+			svsl_array_append(pp->arena, out, text.ptr + start, i - start);
 			continue;
 		}
-		if (!is_ident_start(c)) {
-			svsl_array_push(pp->arena, out, c);
-			i++;
+		if (!svsl_is_ident_start(c)) { // punctuation and spaces up to the next name, number or string
+			int32_t start = i++;
+			while (i < text.len && !svsl_is_ident_start(text.ptr[i]) && !svsl_is_digit(text.ptr[i]) && text.ptr[i] != '"') i++;
+			svsl_array_append(pp->arena, out, text.ptr + start, i - start);
 			continue;
 		}
 
 		int32_t start = i;
-		while (i < text.len && is_ident_char(text.ptr[i])) i++;
+		while (i < text.len && svsl_is_ident_char(text.ptr[i])) i++;
 		svsl_str_t  ident = svsl_str_slice(text, start, i);
 		pp_macro_t *macro = pp_macro_find(pp, ident);
 
@@ -406,21 +420,29 @@ static int64_t expr_primary_inner(pp_expr_t *e) {
 	if (c == '~') { e->p++; return ~expr_primary(e); }
 	if (c == '-') { e->p++; return -expr_primary(e); }
 	if (c == '+') { e->p++; return  expr_primary(e); }
-	if (is_digit(c)) {
+	if (svsl_is_digit(c)) {
+		// the expression isn't NUL-terminated (it's a view into the line buffer),
+		// so strtoll gets a terminated copy of just the number's characters
+		char    num[64];
+		int32_t len = 0;
+		while (e->p + len < e->end && svsl_is_ident_char(e->p[len]) && len < (int32_t)sizeof(num) - 1) {
+			num[len] = e->p[len];
+			len++;
+		}
+		num[len] = '\0';
 		char   *num_end = NULL;
-		int64_t v       = (int64_t)strtoll(e->p, &num_end, 0); // dec/hex/octal
-		if (num_end > e->p && num_end <= e->end) {
+		int64_t v       = (int64_t)strtoll(num, &num_end, 0); // dec/hex/octal
+		if (num_end > num) {
 			// skip integer suffixes
-			while (num_end < e->end && (*num_end == 'u' || *num_end == 'U' || *num_end == 'l' || *num_end == 'L'))
-				num_end++;
-			e->p = num_end;
+			while (*num_end == 'u' || *num_end == 'U' || *num_end == 'l' || *num_end == 'L') num_end++;
+			e->p += num_end - num;
 			return v;
 		}
 		expr_error(e, "bad number");
 		return 0;
 	}
-	if (is_ident_start(c)) { // surviving identifiers evaluate to 0
-		while (e->p < e->end && is_ident_char(*e->p)) e->p++;
+	if (svsl_is_ident_start(c)) { // surviving identifiers evaluate to 0
+		while (e->p < e->end && svsl_is_ident_char(*e->p)) e->p++;
 		return 0;
 	}
 	expr_error(e, "unexpected character");
@@ -504,13 +526,13 @@ static bool pp_eval_condition(pp_t *pp, svsl_str_t text, svsl_loc_t loc) {
 	int32_t i = 0;
 	while (i < text.len) {
 		char c = text.ptr[i];
-		if (!is_ident_start(c)) {
+		if (!svsl_is_ident_start(c)) {
 			svsl_array_push(pp->arena, &resolved, c);
 			i++;
 			continue;
 		}
 		int32_t start = i;
-		while (i < text.len && is_ident_char(text.ptr[i])) i++;
+		while (i < text.len && svsl_is_ident_char(text.ptr[i])) i++;
 		svsl_str_t ident = svsl_str_slice(text, start, i);
 		if (!svsl_str_eq_cstr(ident, "defined")) {
 			pp_append_str(pp, &resolved, ident);
@@ -521,7 +543,7 @@ static bool pp_eval_condition(pp_t *pp, svsl_str_t text, svsl_loc_t loc) {
 		if (parens) i++;
 		while (i < text.len && is_hspace(text.ptr[i])) i++;
 		int32_t name_start = i;
-		while (i < text.len && is_ident_char(text.ptr[i])) i++;
+		while (i < text.len && svsl_is_ident_char(text.ptr[i])) i++;
 		svsl_str_t name = svsl_str_slice(text, name_start, i);
 		if (parens) {
 			while (i < text.len && is_hspace(text.ptr[i])) i++;
@@ -553,9 +575,9 @@ static bool pp_eval_condition(pp_t *pp, svsl_str_t text, svsl_loc_t loc) {
 static void pp_directive_define(pp_t *pp, svsl_str_t rest, svsl_loc_t loc) {
 	rest = svsl_str_trim(rest);
 	int32_t i = 0;
-	while (i < rest.len && is_ident_char(rest.ptr[i])) i++;
+	while (i < rest.len && svsl_is_ident_char(rest.ptr[i])) i++;
 	svsl_str_t name = svsl_str_slice(rest, 0, i);
-	if (name.len == 0 || !is_ident_start(name.ptr[0])) {
+	if (name.len == 0 || !svsl_is_ident_start(name.ptr[0])) {
 		svsl_diag_add(pp->arena, pp->diags, svsl_severity_error, loc, "expected macro name after #define");
 		return;
 	}
@@ -574,7 +596,7 @@ static void pp_directive_define(pp_t *pp, svsl_str_t rest, svsl_loc_t loc) {
 			return;
 		}
 		for (int32_t k = 0; k < param_count; k++) {
-			if (raw[k].len == 0 || !is_ident_start(raw[k].ptr[0])) {
+			if (raw[k].len == 0 || !svsl_is_ident_start(raw[k].ptr[0])) {
 				svsl_diag_add(pp->arena, pp->diags, svsl_severity_error, loc, "bad macro parameter name");
 				return;
 			}
@@ -584,7 +606,7 @@ static void pp_directive_define(pp_t *pp, svsl_str_t rest, svsl_loc_t loc) {
 	}
 
 	svsl_str_t body = svsl_str_trim(svsl_str_slice(rest, i, rest.len));
-	svsl_array_push(pp->arena, &pp->macros, (pp_macro_t){
+	pp_macro_add(pp, (pp_macro_t){
 		.name        = pp_str_dup(pp, name),
 		.body        = pp_str_dup(pp, body),
 		.params      = params,
@@ -648,7 +670,7 @@ static void pp_directive(pp_t *pp, svsl_str_t line, const char *file, int32_t li
 	i++; // '#'
 	while (i < line.len && is_hspace(line.ptr[i])) i++;
 	int32_t start = i;
-	while (i < line.len && is_ident_char(line.ptr[i])) i++;
+	while (i < line.len && svsl_is_ident_char(line.ptr[i])) i++;
 	svsl_str_t name = svsl_str_slice(line, start, i);
 	svsl_str_t rest = svsl_str_trim(svsl_str_slice(line, i, line.len));
 
@@ -668,7 +690,7 @@ static void pp_directive(pp_t *pp, svsl_str_t line, const char *file, int32_t li
 			} else {
 				svsl_str_t macro_name = rest;
 				int32_t    n          = 0;
-				while (n < macro_name.len && is_ident_char(macro_name.ptr[n])) n++;
+				while (n < macro_name.len && svsl_is_ident_char(macro_name.ptr[n])) n++;
 				macro_name = svsl_str_slice(macro_name, 0, n);
 				if (macro_name.len == 0)
 					svsl_diag_add(pp->arena, pp->diags, svsl_severity_error, loc, "expected identifier after #%.*s", name.len, name.ptr);
@@ -716,7 +738,7 @@ static void pp_directive(pp_t *pp, svsl_str_t line, const char *file, int32_t li
 	if      (svsl_str_eq_cstr(name, "define"))  pp_directive_define(pp, rest, loc);
 	else if (svsl_str_eq_cstr(name, "undef")) {
 		int32_t n = 0;
-		while (n < rest.len && is_ident_char(rest.ptr[n])) n++;
+		while (n < rest.len && svsl_is_ident_char(rest.ptr[n])) n++;
 		// a redefinition pushes a second entry rather than replacing the first
 		// (lookup scans in reverse, so the last one wins), so #undef has to clear
 		// every entry with the name or an older definition resurfaces
@@ -751,8 +773,9 @@ static bool pp_next_logical_line(pp_t *pp, pp_file_t *f, int32_t *out_line_no) {
 	*out_line_no      = f->line;
 
 	while (f->pos < f->src.len) {
-		int32_t start = f->pos;
-		while (f->pos < f->src.len && f->src.ptr[f->pos] != '\n') f->pos++;
+		int32_t     start = f->pos;
+		const char *nl    = memchr(f->src.ptr + start, '\n', (size_t)(f->src.len - start));
+		f->pos = nl ? (int32_t)(nl - f->src.ptr) : f->src.len;
 		int32_t end = f->pos;
 		if (f->pos < f->src.len) f->pos++; // consume '\n'
 		f->line++;
@@ -760,8 +783,7 @@ static bool pp_next_logical_line(pp_t *pp, pp_file_t *f, int32_t *out_line_no) {
 
 		bool spliced = end > start && f->src.ptr[end - 1] == '\\';
 		if (spliced) end--;
-		for (int32_t k = start; k < end; k++)
-			svsl_array_push(pp->arena, &pp->logical, f->src.ptr[k]);
+		svsl_array_append(pp->arena, &pp->logical, f->src.ptr + start, end - start);
 		if (!spliced) break;
 	}
 	return true;
@@ -815,8 +837,7 @@ static void pp_process_file(pp_t *pp, svsl_str_t src, const char *file_name) {
 		svsl_loc_t loc = { .file = file_name, .line = line_no, .col = 1 };
 		pp_expand(pp, clean, &pp->expanded, loc);
 
-		for (int32_t k = 0; k < pp->expanded.count; k++)
-			svsl_array_push(pp->arena, &pp->out, pp->expanded.items[k]);
+		svsl_array_append(pp->arena, &pp->out, pp->expanded.items, pp->expanded.count);
 		svsl_array_push(pp->arena, &pp->out, '\n');
 		svsl_array_push(pp->arena, &pp->lines, (svsl_pp_line_t){ .file = file_name, .line = line_no });
 	}
@@ -846,7 +867,7 @@ bool svsl_pp_run(svsl_arena_t *arena, const char *source, const char *opt_filena
 	if (opt_options) {
 		for (int32_t i = 0; i < opt_options->define_count; i++) {
 			const svsl_define_t *def = &opt_options->defines[i];
-			svsl_array_push(arena, &pp.macros, (pp_macro_t){
+			pp_macro_add(&pp, (pp_macro_t){
 				.name        = pp_str_dup(&pp, svsl_str(def->name)),
 				.body        = pp_str_dup(&pp, svsl_str(def->value ? def->value : "1")),
 				.param_count = -1,

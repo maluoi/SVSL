@@ -526,8 +526,7 @@ static uint32_t emit_spirv_asm(emit_t *e, const svsl_ir_inst_t *inst) {
 	return 0;
 }
 
-static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
-                      const svsl_type_t *rt, svsl_type_id_t ret_type) {
+static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst) {
 	svsl_spv_t        *spv = &e->spv;
 	svsl_spv_stream_t *fs  = &spv->funcs;
 	svsl_ir_op_        op  = (svsl_ir_op_)inst->op;
@@ -698,31 +697,11 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 		begin_block(e, f->merge);
 		return;
 	}
-	case svsl_ir_return: {
+	case svsl_ir_return: // outputs were stored to their interface variables already
 		ensure_block(e);
-		// scalar-replaced output: members already stored straight to the interface
-		bool sroa_out = e->output_sroa_var != SVSL_IR_NONE && inst->args[0] != SVSL_IR_NONE &&
-		                e->fn->insts.items[inst->args[0]].op == svsl_ir_load &&
-		                e->fn->insts.items[inst->args[0]].args[0] == e->output_sroa_var;
-		if (!sroa_out && inst->args[0] != SVSL_IR_NONE && e->output_count > 0) {
-			uint32_t value = e->value_ids[inst->args[0]];
-			if (rt->kind == svsl_type_struct) {
-				const svsl_struct_info_t *si = &e->prog->types.structs.items[rt->struct_index];
-				for (int32_t m = 0; m < si->members.count && m < e->output_count; m++) {
-					uint32_t part = emit_value_inst(e, fs, SpvOpCompositeExtract,
-					                                spv_type_for(e, si->members.items[m].type),
-					                                (uint32_t[]){ value, (uint32_t)m }, 2);
-					svsl_spv_inst2(spv, fs, SpvOpStore, e->output_vars[m], part);
-				}
-			} else {
-				svsl_spv_inst2(spv, fs, SpvOpStore, e->output_vars[0], value);
-			}
-			(void)ret_type;
-		}
 		svsl_spv_inst(spv, fs, SpvOpReturn, NULL, 0);
 		e->terminated = true;
 		return;
-	}
 	case svsl_ir_discard:
 		ensure_block(e);
 		svsl_spv_inst(spv, fs, SpvOpKill, NULL, 0);
@@ -811,6 +790,11 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 			result = builtin_input_var(e, inst->args[1]);
 			e->value_class[i] = SpvStorageClassInput;
 			break;
+		case svsl_ref_stage_io:
+			result = io_var(e, (int32_t)inst->args[1]);
+			e->value_class[i] = e->fn->entry->io.items[inst->args[1]].output ? SpvStorageClassOutput
+			                                                                  : SpvStorageClassInput;
+			break;
 		default:
 			eerr(e, inst->loc, "bad pointer kind");
 			break;
@@ -847,35 +831,6 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 			if (res->buffer_index < 0) // object form wraps in struct { T @data[]; }
 				ops[count++] = spv_int_const(e, 0);
 		} else {
-			int32_t sp, sm;
-			if (sroa_member_chain(e, (uint32_t)i, &sp, &sm) && e->param_sroa[sp]) {
-				// scalar-replaced input: this member IS its stage-input variable.
-				uint32_t mvar = e->param_member_var[sp * SVSL_EMIT_MAX_MEMBERS + sm];
-				e->value_class[i]  = SpvStorageClassInput;
-				e->value_layout[i] = 0;
-				if (inst->aux_count == 1) {
-					result = mvar; // whole member: the following load reads it directly
-					break;
-				}
-				// sub-member (input.member.comp): access-chain into the input
-				// variable with the trailing indices; the load reads the scalar.
-				ops[count++] = mvar;
-				for (uint32_t k = 1; k < inst->aux_count && count < 17; k++)
-					ops[count++] = e->value_ids[e->fn->aux.items[inst->aux + k]];
-				result = emit_value_inst(e, fs, SpvOpAccessChain,
-				                         spv_ptr_type(e, SpvStorageClassInput, type_id), ops, count);
-				break;
-			}
-			if (base == e->output_sroa_var) {
-				// scalar-replaced output: this member IS its stage-output variable,
-				// so the following store writes straight to the interface (analysis
-				// guarantees a constant single-index member chain here).
-				uint32_t m         = e->fn->insts.items[e->fn->aux.items[inst->aux]].args[0];
-				result             = e->output_vars[m];
-				e->value_class[i]  = SpvStorageClassOutput;
-				e->value_layout[i] = 0;
-				break;
-			}
 			base_var  = e->value_ids[base];
 			class_    = (SpvStorageClass)e->value_class[base];
 			in_buffer = class_ == SpvStorageClassUniform || class_ == SpvStorageClassStorageBuffer ||
@@ -927,8 +882,22 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 		uint32_t  stack_ops[64];
 		uint32_t *ops = inst->aux_count <= 64 ? stack_ops
 		              : svsl_arena_alloc(e->arena, (size_t)inst->aux_count * 4);
-		for (uint32_t k = 0; k < inst->aux_count; k++)
-			ops[k] = e->value_ids[e->fn->aux.items[inst->aux + k]];
+		uint8_t lo = 2, hi = 0; // constness: 1 constant, 2 spec-dependent (see emit_op_or_spec)
+		for (uint32_t k = 0; k < inst->aux_count; k++) {
+			uint32_t v = e->fn->aux.items[inst->aux + k];
+			ops[k] = e->value_ids[v];
+			if (e->value_spec[v] < lo) lo = e->value_spec[v];
+			if (e->value_spec[v] > hi) hi = e->value_spec[v];
+		}
+		// constant constituents make a constant composite (glslang's form), unless
+		// it concatenates vectors - only OpCompositeConstruct can do that
+		const svsl_type_t *ct = svsl_type_get(&e->prog->types, inst->type);
+		if (lo >= 1 && inst->aux_count > 0 && (ct->kind != svsl_type_vector || (uint32_t)ct->count == inst->aux_count)) {
+			result = svsl_spv_const_composite(spv, hi == 2 ? SpvOpSpecConstantComposite : SpvOpConstantComposite,
+			                                  type_id, ops, inst->aux_count);
+			e->value_spec[i] = hi;
+			break;
+		}
 		result = emit_value_inst(e, fs, SpvOpCompositeConstruct, type_id, ops, inst->aux_count);
 		break;
 	}
@@ -984,7 +953,7 @@ static void emit_inst(emit_t *e, int32_t i, const svsl_ir_inst_t *inst,
 			break;
 		}
 
-		// float vector * scalar (peephole strips the splat so one operand is a
+		// float vector * scalar (combine strips the splat so one operand is a
 		// scalar) -> OpVectorTimesScalar instead of splat + component-wise FMul
 		if (t->kind == svsl_type_vector && op == svsl_ir_mul && scalar_is_floaty(t->scalar)) {
 			const svsl_type_t *ta = svsl_type_get(&e->prog->types, e->fn->insts.items[inst->args[0]].type);

@@ -72,6 +72,10 @@ uint32_t svsl_spv_type(svsl_spv_t *spv, SpvOp op, const uint32_t *operands, uint
 
 // cached scalar constant (bits sized by the type's width; 64-bit uses two words)
 uint32_t svsl_spv_const(svsl_spv_t *spv, uint32_t type_id, uint64_t bits, bool wide, bool is_bool);
+// cached OpConstantComposite / OpSpecConstantComposite (`op`) over constituent
+// ids; composites of more than six constituents are emitted uncached
+uint32_t svsl_spv_const_composite(svsl_spv_t *spv, SpvOp op, uint32_t type_id,
+                                  const uint32_t *constituents, uint32_t count);
 // cached OpConstantNull (the zero value of any type, composites included)
 uint32_t svsl_spv_const_null(svsl_spv_t *spv, uint32_t type_id);
 

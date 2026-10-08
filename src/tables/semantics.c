@@ -2,6 +2,8 @@
 
 #include "../../vendor/spirv.h"
 
+#include <stdint.h>
+
 static bool ieq_prefix(svsl_str_t s, const char *upper, int32_t *out_digit) {
 	int32_t i = 0;
 	for (; upper[i]; i++) {
@@ -11,14 +13,24 @@ static bool ieq_prefix(svsl_str_t s, const char *upper, int32_t *out_digit) {
 		if (c != upper[i]) return false;
 	}
 	if (i == s.len) { *out_digit = 0; return true; }
-	// optional trailing index digits (TEXCOORD3, SV_Target2)
+	// optional trailing index digits (TEXCOORD3, SV_Target2); an index past
+	// int32 isn't one (it would overflow), so the name doesn't match
 	int32_t v = 0;
 	for (; i < s.len; i++) {
 		if (s.ptr[i] < '0' || s.ptr[i] > '9') return false;
-		v = v * 10 + (s.ptr[i] - '0');
+		int32_t d = s.ptr[i] - '0';
+		if (v > (INT32_MAX - d) / 10) return false;
+		v = v * 10 + d;
 	}
 	*out_digit = v;
 	return true;
+}
+
+bool svsl_semantic_known(svsl_str_t semantic) {
+	svsl_semantic_info_t info;
+	for (int32_t io = svsl_sem_vs_in; io <= svsl_sem_cs_in; io++)
+		if (svsl_semantic_lookup(semantic, (svsl_sem_io_)io, &info)) return true;
+	return false;
 }
 
 bool svsl_semantic_lookup(svsl_str_t semantic, svsl_sem_io_ io, svsl_semantic_info_t *out_info) {

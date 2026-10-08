@@ -13,7 +13,7 @@ option(SVSL_BUILD_CLI   "Build the svslc CLI compiler"                 ${PROJECT
 option(SVSL_BUILD_TESTS "Build and register the unit/corpus tests"     ${PROJECT_IS_TOP_LEVEL})
 option(SVSL_INSTALL     "Generate install rules"                       ${PROJECT_IS_TOP_LEVEL})
 option(SVSL_BUILD_VIEW  "Build the svsl_view visual test app"          OFF)
-option(SVSL_BUILD_ISA   "Build the svsl_isa RDNA ISA measurement tool" OFF)
+option(SVSL_BUILD_ISA   "Build the svsl_isa GPU measurement tool"     OFF)
 option(SVSL_ENABLE_WGSL "Compile the WGSL text backend (WebGPU)"       OFF)
 
 # Directory-scoped: applies to every target here, leaks nothing into a parent.
@@ -90,12 +90,19 @@ add_library(svsl STATIC
 	src/ir/ir_build.c
 	src/ir/ir_dump.c
 	src/ir/ir_operands.c
+	src/ir/ir_edit.c
+	src/ir/ir_cf.c
+	src/ir/ir_const.c
+	src/ir/ir_verify.c
 	src/ir/passes/optimize.c
 	src/ir/passes/fold.c
-	src/ir/passes/peephole.c
+	src/ir/passes/combine.c
+	src/ir/passes/cfg.c
 	src/ir/passes/mem.c
 	src/ir/passes/cse.c
 	src/ir/passes/dce.c
+	src/ir/passes/unroll.c
+	src/ir/passes/sroa.c
 	src/ir/usage.c
 	src/out/reflect.c
 	src/out/sks_write.c
@@ -158,13 +165,15 @@ if (SVSL_BUILD_VIEW)
 	add_subdirectory(app)
 endif()
 
-# --- svsl_isa: dev-only RDNA ISA measurement tool ---------------------------
-# Compiles a .spv stage into a real RADV pipeline and reports VGPR/SGPR/code
-# size - the hardware cost SPIR-V word count only loosely proxies. Links
-# libvulkan directly (measurement tool, not part of the zero-dependency core).
+# --- svsl_isa: dev-only GPU measurement tool --------------------------------
+# Builds .spv stages into real driver pipelines (desktop or Android) and reports
+# the driver's statistics, cold pipeline-creation time, or a timed dispatch - the
+# hardware cost SPIR-V word count only loosely proxies. Links libvulkan directly
+# (measurement tool, not part of the zero-dependency core). See app/isa.c.
 
 if (SVSL_BUILD_ISA)
 	find_package(Vulkan REQUIRED)
 	add_executable(svsl_isa app/isa.c)
-	target_link_libraries(svsl_isa PRIVATE Vulkan::Vulkan)
+	target_link_libraries (svsl_isa PRIVATE Vulkan::Vulkan)
+	target_compile_options(svsl_isa PRIVATE ${SVSL_WARNINGS})
 endif()

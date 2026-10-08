@@ -105,10 +105,14 @@ const char *svsl_reflect_print(svsl_arena_t *arena, const svsl_program_t *prog) 
 		put(&p, "\n");
 	}
 
-	for (int32_t i = 0; i < prog->vertex_inputs.count; i++) {
-		const svsl_vertex_input_t *in = &prog->vertex_inputs.items[i];
-		put(&p, "input %-10s : %.*s\n", svsl_type_name(&prog->types, in->type),
-		    in->semantic.len, in->semantic.ptr);
+	for (int32_t e = 0; e < prog->entries.count; e++) { // the vertex entry's mesh attributes
+		const svsl_entry_t *entry = &prog->entries.items[e];
+		for (int32_t i = 0; i < entry->io.count; i++) {
+			const svsl_io_slot_t *in = &entry->io.items[i];
+			if (!svsl_io_is_attribute(entry, in)) continue;
+			put(&p, "input %-10s : %.*s\n", svsl_type_name(&prog->types, in->type),
+			    in->semantic.len, in->semantic.ptr);
+		}
 	}
 
 	for (int32_t i = 0; i < prog->spec_consts.count; i++) {

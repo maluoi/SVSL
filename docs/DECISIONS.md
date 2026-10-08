@@ -41,7 +41,7 @@ prototype failure is addressed *structurally* here:
 | No JSON | No JSON input or output anywhere; reflection = C API, container, or text tables | User preference |
 | SPIR-V target | 1.3 / Vulkan 1.1, fixed; extras via extensions | Matches skshaderc; a version option nothing needs would be dead surface |
 | Preprocessor | Real separate pass with a line map | The corpus requires it; the prototype's parser-embedded half-preprocessor was a known smell |
-| Optimization | Fixed in-IR pipeline iterated to a fixpoint: fold, peephole, store→load forwarding, dead-store, CSE, DCE — value-preserving at `-O1` (default, oracle-covered), float algebra opt-in at `-O2`. `-O0/1/2` flag. No pass manager. See `docs/OPTIMIZATION_PLAN.md`. | Clean output without linking SPIRV-Tools; `-O1` cut corpus SPIR-V ~14% / live IR ~34%, pixel-identical to skshaderc; heavy opt still `spirv-opt`'d externally |
+| Optimization | Fixed in-IR pipeline cycled to a fixpoint: fold (incl. constant-table loads), combine, CFG simplification (incl. if-conversion), scoped CSE, SROA of local arrays and structs (entry parameters included: stage I/O is pointer slots in the IR), scoped store→load forwarding, dead-store, profitability-driven `[unroll]` (only where it frees a ≥ 32-element array that then fits in registers), then DCE. Debug builds verify the IR's invariants after every commit (`ir_verify.c`). Passes record changes in one edit buffer (`ir_edit.c`: replace/kill/insert, one O(n) commit), so they can create instructions. Value-preserving at `-O1` (default, oracle-covered), float algebra opt-in at `-O2`. `-O0/1/2` flag. No pass manager. See `docs/OPTIMIZATION_PLAN.md` and `docs/PLAN_optimizer_llvm.md`. | Clean output without linking SPIRV-Tools; `-O1` cut corpus SPIR-V ~14% / live IR ~34%, pixel-identical to skshaderc; heavy opt still `spirv-opt`'d externally |
 | Correctness bar | Outputs only: pixels and buffer bits, bit-exact for compute | SPIR-V text differences are legal encodings of the same program; comparing them creates false failures and hides real ones |
 | glslang divergences | Keep HLSL/DXC-correct behavior; note the divergence in the check shader | Verified glslang bugs: WavePrefixSum emits inclusive (should be exclusive), InterlockedCompareStore emits nothing, `ldexp` with float exponent emits invalid SPIR-V, unknown `SV_*` on a vertex input silently becomes a located attribute that its own reflection then drops (meta ≠ SPIR-V — the bug class SKS v10 exists to kill; SVSL rejects it like DXC) |
 | Structured-buffer element layout | Object-form elements default to **C layout where C layout is free**: pack1 rules, but layouts needing `scalarBlockLayout` are compile errors unless `pack1` is written explicitly, which permits them and records SKS feature bit 16. Layout keywords prefix declarations (any form) with standards-name aliases `scalar`/`relaxed`/`std140`/`std430`. | The product goal is C-struct interop: `element_size == sizeof`, offsets match plain C. The error-vs-infer split is about consent, mirroring `float16`: typing a feature opts into its device requirement, but a bare declaration names no layout and must not silently narrow device support (the failure would surface as pipeline-creation errors on other people's hardware). glslang was rejected as the reference here — its HLSL mode emits DX-packed offsets with a std430-rounded stride (a TODO'd inconsistency in `updateMemberOffset`, which even excludes `$Global` by name), matching neither C nor std430, so C arrays break from element 1. The structs the default refuses are exactly those std430 silently corrupted against C. |
@@ -88,11 +88,14 @@ meta while its location stayed consumed in the SPIR-V.
 
 Invariant, and where the data flows: **the vertex-inputs block mirrors the vs module's
 input interface exactly** — an entry is written iff its OpVariable survived emission, at
-the location the emitter actually decorated. The emitter records this per input while
-decorating (`svsl_spirv_blob_t.vs_input_locations`, name-checked against
-`prog->vertex_inputs` so a walk divergence is a compile error, not wrong metadata); the
-SKS writer only consumes it. Location math is never re-derived downstream, and the old
-IR-side vertex-input usage scan was deleted with it. Unused inputs are stripped from the
+the location the emitter actually decorated. Locations are numbered once, by sema, in
+each entry's stage-interface table (`svsl_entry_t.io`); the vertex attributes are that
+table's non-builtin input slots (`svsl_io_is_attribute`) — there is no second list. The
+IR reads and writes interface slots through `svsl_ref_stage_io` pointers, and the emitter
+declares a slot's variable only when the optimized body still uses it. After emission
+it records each slot's decorated location, or -1 for one never declared
+(`svsl_spirv_blob_t.io_locations`); the SKS writer and the WGSL emitter only consume
+it. Location math is never re-derived downstream. Unused inputs are stripped from the
 SPIR-V (matching glslang) but still consume their location, so recorded locations have
 visible gaps — `checks/check_vertex_locations.hlsl` pins this and the explicit
 `[location(N)]` path against the reference compiler.

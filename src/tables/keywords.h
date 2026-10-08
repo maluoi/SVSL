@@ -33,4 +33,13 @@ typedef enum svsl_kw_ {
 	svsl_kw_true, svsl_kw_false,
 } svsl_kw_;
 
-svsl_kw_ svsl_keyword_lookup(svsl_str_t ident);
+// A hash index over the keyword table. The lexer builds one per run (on its
+// stack, so no shared state), and each identifier then costs a hash and
+// usually one compare.
+#define SVSL_KEYWORD_SLOTS 128
+typedef struct svsl_keyword_index_t {
+	uint8_t slot[SVSL_KEYWORD_SLOTS]; // keyword row + 1, 0 = empty
+} svsl_keyword_index_t;
+
+void     svsl_keyword_index_build(svsl_keyword_index_t *out);
+svsl_kw_ svsl_keyword_find       (const svsl_keyword_index_t *index, svsl_str_t ident);

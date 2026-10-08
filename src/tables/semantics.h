@@ -26,3 +26,9 @@ typedef struct svsl_semantic_info_t {
 // Classifies `semantic` for a given stage/direction. Returns false for empty or
 // unknown semantics (treated as plain location-numbered IO by the caller).
 bool svsl_semantic_lookup(svsl_str_t semantic, svsl_sem_io_ io, svsl_semantic_info_t *out_info);
+
+// True when `semantic` names a system value this table knows in some stage or
+// direction (a known SV_ name in another position is plain numbered IO, e.g.
+// SV_VertexID passed VS->PS). An SV_ spelling that fails this is a typo or an
+// unsupported system value - never meant as a user varying.
+bool svsl_semantic_known(svsl_str_t semantic);

@@ -139,6 +139,32 @@ uint32_t svsl_spv_const(svsl_spv_t *spv, uint32_t type_id, uint64_t bits, bool w
 	return id;
 }
 
+uint32_t svsl_spv_const_composite(svsl_spv_t *spv, SpvOp op, uint32_t type_id,
+                                  const uint32_t *constituents, uint32_t count) {
+	svsl_spv_type_key_t key = { .op = (uint16_t)op, .a = type_id };
+	uint32_t *slots[6] = { &key.b, &key.c, &key.d, &key.e, &key.f, &key.g };
+	bool      cached   = count <= 6;
+	for (uint32_t i = 0; cached && i < count; i++) *slots[i] = constituents[i];
+	for (int32_t i = 0; cached && i < spv->const_cache.count; i++) {
+		const svsl_spv_type_key_t *entry = &spv->const_cache.items[i];
+		if (entry->op == key.op && entry->a == key.a && entry->b == key.b && entry->c == key.c &&
+		    entry->d == key.d && entry->e == key.e && entry->f == key.f && entry->g == key.g)
+			return entry->id; // the type fixes the count; ids are never 0, so unused slots differ
+	}
+	uint32_t id = svsl_spv_id(spv);
+	if (cached) {
+		key.id = id;
+		svsl_array_push(spv->arena, &spv->const_cache, key);
+	}
+	uint32_t  stack[10];
+	uint32_t *words = count + 2 <= 10 ? stack : svsl_arena_alloc(spv->arena, (size_t)(count + 2) * 4);
+	words[0] = type_id;
+	words[1] = id;
+	for (uint32_t i = 0; i < count; i++) words[2 + i] = constituents[i];
+	svsl_spv_inst(spv, &spv->types, op, words, count + 2);
+	return id;
+}
+
 uint32_t svsl_spv_const_null(svsl_spv_t *spv, uint32_t type_id) {
 	for (int32_t i = 0; i < spv->const_cache.count; i++) {
 		const svsl_spv_type_key_t *entry = &spv->const_cache.items[i];

@@ -23,11 +23,11 @@ typedef enum svsl_qcom_use_ {
 typedef struct svsl_spirv_blob_t {
 	const uint32_t *words;
 	int32_t         word_count;
-	// Vertex stage only (NULL otherwise): the SPIR-V input location assigned to
-	// each prog->vertex_inputs entry, or -1 if the input's OpVariable was
-	// stripped (unreferenced SROA member). Recorded at decoration time so the
-	// SKS metadata can mirror the module's interface exactly.
-	const int32_t  *vs_input_locations;
+	// Per entry io slot (svsl_entry_t.io): the Location its variable was
+	// decorated with, or -1 for a builtin or a slot the optimized body never
+	// touched (no variable declared). Recorded after emission, so the SKS
+	// vertex-input records and the WGSL interface mirror the module exactly.
+	const int32_t  *io_locations;
 	// Per prog->resources entry: this stage's svsl_qcom_use_ classification
 	const uint8_t  *qcom_res_use;
 } svsl_spirv_blob_t;

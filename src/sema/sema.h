@@ -69,6 +69,22 @@ typedef struct svsl_resource_t {
 	svsl_loc_t     loc;
 } svsl_resource_t;
 
+// One slot of an entry's stage interface: an input parameter (or a member of a
+// struct parameter), or the return value (or a member of a returned struct).
+// Sema numbers every slot once; the IR addresses slots by index (a
+// svsl_ref_stage_io pointer) and each backend declares the ones it references.
+typedef struct svsl_io_slot_t {
+	svsl_str_t     name;     // param or member name; the entry's own name for a plain return value
+	svsl_str_t     semantic;
+	svsl_type_id_t type;
+	svsl_loc_t     loc;
+	int32_t        location; // interface location; -1 for a system value (a builtin)
+	int16_t        param;    // input: the entry parameter it reads; -1 for an output
+	int16_t        member;   // member of a struct param/return; -1 = the whole value
+	uint8_t        interp;   // svsl_interp_
+	bool           output;
+} svsl_io_slot_t;
+
 typedef struct svsl_entry_t {
 	svsl_str_t             name;
 	svsl_stage_            stage;
@@ -77,7 +93,15 @@ typedef struct svsl_entry_t {
 	int32_t                tile_rate[3]; // compute: [tile_shading_rate_qcom], 0 = none
 	bool                   non_coherent_tile_reads; // pixel: [non_coherent_tile_reads_qcom]
 	const svsl_ast_func_t *func;
+	svsl_array_t(svsl_io_slot_t) io; // stage interface: inputs in parameter order, then outputs
 } svsl_entry_t;
+
+// A vertex entry's mesh attribute: an input slot that isn't a system value (so
+// sema numbered it a location). The container's vertex-input records are these
+// slots, in interface order, for the ones the vertex module still declares.
+static inline bool svsl_io_is_attribute(const svsl_entry_t *entry, const svsl_io_slot_t *slot) {
+	return entry->stage == svsl_stage_vertex && !slot->output && slot->location >= 0;
+}
 
 typedef struct svsl_spec_const_t {
 	svsl_str_t     name;
@@ -87,18 +111,13 @@ typedef struct svsl_spec_const_t {
 	svsl_loc_t     loc;
 } svsl_spec_const_t;
 
-typedef struct svsl_vertex_input_t {
-	svsl_str_t     name;
-	svsl_type_id_t type;
-	svsl_str_t     semantic;
-} svsl_vertex_input_t;
-
 // const, private (non-const `static`) and workgroup globals (not reflected; used by bodies and IR)
 typedef struct svsl_global_t {
 	svsl_str_t            name;
 	svsl_type_id_t        type;
 	const svsl_ast_var_t *var;     // declaration incl. initializer
-	bool                  has_int; // initializer folded to an integer constant
+	const uint64_t       *value;   // const: the evaluated initializer (const_eval.h); NULL if not constant
+	bool                  has_int; // const: initializer folded to an integer early, for sizes and attributes
 	int64_t               int_value;
 } svsl_global_t;
 
@@ -138,7 +157,6 @@ typedef struct svsl_program_t {
 	svsl_array_t(svsl_resource_t)     resources;
 	svsl_array_t(svsl_entry_t)        entries;
 	svsl_array_t(svsl_spec_const_t)   spec_consts;
-	svsl_array_t(svsl_vertex_input_t) vertex_inputs;
 	svsl_array_t(svsl_global_t)       const_globals;   // `const` / `static const`: read-only
 	svsl_array_t(svsl_global_t)       private_globals; // non-const `static`: per-invocation, writable
 	svsl_array_t(svsl_global_t)       workgroup_vars;

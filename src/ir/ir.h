@@ -23,7 +23,6 @@ typedef enum svsl_ir_op_ {
 
 	// memory (pointer-producing ops, then load/store)
 	svsl_ir_var,         // function-local variable; type = pointee
-	svsl_ir_param,       // entry-point input: args[0] = param index; type = pointee
 	svsl_ir_ptr,         // global storage: args[0] = svsl_ref_ kind, args[1] = a, args[2] = b
 	svsl_ir_chain,       // args[0] = base pointer; index value ids in aux; type = pointee
 	svsl_ir_load,        // args[0] = pointer
@@ -70,7 +69,7 @@ typedef enum svsl_ir_op_ {
 	svsl_ir_switch,      // args[0] = value; case literals in aux (parallel to case markers)
 	svsl_ir_case,        // args[0] = case ordinal, args[1] = 1 when default
 	svsl_ir_end_switch,
-	svsl_ir_return,      // args[0] = value or SVSL_IR_NONE
+	svsl_ir_return,      // no operands: an entry stores its outputs first (stage_io slots)
 	svsl_ir_discard,
 	svsl_ir_demote,
 } svsl_ir_op_;
@@ -117,33 +116,28 @@ typedef struct svsl_ir_module_t {
 // that may change IEEE edge results (-0.0/NaN/Inf/rounding) and is NOT oracle-
 // covered. See docs/OPTIMIZATION_PLAN.md.
 
-// Upper bound on optimizer fixpoint iterations. Passes are monotone (they only
-// remove work), so this is a safety backstop, not a tuning knob.
-#define SVSL_OPT_MAX_ITERS 8
+// Upper bound on optimizer fixpoint rounds (each runs every pass once). It bounds
+// compile time; the output is correct wherever it stops. Every pass but unroll
+// only removes work, and each unrolled nest level costs about a round, so deep
+// [unroll] nests use the most: sk_texenc's 6x6 encoder converges in 8. Debug
+// builds report a function that reaches the cap (optimize.c).
+#define SVSL_OPT_MAX_ITERS 16
 
 // Lowers every entry point with full inlining of user calls, then runs the
 // optimizer at the given level. Returns false if any error diagnostic was emitted.
 bool svsl_ir_build(svsl_arena_t *arena, svsl_program_t *prog, svsl_opt_level_ opt_level,
                    svsl_ir_module_t *out_module, svsl_diag_list_t *ref_diags);
 
-// The optimizer: a fixed, iterated list of pure passes (no pass manager). Each
-// pass rewrites in place or nops instructions out - indices stay stable and
-// value references stay forward-only. See docs/OPTIMIZATION_PLAN.md section 3.
-void svsl_ir_optimize(svsl_arena_t *arena, svsl_ir_func_t *fn,
-                      const svsl_program_t *prog, svsl_opt_level_ level);
-
-// Individual passes. Each returns true when it changed the function, so the
-// driver can iterate to a fixpoint. Dead instructions become nops; indices stay
-// stable, so users never need patching.
-bool svsl_ir_fold   (svsl_ir_func_t *fn, const svsl_types_t *types); // constant folding
-
-bool svsl_ir_peephole(svsl_arena_t *arena, svsl_ir_func_t *fn,       // pattern simplification
-                      const svsl_types_t *types, svsl_opt_level_ level);
-bool svsl_ir_forward(svsl_arena_t *arena, svsl_ir_func_t *fn,        // store->load + redundant-load
-                     const svsl_program_t *prog);
-bool svsl_ir_dse    (svsl_arena_t *arena, svsl_ir_func_t *fn);       // dead-store elimination
-bool svsl_ir_cse    (svsl_arena_t *arena, svsl_ir_func_t *fn, const svsl_types_t *types); // CSE
-bool svsl_ir_dce    (svsl_arena_t *arena, svsl_ir_func_t *fn, const svsl_types_t *types); // DCE
+// The optimizer: a fixed, iterated list of passes (no pass manager), each
+// recording its changes in an edit buffer the driver commits (ir_edit.h). The
+// committed function stays dense, with references only to earlier ids. May
+// intern types (folding a vector may need its component scalar type), so it
+// runs before emit freezes the type table. Debug builds verify the IR after
+// every pass; a violation is reported as an internal-compiler-error diagnostic
+// and returns false (fn is then unusable). See docs/OPTIMIZATION_PLAN.md and
+// docs/PLAN_optimizer_llvm.md.
+bool svsl_ir_optimize(svsl_arena_t *arena, svsl_ir_func_t *fn, svsl_program_t *prog,
+                      svsl_opt_level_ level, svsl_diag_list_t *ref_diags);
 
 // Integer constant conversion (sign-/zero-extend or truncate by the scalar kinds),
 // in svsl_ir_const's encoding: signed results sign-extended to 64 bits, unsigned

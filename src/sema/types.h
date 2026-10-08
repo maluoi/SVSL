@@ -108,6 +108,7 @@ const svsl_type_t *svsl_type_get(const svsl_types_t *types, svsl_type_id_t id);
 
 // IEEE 754 binary16 bit pattern for a float (round-to-nearest-even)
 uint32_t svsl_f32_to_f16_bits(float f);
+float    svsl_f16_bits_to_f32(uint16_t bits); // exact
 
 // scalar/vector/matrix name -> parts: "float4x4" -> (float32, 4, 4); "half3" -> (half, 3)
 // rows=cols=0 for scalars; cols=0 for vectors (count in *out_rows)

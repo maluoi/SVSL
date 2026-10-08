@@ -234,7 +234,7 @@ static void test_wgsl_view_index(void) {
 	TEST_CHECK(vs != NULL);
 	if (vs) {
 		TEST_CHECK(strstr(vs, "@id(999) override sk_view_index : u32 = 0u;"));
-		TEST_CHECK(strstr(vs, "= sk_view_index;")); // the param copy reads the override
+		TEST_CHECK(strstr(vs, "f32(sk_view_index)")); // the input reads the override
 		TEST_CHECK(wgsl_validate(vs, "view index vs"));
 	}
 	svsl_result_free(r);

@@ -3,9 +3,9 @@
 
 #include "ir_operands.h"
 
-// Per-op arg mask as data; only three ops need a dynamic answer. Runs in
-// every optimizer pass loop, so it stays a table load, not a branch chain.
-static const uint8_t arg_mask_table[] = {
+// Per-op arg mask as data; only three ops need a dynamic answer (inline in
+// ir_operands.h - it runs in every optimizer pass loop).
+const uint8_t svsl_ir_arg_mask_table_[] = {
 	[svsl_ir_chain]   = 0x1, [svsl_ir_load]    = 0x1, [svsl_ir_extract] = 0x1,
 	[svsl_ir_shuffle] = 0x1, [svsl_ir_neg]     = 0x1, [svsl_ir_bit_not] = 0x1,
 	[svsl_ir_log_not] = 0x1, [svsl_ir_convert] = 0x1, [svsl_ir_if]      = 0x1,
@@ -26,87 +26,88 @@ static const uint8_t arg_mask_table[] = {
 	[svsl_ir_demote] = 0x0, // highest op: sizes the table over the whole enum
 };
 
-uint32_t svsl_ir_value_arg_mask(const svsl_ir_inst_t *inst) {
-	switch ((svsl_ir_op_)inst->op) {
-	case svsl_ir_atomic:
-		// cmpxchg (op 8 in args[3]'s low byte) also uses args[2]; the high byte
-		// carries the memory order, so mask it off before comparing
-		return (inst->args[3] & 0xFF) == 8 ? 0x7 : 0x3;
-	case svsl_ir_return:
-	case svsl_ir_end_loop:
-		return inst->args[0] != SVSL_IR_NONE ? 0x1 : 0x0;
-	default:
-		return arg_mask_table[inst->op];
-	}
-}
-
-bool svsl_ir_aux_holds_values(const svsl_ir_inst_t *inst) {
-	switch ((svsl_ir_op_)inst->op) {
-	case svsl_ir_chain:
-	case svsl_ir_construct:
-	case svsl_ir_intrinsic:
-	case svsl_ir_tex:
-	case svsl_ir_spirv_asm: // aux = the $value operand ids, in binary order
-		return true;
-	default:
-		return false; // switch case literals, shuffle indices, ...
-	}
-}
+#define P svsl_ir_trait_pure
+#define C svsl_ir_trait_commutative
+#define R svsl_ir_trait_compare
+#define M svsl_ir_trait_marker
+#define E svsl_ir_trait_effect
+#define A svsl_ir_trait_aux_values
+const uint8_t svsl_ir_traits_table_[] = {
+	[svsl_ir_const]   = P, [svsl_ir_ptr] = P, [svsl_ir_chain] = P | A,
+	[svsl_ir_store]   = E,
+	[svsl_ir_construct] = P | A, [svsl_ir_extract] = P, [svsl_ir_insert] = P, [svsl_ir_shuffle] = P,
+	[svsl_ir_extract_dynamic] = P,
+	[svsl_ir_add] = P | C, [svsl_ir_sub] = P, [svsl_ir_mul] = P | C, [svsl_ir_div] = P, [svsl_ir_rem] = P,
+	[svsl_ir_neg] = P, [svsl_ir_bit_not] = P, [svsl_ir_log_not] = P,
+	[svsl_ir_bit_and] = P | C, [svsl_ir_bit_or] = P | C, [svsl_ir_bit_xor] = P | C,
+	[svsl_ir_shl] = P, [svsl_ir_shr] = P,
+	[svsl_ir_eq] = P | C | R, [svsl_ir_ne] = P | C | R,
+	[svsl_ir_lt] = P | R, [svsl_ir_le] = P | R, [svsl_ir_gt] = P | R, [svsl_ir_ge] = P | R,
+	[svsl_ir_log_and] = P | C, [svsl_ir_log_or] = P | C,
+	[svsl_ir_select] = P, [svsl_ir_convert] = P, [svsl_ir_mat_mul] = P,
+	[svsl_ir_intrinsic] = P | A, // a barrier (void result) is the exception: see svsl_ir_is_pure
+	[svsl_ir_image_store] = E, [svsl_ir_image_atomic] = E, [svsl_ir_atomic] = E,
+	[svsl_ir_tex] = A,
+	[svsl_ir_spirv_asm] = E | A, // opaque: assume side effects; aux = its $value ids
+	[svsl_ir_bitfield_extract] = P, [svsl_ir_bitfield_insert] = P,
+	[svsl_ir_if] = M, [svsl_ir_else] = M, [svsl_ir_end_if] = M,
+	[svsl_ir_loop] = M, [svsl_ir_loop_continue] = M, [svsl_ir_end_loop] = M,
+	[svsl_ir_break] = M, [svsl_ir_continue] = M,
+	[svsl_ir_switch] = M, [svsl_ir_case] = M, [svsl_ir_end_switch] = M,
+	[svsl_ir_return] = M, [svsl_ir_discard] = M, [svsl_ir_demote] = M, // highest op
+};
+#undef P
+#undef C
+#undef R
+#undef M
+#undef E
+#undef A
 
 bool svsl_ir_intrinsic_is_pure(const svsl_ir_inst_t *inst, const svsl_types_t *types) {
 	if (inst->type == SVSL_TYPE_NONE) return false;              // defensive
 	return svsl_type_get(types, inst->type)->kind != svsl_type_void; // void == barrier
 }
 
+bool svsl_ir_is_pure(const svsl_ir_inst_t *inst, const svsl_types_t *types) {
+	if (!(svsl_ir_traits_table_[inst->op] & svsl_ir_trait_pure)) return false;
+	return inst->op != svsl_ir_intrinsic || svsl_ir_intrinsic_is_pure(inst, types);
+}
+
 bool svsl_ir_has_side_effects(const svsl_ir_inst_t *inst, const svsl_types_t *types) {
-	switch ((svsl_ir_op_)inst->op) {
-	case svsl_ir_store:
-	case svsl_ir_image_store:
-	case svsl_ir_image_atomic:
-	case svsl_ir_atomic:
-	case svsl_ir_if: case svsl_ir_else: case svsl_ir_end_if:
-	case svsl_ir_loop: case svsl_ir_loop_continue: case svsl_ir_end_loop:
-	case svsl_ir_break: case svsl_ir_continue:
-	case svsl_ir_switch: case svsl_ir_case: case svsl_ir_end_switch:
-	case svsl_ir_return: case svsl_ir_discard: case svsl_ir_demote:
-		return true;
-	case svsl_ir_spirv_asm:
-		return true; // opaque: assume side effects, never dead-code away
-	case svsl_ir_intrinsic:
-		return !svsl_ir_intrinsic_is_pure(inst, types); // only void barriers are roots
-	default:
-		return false;
+	if (svsl_ir_traits_table_[inst->op] & (svsl_ir_trait_marker | svsl_ir_trait_effect)) return true;
+	return inst->op == svsl_ir_intrinsic && !svsl_ir_intrinsic_is_pure(inst, types); // barriers
+}
+
+uint32_t svsl_ir_root_ptr(const svsl_ir_func_t *fn, uint32_t p) {
+	while (p < (uint32_t)fn->insts.count && fn->insts.items[p].op == svsl_ir_chain)
+		p = fn->insts.items[p].args[0];
+	return p;
+}
+
+bool svsl_ir_is_invocation_local(const svsl_ir_func_t *fn, uint32_t p) {
+	if (p >= (uint32_t)fn->insts.count) return false;
+	const svsl_ir_inst_t *in = &fn->insts.items[p];
+	return in->op == svsl_ir_var ||
+	       (in->op == svsl_ir_ptr && (svsl_ref_)in->args[0] == svsl_ref_private_global);
+}
+
+bool svsl_ir_forwardable_root(const svsl_ir_func_t *fn, const svsl_program_t *prog, uint32_t r) {
+	const svsl_ir_inst_t *in = &fn->insts.items[r];
+	if (in->op == svsl_ir_var) return true;
+	if (in->op != svsl_ir_ptr) return false;
+	switch ((svsl_ref_)in->args[0]) {
+	case svsl_ref_buffer_member: {
+		const svsl_buffer_t *b = &prog->buffers.items[in->args[1]];
+		return b->kind == svsl_block_uniform || b->kind == svsl_block_pushconstant;
 	}
-}
-
-bool svsl_ir_ends_run(svsl_ir_op_ op) {
-	switch (op) {
-	case svsl_ir_if: case svsl_ir_else: case svsl_ir_end_if:
-	case svsl_ir_loop: case svsl_ir_loop_continue: case svsl_ir_end_loop:
-	case svsl_ir_break: case svsl_ir_continue:
-	case svsl_ir_switch: case svsl_ir_case: case svsl_ir_end_switch:
-	case svsl_ir_return: case svsl_ir_discard: case svsl_ir_demote:
+	case svsl_ref_const_global:
+	case svsl_ref_private_global: // written only by this invocation, through one canonical pointer
 		return true;
+	case svsl_ref_resource:
+		return prog->resources.items[in->args[1]].kind == svsl_res_structured; // read-only
+	case svsl_ref_stage_io: // inputs are read-only; outputs are only written, and observed at return
+		return !fn->entry->io.items[in->args[1]].output;
 	default:
-		return false;
+		return false; // storage buffers, images, groupshared, builtins, ...
 	}
-}
-
-static uint32_t resolve(const uint32_t *remap, uint32_t id) {
-	while (remap[id] != id) id = remap[id];
-	return id;
-}
-
-void svsl_ir_remap_operands(svsl_ir_func_t *fn, uint32_t idx,
-                            const uint32_t *remap, uint32_t count) {
-	svsl_ir_inst_t *inst = &fn->insts.items[idx];
-	uint32_t        mask = svsl_ir_value_arg_mask(inst);
-	for (int32_t a = 0; a < 4; a++)
-		if ((mask & (1u << a)) && inst->args[a] < count)
-			inst->args[a] = resolve(remap, inst->args[a]);
-	if (svsl_ir_aux_holds_values(inst))
-		for (uint32_t k = 0; k < inst->aux_count; k++) {
-			uint32_t *slot = &fn->aux.items[inst->aux + k];
-			if (*slot < count) *slot = resolve(remap, *slot);
-		}
 }

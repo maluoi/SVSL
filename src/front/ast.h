@@ -128,6 +128,7 @@ typedef enum svsl_ref_ {
 	svsl_ref_bitfield,      // member: a = struct index, b = packed-field index
 	svsl_ref_enum_const,    // a = enum-constant index (a named integer constant)
 	svsl_ref_private_global, // a = private-global index (writable module-scope `static`)
+	svsl_ref_stage_io,       // IR pointers only: a = slot in the entry's io (inputs read, outputs written)
 } svsl_ref_;
 
 typedef struct svsl_sema_ref_t {
@@ -211,6 +212,7 @@ struct svsl_ast_var_t {
 	uint8_t          bit_format; // svsl_bitfmt_
 	svsl_ast_attrs_t attrs;
 	svsl_loc_t       loc;
+	int32_t          sema_global; // sema: a local constant table's const_globals index + 1 (0 = none)
 };
 
 // --- statements --------------------------------------------------------------------

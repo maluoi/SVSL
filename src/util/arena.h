@@ -15,6 +15,8 @@ typedef struct svsl_arena_t {
 } svsl_arena_t;
 
 // Arena starts zero-initialized: svsl_arena_t arena = {0};
-void *svsl_arena_alloc  (svsl_arena_t *arena, size_t size);
-char *svsl_arena_strndup(svsl_arena_t *arena, const char *str, size_t len); // copies len bytes + NUL
-void  svsl_arena_free   (svsl_arena_t *arena);
+void *svsl_arena_alloc    (svsl_arena_t *arena, size_t size);
+void *svsl_arena_alloc_raw(svsl_arena_t *arena, size_t size); // not zeroed: for storage written before it is read
+char *svsl_arena_strndup  (svsl_arena_t *arena, const char *str, size_t len); // copies len bytes + NUL
+void  svsl_arena_reset    (svsl_arena_t *arena); // everything allocated is gone; the memory stays for reuse
+void  svsl_arena_free     (svsl_arena_t *arena);

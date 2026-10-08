@@ -78,7 +78,13 @@ are lowered to the matching SPIR-V control mask, so they reach the driver as rea
 
 These carry information the backend cannot infer - whether a branch is cheap enough to
 predicate, or a loop's trip count is worth unrolling. They never change correctness, only
-code shape, and a strong driver may still override them. `[fastopt]` is accepted but has no
+code shape, and a strong driver may still override them. With optimization on (`-O1`, the
+default), SVSL also predicates small branches itself when both sides only compute values
+and write locals. `[flatten]` lifts the size limit on that, and `[branch]` turns it off for
+that `if`. Likewise SVSL unrolls an `[unroll]` counted loop itself when that turns a large
+local array (32+ elements, say `float4 pixels[36]`) into constant-indexed elements it can
+keep in registers. On mobile GPUs that is the difference between registers and scratch
+memory. Other `[unroll]` loops are left to the driver. `[fastopt]` is accepted but has no
 SPIR-V equivalent (advisory only); `[unroll(n)]` is accepted but not yet distinguished from
 `[unroll]`.
 

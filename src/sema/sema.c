@@ -193,11 +193,16 @@ static svsl_type_id_t resolve_base_type(sema_t *s, const svsl_ast_type_t *ref) {
 		svsl_texdim_ dim = texdim_from_name(name, &arrayed, &ms);
 		(void)ms; // storage images are never multisampled
 		if (elem == SVSL_TYPE_NONE) elem = svsl_type_vector_id(types, svsl_scalar_float32, 4);
-		if (ref->format.len > 0 && !svsl_image_format_find(ref->format, NULL))
-			err(s, ref->loc, "unrecognized image format '%.*s'", ref->format);
+		// a format on an interned type is always a known one (formats.c relies on
+		// it): after the error, recover with a formatless image
+		svsl_str_t format = ref->format;
+		if (format.len > 0 && !svsl_image_format_find(format, NULL)) {
+			err(s, ref->loc, "unrecognized image format '%.*s'", format);
+			format = (svsl_str_t){0};
+		}
 		return svsl_type_intern(types, (svsl_type_t){
 			.kind = svsl_type_image, .dim = dim, .arrayed = arrayed, .elem = elem,
-			.is_rw = true, .format = ref->format });
+			.is_rw = true, .format = format });
 	}
 	if (svsl_str_eq_cstr(name, "SamplerState") || svsl_str_eq_cstr(name, "Sampler"))
 		return svsl_type_intern(types, (svsl_type_t){ .kind = svsl_type_sampler });
@@ -1007,44 +1012,111 @@ static bool semantic_is_generated(svsl_str_t semantic) {
 	return true;
 }
 
-// A vertex-entry input is a mesh attribute (collected for reflection) or a
-// system-generated value (a table-verified vs-input builtin - skipped). An SV_*
-// spelling the table doesn't recognize is neither: it can't be fed by a mesh
-// and the container can't name it for attribute matching, so it is an error -
-// not a silent drop that would leave the metadata disagreeing with the SPIR-V.
-// This must classify exactly like the emitter's counted/builtin split; both
-// consult the same semantics table, and the emitter's record_vs_input guard
-// fails the compile if they ever drift.
-static bool vs_input_is_attribute(sema_t *s, svsl_str_t semantic, svsl_loc_t loc) {
-	svsl_semantic_info_t info;
-	if (svsl_semantic_lookup(semantic, svsl_sem_vs_in, &info) && info.is_builtin)
-		return false; // system-generated (SV_VertexID, SV_InstanceID, SV_ViewID...)
-	if (semantic_is_generated(semantic)) {
-		err(s, loc, "unknown system-value semantic '%.*s' on a vertex input", semantic);
-		return false;
+// Every SV_ semantic on an entry's interface (struct members included) must name
+// a system value the semantics table knows; otherwise it would silently become a
+// user varying at the next location. A vertex input is held to a stricter rule:
+// it is either a mesh attribute or a vs-input system value, so any other SV_
+// spelling is an error there - a mesh can't feed it, and the container can't
+// name it for attribute matching.
+static void check_entry_semantics(sema_t *s, const svsl_entry_t *entry) {
+	bool whole_return = false; // a non-struct return: its semantic is a slot's
+	for (int32_t i = 0; i < entry->io.count; i++) {
+		const svsl_io_slot_t *slot = &entry->io.items[i];
+		whole_return |= slot->output && slot->member < 0;
+		if (!semantic_is_generated(slot->semantic)) continue;
+		svsl_semantic_info_t info;
+		if (entry->stage == svsl_stage_vertex && !slot->output) {
+			if (!svsl_semantic_lookup(slot->semantic, svsl_sem_vs_in, &info) || !info.is_builtin)
+				err(s, slot->loc, "unknown system-value semantic '%.*s' on a vertex input", slot->semantic);
+		} else if (!svsl_semantic_known(slot->semantic)) {
+			err(s, slot->loc, "unknown system-value semantic '%.*s'", slot->semantic);
+		}
 	}
-	return true;
+	svsl_str_t rs = entry->func->return_semantic; // on a struct return: no slot carries it
+	if (!whole_return && semantic_is_generated(rs) && !svsl_semantic_known(rs))
+		err(s, entry->func->loc, "unknown system-value semantic '%.*s'", rs);
 }
 
-static void collect_vertex_inputs(sema_t *s, const svsl_ast_func_t *func) {
+// How many interface locations a stage-IO value of this type consumes. A
+// scalar/vector (<=4 32-bit components) is one; a matrix is one per row vector
+// (the SPIR-V matrix's column vectors are HLSL rows); an array multiplies by its
+// length; a nested struct sums its members.
+static int32_t location_span(const svsl_types_t *types, svsl_type_id_t id) {
+	const svsl_type_t *t = svsl_type_get(types, id);
+	switch (t->kind) {
+	case svsl_type_matrix: return t->rows;
+	case svsl_type_array:  return (t->array_count > 0 ? t->array_count : 1) * location_span(types, t->elem);
+	case svsl_type_struct: {
+		const svsl_struct_info_t *si = &types->structs.items[t->struct_index];
+		int32_t sum = 0;
+		for (int32_t m = 0; m < si->members.count; m++) sum += location_span(types, si->members.items[m].type);
+		return sum;
+	}
+	default:               return 1;
+	}
+}
+
+// Appends one interface slot, numbering it: a system value takes no location,
+// SV_TargetN takes N, [location(N)] restarts the count at N, and everything else
+// takes the next free location.
+static void io_slot_add(sema_t *s, svsl_entry_t *ref_entry, svsl_io_slot_t slot, svsl_sem_io_ io,
+                        int32_t explicit_location, int32_t *ref_next) {
+	svsl_semantic_info_t info;
+	bool known = svsl_semantic_lookup(slot.semantic, io, &info);
+	if (known && info.is_builtin) {
+		slot.location = -1;
+	} else {
+		if (explicit_location >= 0) *ref_next = explicit_location;
+		slot.location = io == svsl_sem_ps_out && known ? info.target_index : *ref_next;
+		*ref_next    += location_span(&s->prog->types, slot.type);
+	}
+	svsl_array_push(s->arena, &ref_entry->io, slot);
+}
+
+// The entry's stage interface: its parameters flattened (a struct parameter one
+// slot per member) as inputs, then its return value flattened the same way.
+static void collect_io(sema_t *s, svsl_entry_t *ref_entry) {
+	const svsl_ast_func_t *func = ref_entry->func;
+	svsl_stage_            stage = ref_entry->stage;
+	svsl_sem_io_ in  = stage == svsl_stage_vertex ? svsl_sem_vs_in  : stage == svsl_stage_pixel ? svsl_sem_ps_in : svsl_sem_cs_in;
+	svsl_sem_io_ out = stage == svsl_stage_vertex ? svsl_sem_vs_out : svsl_sem_ps_out;
+	int32_t      next = 0;
 	for (int32_t p = 0; p < func->param_count; p++) {
 		const svsl_ast_var_t *param = func->params[p];
 		svsl_type_id_t        type  = resolve_type(s, param->type);
 		if (type == SVSL_TYPE_NONE) continue;
 		const svsl_type_t *t = svsl_type_get(&s->prog->types, type);
-
-		if (t->kind == svsl_type_struct) {
-			const svsl_struct_info_t *info = &s->prog->types.structs.items[t->struct_index];
-			for (int32_t m = 0; m < info->members.count; m++) {
-				const svsl_member_t *member = &info->members.items[m];
-				if (!vs_input_is_attribute(s, member->semantic, member->loc)) continue;
-				svsl_array_push(s->arena, &s->prog->vertex_inputs, (svsl_vertex_input_t){
-					.name = member->name, .type = member->type, .semantic = member->semantic });
-			}
-		} else if (vs_input_is_attribute(s, param->semantic, param->loc)) {
-			svsl_array_push(s->arena, &s->prog->vertex_inputs, (svsl_vertex_input_t){
-				.name = param->name, .type = type, .semantic = param->semantic });
+		if (t->kind != svsl_type_struct) {
+			io_slot_add(s, ref_entry, (svsl_io_slot_t){ .name = param->name, .semantic = param->semantic,
+				.type = type, .loc = param->loc, .param = (int16_t)p, .member = -1, .interp = param->interp },
+				in, -1, &next);
+			continue;
 		}
+		const svsl_struct_info_t *si = &s->prog->types.structs.items[t->struct_index];
+		for (int32_t m = 0; m < si->members.count; m++) {
+			const svsl_member_t *mb = &si->members.items[m];
+			io_slot_add(s, ref_entry, (svsl_io_slot_t){ .name = mb->name, .semantic = mb->semantic,
+				.type = mb->type, .loc = mb->loc, .param = (int16_t)p, .member = (int16_t)m, .interp = mb->interp },
+				in, mb->explicit_location, &next);
+		}
+	}
+	if (stage == svsl_stage_compute || !func->return_type) return;
+	svsl_type_id_t rt = resolve_type(s, func->return_type);
+	if (rt == SVSL_TYPE_NONE) return;
+	const svsl_type_t *t = svsl_type_get(&s->prog->types, rt);
+	if (t->kind == svsl_type_void) return;
+	next = 0;
+	if (t->kind != svsl_type_struct) {
+		io_slot_add(s, ref_entry, (svsl_io_slot_t){ .name = func->name, .semantic = func->return_semantic,
+			.type = rt, .loc = func->loc, .param = -1, .member = -1, .output = true }, out, -1, &next);
+		return;
+	}
+	const svsl_struct_info_t *si = &s->prog->types.structs.items[t->struct_index];
+	for (int32_t m = 0; m < si->members.count; m++) {
+		const svsl_member_t *mb = &si->members.items[m];
+		io_slot_add(s, ref_entry, (svsl_io_slot_t){ .name = mb->name, .semantic = mb->semantic,
+			.type = mb->type, .loc = mb->loc, .param = -1, .member = (int16_t)m, .interp = mb->interp,
+			.output = true }, out, mb->explicit_location, &next);
 	}
 }
 
@@ -1103,8 +1175,9 @@ static void add_entry(sema_t *s, const svsl_ast_func_t *func, svsl_stage_ stage)
 			return;
 		}
 	}
+	collect_io(s, &entry);
+	check_entry_semantics(s, &entry);
 	svsl_array_push(s->arena, &s->prog->entries, entry);
-	if (stage == svsl_stage_vertex) collect_vertex_inputs(s, func);
 }
 
 static void discover_entries(sema_t *s, const svsl_sema_options_t *opt) {

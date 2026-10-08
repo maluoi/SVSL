@@ -39,6 +39,24 @@ uint32_t svsl_f32_to_f16_bits(float f) {
 	return half;
 }
 
+float svsl_f16_bits_to_f32(uint16_t bits) {
+	uint32_t sign = (uint32_t)(bits & 0x8000) << 16;
+	uint32_t exp  = (bits >> 10) & 0x1F;
+	uint32_t man  = bits & 0x3FF;
+	uint32_t x;
+	if (exp == 0x1F)     x = sign | 0x7F800000 | (man << 13);              // inf/nan
+	else if (exp != 0)   x = sign | ((exp + 112) << 23) | (man << 13);     // normal: rebias 15 -> 127
+	else if (man == 0)   x = sign;                                         // zero
+	else {                                                                 // subnormal: normalize
+		int32_t e = -1;
+		do { man <<= 1; e++; } while (!(man & 0x400));
+		x = sign | ((uint32_t)(112 - e) << 23) | ((man & 0x3FF) << 13);
+	}
+	float f;
+	memcpy(&f, &x, 4);
+	return f;
+}
+
 svsl_type_id_t svsl_type_intern(svsl_types_t *types, svsl_type_t type) {
 	// --half=strict16 re-types every half at the single creation point, so no
 	// half type can exist anywhere downstream (declarations, literals, casts)
@@ -84,37 +102,40 @@ const svsl_type_t *svsl_type_get(const svsl_types_t *types, svsl_type_id_t id) {
 
 typedef struct scalar_name_row_t {
 	const char  *name;
+	int32_t      len;
 	svsl_scalar_ scalar;
 } scalar_name_row_t;
 
-// longest-match-first so "int8" wins over "int"+"8"
+// longest-match-first so "int8" wins over "int"+"8"; len derived from the literal
+#define S(name, scalar) { name, (int32_t)sizeof(name) - 1, scalar }
 static const scalar_name_row_t scalar_names[] = {
-	{ "min16float", svsl_scalar_half    },
-	{ "float16",    svsl_scalar_float16 },
-	{ "float32",    svsl_scalar_float32 },
-	{ "float64",    svsl_scalar_float64 },
-	{ "int8",       svsl_scalar_int8    },
-	{ "int16",      svsl_scalar_int16   },
-	{ "int32",      svsl_scalar_int32   },
-	{ "int64",      svsl_scalar_int64   },
-	{ "uint8",      svsl_scalar_uint8   },
-	{ "uint16",     svsl_scalar_uint16  },
-	{ "uint32",     svsl_scalar_uint32  },
-	{ "uint64",     svsl_scalar_uint64  },
-	{ "double",     svsl_scalar_float64 },
-	{ "float",      svsl_scalar_float32 },
-	{ "half",       svsl_scalar_half    },
-	{ "bool",       svsl_scalar_bool    },
-	{ "uint",       svsl_scalar_uint32  },
-	{ "int",        svsl_scalar_int32   },
+	S("min16float", svsl_scalar_half),
+	S("float16",    svsl_scalar_float16),
+	S("float32",    svsl_scalar_float32),
+	S("float64",    svsl_scalar_float64),
+	S("int8",       svsl_scalar_int8),
+	S("int16",      svsl_scalar_int16),
+	S("int32",      svsl_scalar_int32),
+	S("int64",      svsl_scalar_int64),
+	S("uint8",      svsl_scalar_uint8),
+	S("uint16",     svsl_scalar_uint16),
+	S("uint32",     svsl_scalar_uint32),
+	S("uint64",     svsl_scalar_uint64),
+	S("double",     svsl_scalar_float64),
+	S("float",      svsl_scalar_float32),
+	S("half",       svsl_scalar_half),
+	S("bool",       svsl_scalar_bool),
+	S("uint",       svsl_scalar_uint32),
+	S("int",        svsl_scalar_int32),
 };
+#undef S
 
 bool svsl_scalar_name_parse(svsl_str_t name, svsl_scalar_ *out_scalar,
                             int32_t *out_rows, int32_t *out_cols) {
 	for (int32_t i = 0; i < (int32_t)(sizeof(scalar_names) / sizeof(scalar_names[0])); i++) {
 		const char *scalar = scalar_names[i].name;
-		int32_t     len    = (int32_t)strlen(scalar);
-		if (name.len < len || memcmp(name.ptr, scalar, (size_t)len) != 0) continue;
+		int32_t     len    = scalar_names[i].len;
+		if (name.len < len || name.ptr[0] != scalar[0] || memcmp(name.ptr, scalar, (size_t)len) != 0) continue;
 
 		svsl_str_t rest = svsl_str_slice(name, len, name.len);
 		if (rest.len == 0) {

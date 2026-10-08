@@ -16,7 +16,6 @@
 #include "../tables/semantics.h"
 #include "../tables/formats.h"
 #include "../sema/layout.h"
-#include "../sema/const_eval.h"
 #include "../ir/ir_operands.h"
 #include "../front/ast.h"
 #include "../util/array.h"
@@ -33,6 +32,24 @@
 #define SLOT_READWRITE 200
 #define SLOT_INPUT_ATT 300
 #define SLOT_SAMPLER   400
+
+// one IO field: an entry io slot (svsl_io_slot_t), or the synthesized position
+typedef struct io_field_t {
+	svsl_str_t     name;      // member name in the IO struct
+	svsl_type_id_t type;
+	svsl_str_t     semantic;
+	int32_t        member;    // member within the param/return struct, -1 = whole
+	int32_t        location;  // -1 = builtin
+	const char    *builtin;   // WGSL builtin name; NULL = location-numbered
+	bool           view_index;// SV_ViewID: fed from the sk_view_index override
+	bool           pruned;    // vertex input stripped as unused by the SPIR-V
+	                          // emitter: absent from the meta, so never declared
+} io_field_t;
+
+typedef struct io_list_t {
+	io_field_t fields[64];
+	int32_t    count;
+} io_list_t;
 
 typedef struct wgsl_t {
 	svsl_arena_t         *arena;
@@ -52,7 +69,7 @@ typedef struct wgsl_t {
 	uint8_t *res_access;     // storage image: bit 0 read, bit 1 written
 	uint8_t *struct_used;    // per prog->types.structs entry
 	int32_t *sampler_pair;   // standalone sampler -> first texture it samples, -1
-	const char **const_texts;// per const-global: materialized initializer, NULL = unused/int
+	const char **const_texts;// per const-global: its value as WGSL, NULL = unused
 	uint8_t  *priv_used;     // per private global: referenced by this entry -> declared
 	// WGSL atomics are type-level: these mark the storage leaves that must
 	// declare atomic<T> (and whose plain loads/stores become atomicLoad/Store)
@@ -84,19 +101,20 @@ typedef struct wgsl_t {
 	uint8_t     *buf_mat_load; // per inst: load of a matrix from buffer memory
 	const char **buf_mat_raw;  // its untransposed path text
 
-	// Struct params used only through constant member chains split into one
-	// local per member (mirrors emit_spirv's SROA conditions). Required for
-	// Tint's uniformity analysis, which is var-granular: one whole-struct copy
-	// would let a non-uniform member (local_invocation_id) poison loads of the
-	// uniform ones (workgroup_id), rejecting barriers the source uses legally.
-	uint8_t *param_split; // per entry param
 	bool     uses_view_index;
 	bool     uses_f16;
 	bool     uses_derivatives;
 	bool     uses_subpass;   // subpass reads fetch at the fragment's own pixel...
 	const char *frag_pos;    // ...through this position expression ("in.pos")
 
-	const struct io_list_t *in_io; // entry inputs; read by the param copy-in
+	// per entry io slot: its field in the input or output list (NULL = never
+	// declared). Input loads read the field straight from the entry parameter -
+	// no whole-struct copy, which Tint's var-granular uniformity analysis would
+	// let a non-uniform member (local_invocation_id) poison for uniform ones
+	// (workgroup_id), rejecting barriers the source uses legally.
+	const io_field_t **slot_field;
+	const int32_t     *opt_io_locations; // the SPIR-V emitter's record (svsl_wgsl_emit)
+	bool               struct_out; // outputs are an attributed struct (else one bare value)
 
 	svsl_array_t(svsl_wgsl_sampler_t) samplers;
 } wgsl_t;
@@ -181,8 +199,8 @@ static bool wgsl_reserved(const char *s) {
 		"max", "abs", "all", "any", "select", "normalize", "distance", "mix",
 		"in", "out", "ref", "mod", "smoothstep",
 	};
-	for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++)
-		if (strcmp(s, words[i]) == 0) return true;
+	for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) // runs per printed name
+		if (words[i][0] == s[0] && strcmp(s, words[i]) == 0) return true;
 	if (strncmp(s, "vec", 3) == 0 || strncmp(s, "mat", 3) == 0 ||
 	    strncmp(s, "texture", 7) == 0)
 		return true;
@@ -225,86 +243,35 @@ static const char *struct_name_w(wgsl_t *e, int32_t struct_index) {
 }
 
 static const char *type_name_w(wgsl_t *e, svsl_type_id_t id, svsl_loc_t loc);
+static const char *scalar_literal(wgsl_t *e, svsl_scalar_ scalar, uint64_t bits64, svsl_loc_t loc);
+static const char *io_read(wgsl_t *e, const io_field_t *f);
 static bool        ptr_is_atomic(wgsl_t *e, uint32_t id);
 static bool        ptr_in_buffer(wgsl_t *e, uint32_t id);
 static bool        type_contains_matrix(wgsl_t *e, svsl_type_id_t id);
 static bool        member_wrappable(wgsl_t *e, svsl_type_id_t id);
 static void        pad_type_note(wgsl_t *e, svsl_type_id_t elem);
 
-// one folded scalar as a WGSL literal; false when the value can't be spelled
-static bool wgsl_scalar_literal(wgsl_t *e, svsl_scalar_ scalar, double v, const char **out) {
-	switch (scalar) {
-	case svsl_scalar_bool:   *out = v != 0 ? "true" : "false"; return true;
-	case svsl_scalar_int32:  *out = sfmt(e, "%lldi", (long long)(int64_t)v); return true;
-	case svsl_scalar_uint32: *out = sfmt(e, "%lluu", (unsigned long long)(uint64_t)(int64_t)v); return true;
-	case svsl_scalar_half:
-	case svsl_scalar_float32: {
-		float f = (float)v;
-		if (f != f || f > 3.4e38f || f < -3.4e38f) return false; // WGSL can't spell NaN/Inf
-		*out = sfmt(e, "%.9gf", f);
-		return true;
-	}
-	case svsl_scalar_float16:
-		e->uses_f16 = true;
-		*out = sfmt(e, "%.9gh", (float)v);
-		return true;
-	default: return false;
-	}
-}
-
-// materializes a const-global initializer as a WGSL const-expression; NULL
-// when the fold fails (the caller skips the stage, naming the global)
-static const char *const_global_text(wgsl_t *e, const struct svsl_ast_expr_t *expr,
-                                     svsl_type_id_t type) {
+// a constant global's value (const_eval.h leaves) as a WGSL const-expression,
+// consuming its leaves
+static const char *const_value_text(wgsl_t *e, svsl_type_id_t type, const uint64_t **ref_leaf, svsl_loc_t loc) {
 	const svsl_type_t *t = svsl_type_get(&e->prog->types, type);
-	const char        *lit;
-	if (t->kind == svsl_type_scalar) {
-		double v;
-		if (!svsl_const_eval_num(e->prog, expr, &v)) return NULL;
-		return wgsl_scalar_literal(e, t->scalar, v, &lit) ? lit : NULL;
-	}
+	if (t->kind == svsl_type_scalar) return scalar_literal(e, t->scalar, *(*ref_leaf)++, loc);
+	const char *args = "";
 	if (t->kind == svsl_type_vector) {
-		double vals[4];
-		if (!svsl_const_eval_vec(e->prog, expr, t->count, vals)) return NULL;
-		const char *args = "";
-		for (int32_t i = 0; i < t->count; i++) {
-			if (!wgsl_scalar_literal(e, t->scalar, vals[i], &lit)) return NULL;
-			args = sfmt(e, "%s%s%s", args, i ? ", " : "", lit);
-		}
-		return sfmt(e, "%s(%s)", type_name_w(e, type, (svsl_loc_t){0}), args);
-	}
-	// arrays (and matrices as rows-of-vectors) from init lists / ctor forms
-	const svsl_ast_expr_t **items = NULL;
-	int32_t                 count = 0;
-	if (expr->kind == svsl_expr_init_list) { items = (const svsl_ast_expr_t **)expr->init_list.items; count = expr->init_list.count; }
-	else if (expr->kind == svsl_expr_ctor) { items = (const svsl_ast_expr_t **)expr->ctor.args; count = expr->ctor.arg_count; }
-	else return NULL;
-
-	if (t->kind == svsl_type_array && count == t->array_count) {
-		const char *args = "";
-		for (int32_t i = 0; i < count; i++) {
-			const char *item = const_global_text(e, items[i], t->elem);
-			if (!item) return NULL;
-			args = sfmt(e, "%s%s%s", args, i ? ", " : "", item);
-		}
-		return sfmt(e, "%s(%s)", type_name_w(e, type, (svsl_loc_t){0}), args);
-	}
-	if (t->kind == svsl_type_matrix && count == t->rows * t->cols) {
-		const char *args = "";
-		for (int32_t r = 0; r < t->rows; r++) { // HLSL rows are the WGSL columns
+		for (int32_t i = 0; i < t->count; i++)
+			args = sfmt(e, "%s%s%s", args, i ? ", " : "", scalar_literal(e, t->scalar, *(*ref_leaf)++, loc));
+	} else if (t->kind == svsl_type_matrix) { // HLSL rows are the WGSL columns
+		for (int32_t r = 0; r < t->rows; r++) {
 			const char *col = "";
-			for (int32_t c = 0; c < t->cols; c++) {
-				double v;
-				if (!svsl_const_eval_num(e->prog, items[r * t->cols + c], &v) ||
-				    !wgsl_scalar_literal(e, t->scalar, v, &lit)) return NULL;
-				col = sfmt(e, "%s%s%s", col, c ? ", " : "", lit);
-			}
-			args = sfmt(e, "%s%svec%d<%s>(%s)", args, r ? ", " : "", t->cols,
-			            scalar_name(e, t->scalar, (svsl_loc_t){0}), col);
+			for (int32_t c = 0; c < t->cols; c++)
+				col = sfmt(e, "%s%s%s", col, c ? ", " : "", scalar_literal(e, t->scalar, *(*ref_leaf)++, loc));
+			args = sfmt(e, "%s%svec%d<%s>(%s)", args, r ? ", " : "", t->cols, scalar_name(e, t->scalar, loc), col);
 		}
-		return sfmt(e, "%s(%s)", type_name_w(e, type, (svsl_loc_t){0}), args);
+	} else { // array
+		for (int32_t i = 0; i < t->array_count; i++)
+			args = sfmt(e, "%s%s%s", args, i ? ", " : "", const_value_text(e, t->elem, ref_leaf, loc));
 	}
-	return NULL;
+	return sfmt(e, "%s(%s)", type_name_w(e, type, loc), args);
 }
 
 // packed structs expose logical bit fields; their physical members are all
@@ -458,10 +425,10 @@ static void check_buffer_layout(wgsl_t *e, const svsl_buffer_t *buf) {
 
 static float bits_to_f32(uint32_t bits) { float f; memcpy(&f, &bits, 4); return f; }
 
-static const char *const_str(wgsl_t *e, const svsl_ir_inst_t *inst) {
-	const svsl_type_t *t = svsl_type_get(&e->prog->types, inst->type);
-	uint32_t bits = inst->args[0];
-	switch (t->scalar) {
+// one scalar constant (IR const bits) as a WGSL literal
+static const char *scalar_literal(wgsl_t *e, svsl_scalar_ scalar, uint64_t bits64, svsl_loc_t loc) {
+	uint32_t bits = (uint32_t)bits64;
+	switch (scalar) {
 	case svsl_scalar_bool:   return bits ? "true" : "false";
 	case svsl_scalar_int32:  // INT32_MIN has no literal spelling (the minus binds separately)
 		return bits == 0x80000000u ? "i32(-2147483648)" : sfmt(e, "%di", (int32_t)bits);
@@ -469,20 +436,28 @@ static const char *const_str(wgsl_t *e, const svsl_ir_inst_t *inst) {
 	case svsl_scalar_half:
 	case svsl_scalar_float32: {
 		if ((bits & 0x7F800000u) == 0x7F800000u) {
-			skip(e, inst->loc, "a NaN/Inf float constant appears here, which WGSL cannot spell");
+			skip(e, loc, "a NaN/Inf float constant appears here, which WGSL cannot spell");
 			return "0f";
 		}
 		return sfmt(e, "%.9gf", bits_to_f32(bits));
 	}
 	case svsl_scalar_float16: {
+		if ((bits & 0x7C00u) == 0x7C00u) {
+			skip(e, loc, "a NaN/Inf float constant appears here, which WGSL cannot spell");
+			return "0h";
+		}
 		e->uses_f16 = true;
-		// f16 constants carry their f32 value in args[0] like the SPIR-V path
-		return sfmt(e, "%.9gh", bits_to_f32(bits));
+		return sfmt(e, "%.9gh", svsl_f16_bits_to_f32((uint16_t)bits));
 	}
 	default:
-		skip(e, inst->loc, "a constant of a scalar width WGSL has no equivalent for");
+		skip(e, loc, "a constant of a scalar width WGSL has no equivalent for");
 		return "0";
 	}
+}
+
+static const char *const_str(wgsl_t *e, const svsl_ir_inst_t *inst) {
+	return scalar_literal(e, svsl_type_get(&e->prog->types, inst->type)->scalar,
+	                      (uint64_t)inst->args[0] | ((uint64_t)inst->args[1] << 32), inst->loc);
 }
 
 // ---- resources -------------------------------------------------------------------
@@ -582,7 +557,6 @@ static const char *lvalue(wgsl_t *e, uint32_t id, svsl_type_id_t *out_type) {
 	const svsl_ir_inst_t *in = &e->fn->insts.items[id];
 	switch (in->op) {
 	case svsl_ir_var:
-	case svsl_ir_param:
 		*out_type = in->type;
 		return sfmt(e, "_%u", id);
 	case svsl_ir_ptr: {
@@ -614,6 +588,13 @@ static const char *lvalue(wgsl_t *e, uint32_t id, svsl_type_id_t *out_type) {
 		case svsl_ref_spec_const:
 			*out_type = e->prog->spec_consts.items[a].type;
 			return ident(e, e->prog->spec_consts.items[a].name);
+		case svsl_ref_stage_io: { // an input reads its field; an output writes _out's
+			const io_field_t *f = e->slot_field[a];
+			*out_type = e->fn->entry->io.items[a].type;
+			if (!f) { skip(e, in->loc, "a stage IO slot the WGSL backend couldn't declare"); return "_bad"; }
+			if (!e->fn->entry->io.items[a].output) return io_read(e, f);
+			return e->struct_out ? sfmt(e, "_out.%s", ident(e, f->name)) : "_out";
+		}
 		default:
 			skip(e, in->loc, "a storage reference kind the WGSL backend doesn't handle yet (%d)", kind);
 			*out_type = SVSL_TYPE_NONE;
@@ -624,18 +605,7 @@ static const char *lvalue(wgsl_t *e, uint32_t id, svsl_type_id_t *out_type) {
 		svsl_type_id_t base_type;
 		const char    *path;
 		uint32_t       first = 0;
-		const svsl_ir_inst_t *base = &e->fn->insts.items[in->args[0]];
-		if (base->op == svsl_ir_param && e->param_split[base->args[0]] && in->aux_count >= 1 &&
-		    e->fn->insts.items[e->fn->aux.items[in->aux]].op == svsl_ir_const) {
-			// split param: the path roots at the member's own local
-			const svsl_type_t *pt = svsl_type_get(&e->prog->types, base->type);
-			int32_t m = (int32_t)e->fn->insts.items[e->fn->aux.items[in->aux]].args[0];
-			path      = sfmt(e, "_%u_m%d", in->args[0], m);
-			base_type = e->prog->types.structs.items[pt->struct_index].members.items[m].type;
-			first     = 1;
-		} else {
-			path = lvalue(e, in->args[0], &base_type);
-		}
+		path = lvalue(e, in->args[0], &base_type);
 		for (uint32_t i = first; i < in->aux_count && !e->skipped; i++) {
 			uint32_t           idx = e->fn->aux.items[in->aux + i];
 			const svsl_type_t *t   = svsl_type_get(&e->prog->types, base_type);
@@ -1030,13 +1000,14 @@ static void prescan(wgsl_t *e) {
 		const svsl_ir_inst_t *in = &fn->insts.items[i];
 		if (in->op == svsl_ir_ptr && (svsl_ref_)in->args[0] == svsl_ref_const_global) {
 			const svsl_global_t *g = &prog->const_globals.items[in->args[1]];
-			if (e->const_texts[in->args[1]] || g->has_int) continue;
-			const char *text = g->var && g->var->init
-			                 ? const_global_text(e, g->var->init, g->type) : NULL;
-			if (!text)
-				skip(e, in->loc, "static const '%.*s' has an initializer the WGSL backend "
-				     "can't fold to a constant", g->name.len, g->name.ptr);
-			e->const_texts[in->args[1]] = text;
+			if (e->const_texts[in->args[1]]) continue;
+			if (!g->value) {
+				skip(e, in->loc, "static const '%.*s' has an initializer that is not a constant",
+				     g->name.len, g->name.ptr);
+				continue;
+			}
+			const uint64_t *leaf = g->value;
+			e->const_texts[in->args[1]] = const_value_text(e, g->type, &leaf, in->loc);
 		}
 		if (in->op == svsl_ir_ptr && (svsl_ref_)in->args[0] == svsl_ref_workgroup)
 			prescan_type(e, prog->workgroup_vars.items[in->args[1]].type, in->loc);
@@ -1391,25 +1362,6 @@ static const char *builtin_name(uint32_t builtin, bool input) {
 	}
 }
 
-// one flattened IO field: a non-struct param, a struct-param member, the
-// return value, or a return-struct member
-typedef struct io_field_t {
-	svsl_str_t     name;      // member name in the IO struct
-	svsl_type_id_t type;
-	svsl_str_t     semantic;
-	int32_t        param;     // owning param, -1 for the return value
-	int32_t        member;    // member within the param/return struct, -1 = whole
-	int32_t        location;  // -1 = builtin
-	const char    *builtin;   // WGSL builtin name; NULL = location-numbered
-	bool           view_index;// SV_ViewID: fed from the sk_view_index override
-	bool           pruned;    // vertex input stripped as unused by the SPIR-V
-	                          // emitter: absent from the meta, so never declared
-} io_field_t;
-
-typedef struct io_list_t {
-	io_field_t fields[64];
-	int32_t    count;
-} io_list_t;
 
 // builtins that WGSL declares with a fixed type; loads convert to the declared
 // HLSL type when it's narrower (uint id : SV_DispatchThreadID)
@@ -1425,80 +1377,47 @@ static const char *builtin_decl_type(const char *builtin) {
 	return "vec3<u32>"; // the compute id builtins
 }
 
-static void io_add(wgsl_t *e, io_list_t *io, svsl_str_t name, svsl_type_id_t type,
-                   svsl_str_t semantic, int32_t param, int32_t member,
-                   int32_t *ref_location, svsl_sem_io_ sem_io, svsl_loc_t loc,
-                   int32_t explicit_location) {
-	if (io->count >= 64) { skip(e, loc, "more than 64 stage IO fields"); return; }
+// adds io slot `i` to its list as a field: its WGSL builtin, or its location
+static void io_add(wgsl_t *e, io_list_t *io, int32_t i, svsl_sem_io_ sem_io) {
+	const svsl_io_slot_t *slot = &e->fn->entry->io.items[i];
+	if (io->count >= 64) { skip(e, slot->loc, "more than 64 stage IO fields"); return; }
 	io_field_t *f = &io->fields[io->count++];
-	*f = (io_field_t){ .name = name, .type = type, .semantic = semantic,
-	                   .param = param, .member = member, .location = -1 };
+	// Vertex attributes must equal the SKS meta's records - Dawn requires every
+	// declared attribute to be fed, and the runtime feeds exactly the meta. The
+	// meta mirrors the SPIR-V module, so one the SPIR-V emitter never declared
+	// is pruned here too.
+	bool pruned = e->opt_io_locations && svsl_io_is_attribute(e->fn->entry, slot) && e->opt_io_locations[i] < 0;
+	*f = (io_field_t){ .name = slot->name, .type = slot->type, .semantic = slot->semantic,
+	                   .member = slot->member, .location = slot->location, .pruned = pruned };
+	e->slot_field[i] = f;
 
 	svsl_semantic_info_t info;
-	if (svsl_semantic_lookup(semantic, sem_io, &info) && info.is_builtin) {
+	if (slot->location < 0 && svsl_semantic_lookup(slot->semantic, sem_io, &info) && info.is_builtin) {
 		if (info.builtin == SpvBuiltInViewIndex) { f->view_index = true; e->uses_view_index = true; return; }
 		if (info.builtin == SpvBuiltInLayer) {
-			skip(e, loc, "SV_RenderTargetArrayIndex routes primitives to a layered-target slice, "
+			skip(e, slot->loc, "SV_RenderTargetArrayIndex routes primitives to a layered-target slice, "
 			     "which WebGPU cannot express - use SV_ViewID and multiview instead");
 			return;
 		}
 		f->builtin = builtin_name(info.builtin, sem_io != svsl_sem_vs_out && sem_io != svsl_sem_ps_out);
 		if (!f->builtin)
-			skip(e, loc, "the '%.*s' semantic has no WGSL builtin", semantic.len, semantic.ptr);
+			skip(e, slot->loc, "the '%.*s' semantic has no WGSL builtin", slot->semantic.len, slot->semantic.ptr);
 		return;
 	}
-	// SV_TargetN pins its location; everything else numbers sequentially
-	if (sem_io == svsl_sem_ps_out && svsl_semantic_lookup(semantic, sem_io, &info)) {
-		f->location = info.target_index;
-		return;
-	}
-	if (explicit_location >= 0) *ref_location = explicit_location;
-	const svsl_type_t *t = svsl_type_get(&e->prog->types, type);
-	if (t->kind == svsl_type_matrix || t->kind == svsl_type_array || t->kind == svsl_type_struct) {
-		skip(e, loc, "matrix/array/nested-struct stage IO isn't mapped for WGSL yet");
-		return;
-	}
-	f->location = (*ref_location)++;
+	const svsl_type_t *t = svsl_type_get(&e->prog->types, slot->type);
+	if (t->kind == svsl_type_matrix || t->kind == svsl_type_array || t->kind == svsl_type_struct)
+		skip(e, slot->loc, "matrix/array/nested-struct stage IO isn't mapped for WGSL yet");
 }
 
-// flattens the entry's params (or return type) into IO fields
-static void io_collect_params(wgsl_t *e, io_list_t *io, svsl_sem_io_ sem_io) {
-	const svsl_entry_t     *entry = e->fn->entry;
-	const svsl_func_info_t *fi    = svsl_program_func_info(e->prog, entry->func);
-	int32_t location = 0;
-	for (int32_t p = 0; p < entry->func->param_count && !e->skipped; p++) {
-		const svsl_ast_var_t *pv = entry->func->params[p];
-		const svsl_type_t    *pt = svsl_type_get(&e->prog->types, fi->param_types[p]);
-		if (pt->kind == svsl_type_struct) {
-			const svsl_struct_info_t *info = &e->prog->types.structs.items[pt->struct_index];
-			for (int32_t m = 0; m < info->members.count && !e->skipped; m++) {
-				const svsl_member_t *mem = &info->members.items[m];
-				io_add(e, io, mem->name, mem->type, mem->semantic, p, m,
-				       &location, sem_io, mem->loc, mem->explicit_location);
-			}
-		} else {
-			io_add(e, io, pv->name, fi->param_types[p], pv->semantic, p, -1,
-			       &location, sem_io, pv->loc, -1);
-		}
-	}
-}
-
-static void io_collect_return(wgsl_t *e, io_list_t *io, svsl_sem_io_ sem_io) {
-	const svsl_entry_t     *entry = e->fn->entry;
-	const svsl_func_info_t *fi    = svsl_program_func_info(e->prog, entry->func);
-	if (fi->return_type == SVSL_TYPE_NONE) return;
-	const svsl_type_t *rt = svsl_type_get(&e->prog->types, fi->return_type);
-	int32_t location = 0;
-	if (rt->kind == svsl_type_struct) {
-		const svsl_struct_info_t *info = &e->prog->types.structs.items[rt->struct_index];
-		for (int32_t m = 0; m < info->members.count && !e->skipped; m++) {
-			const svsl_member_t *mem = &info->members.items[m];
-			io_add(e, io, mem->name, mem->type, mem->semantic, -1, m,
-			       &location, sem_io, mem->loc, mem->explicit_location);
-		}
-	} else {
-		io_add(e, io, svsl_str("result"), fi->return_type, entry->func->return_semantic,
-		       -1, -1, &location, sem_io, entry->func->loc, -1);
+// the entry's io slots as input and output fields
+static void io_collect(wgsl_t *e, io_list_t *in, io_list_t *out) {
+	svsl_stage_ stage = e->fn->entry->stage;
+	for (int32_t i = 0; i < e->fn->entry->io.count && !e->skipped; i++) {
+		if (e->fn->entry->io.items[i].output)
+			io_add(e, out, i, stage == svsl_stage_vertex ? svsl_sem_vs_out : svsl_sem_ps_out);
+		else
+			io_add(e, in, i, stage == svsl_stage_vertex ? svsl_sem_vs_in :
+			                 stage == svsl_stage_pixel  ? svsl_sem_ps_in : svsl_sem_cs_in);
 	}
 }
 
@@ -1601,60 +1520,13 @@ static bool pure_inlinable(wgsl_t *e, const svsl_ir_inst_t *in) {
 	}
 }
 
-// Mirrors emit_spirv's analyze_param_sroa: a struct param whose only uses are
-// constant-member chains consumed by loads splits into per-member locals.
-static void param_split_analyze(wgsl_t *e) {
-	const svsl_ir_func_t *fn = e->fn;
-	int32_t pc = fn->entry->func->param_count;
-	e->param_split = svsl_arena_alloc(e->arena, (size_t)(pc > 0 ? pc : 1));
-	const svsl_func_info_t *info = svsl_program_func_info(e->prog, fn->entry->func);
-	for (int32_t p = 0; p < pc; p++) {
-		bool ok = false;
-		if (info) {
-			const svsl_type_t *pt = svsl_type_get(&e->prog->types, info->param_types[p]);
-			ok = pt->kind == svsl_type_struct &&
-			     e->prog->types.structs.items[pt->struct_index].members.count <= 64;
-		}
-		e->param_split[p] = ok ? 1 : 0;
-	}
-
-	// param index when `id` is a struct-typed entry-param op, else -1
-	#define SPLIT_PARAM(id) 		(fn->insts.items[id].op == svsl_ir_param && 		 svsl_type_get(&e->prog->types, fn->insts.items[id].type)->kind == svsl_type_struct 		 ? (int32_t)fn->insts.items[id].args[0] : -1)
-	// chain(param, const-first-index)?
-	#define MEMBER_CHAIN(id) 		(fn->insts.items[id].op == svsl_ir_chain && fn->insts.items[id].aux_count >= 1 && 		 SPLIT_PARAM(fn->insts.items[id].args[0]) >= 0 && 		 fn->insts.items[fn->aux.items[fn->insts.items[id].aux]].op == svsl_ir_const)
-
-	for (int32_t i = 0; i < fn->insts.count; i++) {
-		const svsl_ir_inst_t *in   = &fn->insts.items[i];
-		uint32_t              mask = svsl_ir_value_arg_mask(in);
-		for (int32_t a = 0; a < 4; a++) {
-			if (!(mask & (1u << a)) || in->args[a] >= (uint32_t)fn->insts.count) continue;
-			uint32_t o = in->args[a];
-			int32_t  p = SPLIT_PARAM(o);
-			if (p >= 0 && !(in->op == svsl_ir_chain && a == 0 && MEMBER_CHAIN(i)))
-				e->param_split[p] = 0; // direct use that isn't a member-chain base
-			if (MEMBER_CHAIN(o) && !(in->op == svsl_ir_load && a == 0))
-				e->param_split[SPLIT_PARAM(fn->insts.items[o].args[0])] = 0;
-		}
-		if (svsl_ir_aux_holds_values(in))
-			for (uint32_t k = 0; k < in->aux_count; k++) {
-				uint32_t o = fn->aux.items[in->aux + k];
-				if (o >= (uint32_t)fn->insts.count) continue;
-				int32_t p = SPLIT_PARAM(o);
-				if (p >= 0)          e->param_split[p] = 0;
-				if (MEMBER_CHAIN(o)) e->param_split[SPLIT_PARAM(fn->insts.items[o].args[0])] = 0;
-			}
-	}
-	#undef SPLIT_PARAM
-	#undef MEMBER_CHAIN
-}
-
 // Decides which values fold into their (single) use site instead of becoming a
 // `let _N`. sink[i] = the statement where i's text is finally evaluated,
 // chased through inlined users and through chains (whose text materializes at
 // their user). State-readers only inline when no side-effecting or
 // control-flow instruction (svsl_ir_has_side_effects - the shared oracle)
 // separates their definition from that sink.
-static void inline_analyze(wgsl_t *e, bool struct_return) {
+static void inline_analyze(wgsl_t *e) {
 	const svsl_ir_func_t *fn = e->fn;
 	int32_t n = fn->insts.count > 0 ? fn->insts.count : 1;
 	e->inline_ok   = svsl_arena_alloc(e->arena, (size_t)n);
@@ -1668,10 +1540,9 @@ static void inline_analyze(wgsl_t *e, bool struct_return) {
 	for (int32_t i = 0; i < fn->insts.count; i++) {
 		const svsl_ir_inst_t *in = &fn->insts.items[i];
 		cum[i + 1] = cum[i] + (svsl_ir_has_side_effects(in, &e->prog->types) ? 1 : 0);
-		// struct returns and cmpxchg print an operand's text more than once -
-		// weight 2 forces those into lets so evaluation isn't duplicated
-		int32_t  w    = in->op == svsl_ir_atomic ||
-		                (in->op == svsl_ir_return && struct_return) ? 2 : 1;
+		// cmpxchg prints an operand's text more than once - weight 2 forces
+		// those into lets so evaluation isn't duplicated
+		int32_t  w    = in->op == svsl_ir_atomic ? 2 : 1;
 		uint32_t mask = svsl_ir_value_arg_mask(in);
 		for (int32_t a = 0; a < 4; a++) {
 			if (!(mask & (1u << a)) || in->args[a] == SVSL_IR_NONE) continue;
@@ -1736,27 +1607,9 @@ static const char *shift_rhs(wgsl_t *e, uint32_t id, svsl_type_id_t lhs_type) {
 	return sfmt(e, "u32(%s)", v);
 }
 
-static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct);
-
-// builds and returns the entry's output from the IR return value
-static void emit_return(wgsl_t *e, const svsl_ir_inst_t *in,
-                        const io_list_t *out_io, const char *out_struct) {
-	if (in->args[0] == SVSL_IR_NONE) { wln(e, "return;"); return; }
-	const char *v = val(e, in->args[0]);
-	if (out_io->count == 1 && out_io->fields[0].member == -1) { // single attributed value
-		wln(e, "return %s;", v);
-		return;
-	}
-	// struct return: copy user-struct members into the attributed IO struct
-	wln(e, "var _out : %s;", out_struct);
-	for (int32_t i = 0; i < out_io->count; i++) {
-		const io_field_t *f = &out_io->fields[i];
-		wln(e, "_out.%s = %s.%s;", ident(e, f->name), v, ident(e, f->name));
-	}
-	wln(e, "return _out;");
-}
-
-static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct) {
+// The entry's outputs live in `_out` (the attributed struct, or one bare value),
+// written by output-slot stores along the way.
+static void emit_body(wgsl_t *e, const char *out_type) {
 	const svsl_ir_func_t *fn = e->fn;
 	// switch emission state: the aux literal list of each open switch
 	struct { const svsl_ir_inst_t *inst; bool open_case, seen_default; } sw[8];
@@ -1766,24 +1619,14 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 	bool    loop_cont[32];
 	int32_t loop_depth = 0;
 
-	param_split_analyze(e);
-	inline_analyze(e, out_io->count > 1 || (out_io->count == 1 && out_io->fields[0].member >= 0));
+	inline_analyze(e);
 
 	// locals hoist to function scope like SPIR-V's OpVariables: pointers cross
-	// block boundaries (only pure values are block-local in this IR). Split
-	// params hoist one var per member so uniformity stays per-member.
+	// block boundaries (only pure values are block-local in this IR)
+	if (out_type) wln(e, "var _out : %s;", out_type);
 	for (int32_t i = 0; i < fn->insts.count && !e->skipped; i++) {
 		const svsl_ir_inst_t *in = &fn->insts.items[i];
-		if (in->op == svsl_ir_param && e->param_split[in->args[0]]) {
-			const svsl_type_t *pt = svsl_type_get(&e->prog->types, in->type);
-			const svsl_struct_info_t *si = &e->prog->types.structs.items[pt->struct_index];
-			for (int32_t m = 0; m < si->members.count; m++)
-				wln(e, "var _%d_m%d : %s;", i, m,
-				    type_name_w(e, si->members.items[m].type, in->loc));
-			continue;
-		}
-		if (in->op == svsl_ir_var || in->op == svsl_ir_param)
-			wln(e, "var _%d : %s;", i, type_name_w(e, in->type, in->loc));
+		if (in->op == svsl_ir_var) wln(e, "var _%d : %s;", i, type_name_w(e, in->type, in->loc));
 	}
 
 	for (int32_t i = 0; i < fn->insts.count && !e->skipped; i++) {
@@ -1797,18 +1640,6 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 		case svsl_ir_ptr: case svsl_ir_chain:
 		case svsl_ir_var: // declared in the hoisted prologue
 			break; // no statement; resolved at use sites
-
-		case svsl_ir_param: { // copy the attributed input into its hoisted local(s)
-			bool split = e->param_split[in->args[0]] != 0;
-			for (int32_t f = 0; f < e->in_io->count; f++) {
-				const io_field_t *fld = &e->in_io->fields[f];
-				if (fld->param != (int32_t)in->args[0] || fld->pruned) continue;
-				if (split)               wln(e, "_%d_m%d = %s;", i, fld->member, io_read(e, fld));
-				else if (fld->member < 0) wln(e, "_%d = %s;", i, io_read(e, fld));
-				else                     wln(e, "_%d.%s = %s;", i, ident(e, fld->name), io_read(e, fld));
-			}
-			break;
-		}
 
 		case svsl_ir_load: {
 			svsl_type_id_t pt;
@@ -2113,8 +1944,8 @@ static void emit_body(wgsl_t *e, const io_list_t *out_io, const char *out_struct
 			wln(e, "}");
 			break;
 
-		case svsl_ir_return:
-			emit_return(e, in, out_io, out_struct);
+		case svsl_ir_return: // the outputs were stored to _out on the way
+			wln(e, out_type ? "return _out;" : "return;");
 			break;
 		case svsl_ir_discard:
 		case svsl_ir_demote: // WGSL discard has demote semantics
@@ -2276,15 +2107,12 @@ static void emit_globals(wgsl_t *e) {
 		wln(e, "@id(%d) override sk_view_index : u32 = 0u;", WGSL_VIEW_INDEX_SPEC_ID);
 	if (prog->spec_consts.count > 0 || e->uses_view_index) wnl(e);
 
-	// const globals: materialized initializers (prescan), int-folded ones direct
+	// const globals: the used ones' values (prescan)
 	for (int32_t i = 0; i < prog->const_globals.count; i++) {
 		const svsl_global_t *g = &prog->const_globals.items[i];
 		if (e->const_texts[i])
 			wln(e, "const %s : %s = %s;", ident(e, g->name), type_name_w(e, g->type, g->var->loc),
 			    e->const_texts[i]);
-		else if (g->has_int)
-			wln(e, "const %s : %s = %s(%lld);", ident(e, g->name), type_name_w(e, g->type, g->var->loc),
-			    type_name_w(e, g->type, g->var->loc), (long long)g->int_value);
 	}
 
 	// private globals: WGSL zero-initializes var<private>; initializers are
@@ -2403,10 +2231,10 @@ static void emit_globals(wgsl_t *e) {
 // ---- public entry ----------------------------------------------------------------
 
 bool svsl_wgsl_emit(svsl_arena_t *arena, const svsl_program_t *prog,
-                    const svsl_ir_func_t *fn, const int32_t *opt_vs_input_locations,
+                    const svsl_ir_func_t *fn, const int32_t *opt_io_locations,
                     svsl_wgsl_blob_t *out_blob, svsl_diag_list_t *ref_diags) {
 	*out_blob = (svsl_wgsl_blob_t){0};
-	wgsl_t e = { .arena = arena, .prog = prog, .fn = fn, .diags = ref_diags };
+	wgsl_t e = { .arena = arena, .prog = prog, .fn = fn, .diags = ref_diags, .opt_io_locations = opt_io_locations };
 	int32_t res_n    = prog->resources.count      > 0 ? prog->resources.count      : 1;
 	int32_t buf_n    = prog->buffers.count        > 0 ? prog->buffers.count        : 1;
 	int32_t struct_n = prog->types.structs.count  > 0 ? prog->types.structs.count  : 1;
@@ -2442,32 +2270,14 @@ bool svsl_wgsl_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 	// entry IO shapes decide the signature and the param copy-ins
 	io_list_t in_io = {0}, out_io = {0};
 	svsl_stage_ stage = fn->entry->stage;
-	io_collect_params(&e, &in_io, stage == svsl_stage_vertex ? svsl_sem_vs_in :
-	                              stage == svsl_stage_pixel  ? svsl_sem_ps_in : svsl_sem_cs_in);
-	if (stage != svsl_stage_compute)
-		io_collect_return(&e, &out_io, stage == svsl_stage_vertex ? svsl_sem_vs_out : svsl_sem_ps_out);
-	e.in_io = &in_io;
+	e.slot_field = svsl_arena_alloc(arena, (size_t)(fn->entry->io.count > 0 ? fn->entry->io.count : 1) * sizeof(io_field_t *));
+	io_collect(&e, &in_io, &out_io);
+	e.struct_out = out_io.count > 1 || (out_io.count == 1 && out_io.fields[0].member >= 0);
 	if (e.skipped) return true;
 
-	// Vertex attributes must equal the SKS meta's records - Dawn requires every
-	// declared attribute to be fed, and the runtime feeds exactly the meta. The
-	// meta mirrors the SPIR-V module, so take presence and location straight
-	// from the SPIR-V emitter's recording: -1 = stripped as unused -> pruned.
-	// The location fields walk params in the same order collect_vertex_inputs
-	// flattened them (builtins excluded on both sides by the same table).
-	if (stage == svsl_stage_vertex && opt_vs_input_locations) {
-		int32_t vi = 0;
-		for (int32_t i = 0; i < in_io.count && vi < prog->vertex_inputs.count; i++) {
-			io_field_t *f = &in_io.fields[i];
-			if (f->builtin || f->view_index) continue;
-			f->pruned   = opt_vs_input_locations[vi] < 0;
-			f->location = f->pruned ? f->location : opt_vs_input_locations[vi];
-			vi++;
-		}
-	}
 
 	// subpass reads need this fragment's pixel position: reuse the shader's own
-	// SV_Position input, or synthesize one (param -2: never copied into a local)
+	// SV_Position input, or synthesize one (a field no io slot backs)
 	if (e.uses_subpass) {
 		const io_field_t *pos = NULL;
 		for (int32_t i = 0; i < in_io.count; i++)
@@ -2476,7 +2286,7 @@ bool svsl_wgsl_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 		if (!pos && in_io.count < 64) {
 			io_field_t *f = &in_io.fields[in_io.count++];
 			*f  = (io_field_t){ .name = svsl_str("sk_frag_pos"), .builtin = "position",
-			                    .param = -2, .member = -1, .location = -1 };
+			                    .member = -1, .location = -1 };
 			pos = f;
 		}
 		if (!pos) { skip(&e, fn->entry->func->loc, "no room for the synthesized position input"); return true; }
@@ -2494,7 +2304,7 @@ bool svsl_wgsl_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 	emit_globals(&e);
 	emit_structs(&e);
 	emit_io_struct(&e, in_name, &in_io, stage == svsl_stage_pixel, true);
-	bool struct_out = out_io.count > 1 || (out_io.count == 1 && out_io.fields[0].member >= 0);
+	bool struct_out = e.struct_out;
 	if (struct_out) emit_io_struct(&e, out_name, &out_io, stage == svsl_stage_vertex, false);
 
 	// signature: the location struct (when any survive) + one parameter per
@@ -2525,7 +2335,7 @@ bool svsl_wgsl_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 	}
 	wln(&e, "%s fn %s(%s)%s {", stage_attr, entry_name, params, ret);
 	e.indent++;
-	emit_body(&e, &out_io, out_name);
+	emit_body(&e, struct_out ? out_name : out_io.count ? type_name_w(&e, out_io.fields[0].type, (svsl_loc_t){0}) : NULL);
 	e.indent--;
 	wln(&e, "}");
 

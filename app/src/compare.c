@@ -577,6 +577,9 @@ static const compute_cfg_t compute_cfgs[] = {
 	               { 18, .value = 0, .eps = 0.1f }, // [4] flag: !(4>3) = 0
 	               { 29, 1 },                       // [7] pair.y: 7>5
 	               { 31, 0x40600000 } } },          // [7] v = 3.5f
+	{ .file    = "check_unroll_sroa", // [unroll] + array splitting, bitwise vs skshaderc
+	  .passes  = { { .dispatch = { 1, 1, 1 } } },
+	  .buffers = { { "source", 256 }, { "results", 64, fill_zero } } },
 	{ .file    = "check_loop_exit", // loop exit branches (glslang header-exit shape)
 	  .passes  = { { .dispatch = { 1, 1, 1 } } },
 	  .buffers = { { "results", 104, fill_zero } },

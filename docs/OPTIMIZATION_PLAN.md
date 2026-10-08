@@ -4,6 +4,16 @@ Status: **design draft**. Extends the Optimization decision in docs/DECISIONS.md
 inline/chains/fold/dce only). Goal: a small, data-oriented optimizer that shrinks emitted
 SPIR-V without linking SPIRV-Tools and without breaking the bit-exact correctness oracle.
 
+> **2026-10-08**: continued in docs/PLAN_optimizer_llvm.md, which revisits part of
+> the "explicitly deferred" list below (CFG simplification and if-conversion are now
+> in-IR passes) and replaces the in-place/nop pass model with an edit buffer
+> (`src/ir/ir_edit.c`). Since then, `passes/peephole.c` lives on as
+> `passes/combine.c`, constant evaluation lives in `src/ir/ir_const.c`, and CSE and
+> forwarding are scoped by region rather than flushed at every marker. The emit-level
+> entry-input and output-struct SROA (`analyze_param_sroa`, `analyze_output_sroa`) are
+> gone: stage I/O lowers in the IR (sema numbers an interface table per entry, IR SROA
+> splits structs), see PLAN_optimizer_llvm.md Phase 3. The logs below describe the
+> optimizer as it was at each step.
 ---
 
 ## 1. The one constraint that shapes everything
@@ -346,8 +356,11 @@ confirmed bit-exact against the reference compiler.
 ~14% of compile time (front-end dominates); no pass is pathological — CSE is the
 heaviest (~4.5%, mostly `remap_operands` + hashing), the rest ≤2.5% each. Every
 pass is a linear O(n) sweep; there is no O(n²) in shader size (generation-stamped
-tables flush in O(1); chain roots are pre-flattened). The `SVSL_OPT_MAX_ITERS=8`
-cap is never approached, so no pass oscillates. The cost pattern to keep watching
+tables flush in O(1); chain roots are pre-flattened). The fixpoint cap
+(`SVSL_OPT_MAX_ITERS`, now 16) is a compile-time bound, not a quality knob: since
+unrolling (docs/PLAN_optimizer_llvm.md) each nest level costs a round, and
+sk_texenc's 6x6 encoder converges in 8. Debug builds report any function that
+reaches it. The cost pattern to keep watching
 as passes are added: each pass adds one O(n) sweep per fixpoint iteration, so cost
 grows linearly in pass-count — fine today, worth revisiting only if the list gets long.
 

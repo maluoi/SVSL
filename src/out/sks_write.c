@@ -479,16 +479,19 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 		resource_indices[resource_count++] = i;
 	}
 
-	// The vertex-inputs block mirrors the vs blob's interface exactly: an entry
-	// is written iff its OpVariable survived emission, at its recorded location.
-	// Locations come from the emitter (blob.vs_input_locations), never re-derived.
-	const int32_t *vs_locs = NULL;
+	// The vertex-inputs block mirrors the vs blob's interface exactly: one record
+	// per attribute slot whose variable the emitter declared, at the location it
+	// decorated (blob.io_locations) - never re-derived here.
+	const svsl_entry_t *vs      = NULL;
+	const int32_t      *vs_locs = NULL;
 	for (int32_t i = 0; i < module->func_count; i++)
-		if (module->funcs[i].entry->stage == svsl_stage_vertex)
-			vs_locs = blobs[i].vs_input_locations;
+		if (module->funcs[i].entry->stage == svsl_stage_vertex) {
+			vs      = module->funcs[i].entry;
+			vs_locs = blobs[i].io_locations;
+		}
 	int32_t used_inputs = 0;
-	for (int32_t i = 0; i < prog->vertex_inputs.count; i++)
-		if (vs_locs && vs_locs[i] >= 0) used_inputs++;
+	for (int32_t i = 0; vs && vs_locs && i < vs->io.count; i++)
+		if (svsl_io_is_attribute(vs, &vs->io.items[i]) && vs_locs[i] >= 0) used_inputs++;
 
 	int32_t stage_records = with_spirv ? module->func_count : 0;
 	if (with_wgsl)
@@ -591,9 +594,9 @@ void svsl_sks_write(svsl_arena_t *arena, const svsl_program_t *prog,
 		}
 	}
 
-	for (int32_t i = 0; i < prog->vertex_inputs.count; i++) {
-		if (!vs_locs || vs_locs[i] < 0) continue; // stripped from the SPIR-V
-		const svsl_vertex_input_t *in = &prog->vertex_inputs.items[i];
+	for (int32_t i = 0; vs && vs_locs && i < vs->io.count; i++) {
+		const svsl_io_slot_t *in = &vs->io.items[i];
+		if (!svsl_io_is_attribute(vs, in) || vs_locs[i] < 0) continue; // stripped from the SPIR-V
 		uint8_t count, slot;
 		int32_t format   = vertex_format_of(&prog->types, in->type, &count);
 		int32_t semantic = semantic_of(in->semantic, &slot);

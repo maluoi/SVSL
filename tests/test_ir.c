@@ -5,6 +5,8 @@
 #include "front/parser.h"
 #include "front/pp.h"
 #include "ir/ir.h"
+#include "ir/ir_const.h"
+#include "ir/ir_verify.h"
 #include "sema/sema.h"
 #include "util/arena.h"
 
@@ -58,6 +60,23 @@ static int32_t count_op(const svsl_ir_func_t *fn, svsl_ir_op_ op) {
 	return n;
 }
 
+// count_op, leaving out the stage interface: its io pointers and what reads or
+// writes through them (every entry stores its outputs; inputs are loads)
+static int32_t count_body_op(const svsl_ir_func_t *fn, svsl_ir_op_ op) {
+	int32_t n = 0;
+	for (int32_t i = 0; i < fn->insts.count; i++) {
+		const svsl_ir_inst_t *in = &fn->insts.items[i];
+		if (in->op != op) continue;
+		uint32_t p = in->op == svsl_ir_ptr ? (uint32_t)i : (in->op == svsl_ir_load || in->op == svsl_ir_store ||
+		             in->op == svsl_ir_chain) ? in->args[0] : SVSL_IR_NONE;
+		while (p != SVSL_IR_NONE && fn->insts.items[p].op == svsl_ir_chain) p = fn->insts.items[p].args[0];
+		if (p != SVSL_IR_NONE && fn->insts.items[p].op == svsl_ir_ptr && fn->insts.items[p].args[0] == svsl_ref_stage_io)
+			continue;
+		n++;
+	}
+	return n;
+}
+
 // the prototype-killer: opaque texture/sampler params resolve to global
 // resources at inline time - golden, byte for byte
 static void test_ir_opaque_inline(void) {
@@ -77,13 +96,16 @@ static void test_ir_opaque_inline(void) {
 		// is stripped to a scalar operand (emit selects OpVectorTimesScalar).
 		// `uv` is read after the constant: lvalue arguments are read as the call
 		// starts, once every argument has been evaluated.
+		// The entry reads its input slot and stores its output slot.
 		"func ps pixel\n"
-		"  %0 = param float2 #0 ; uv\n"
-		"  %3 = const float 0.5\n"
-		"  %5 = load float2 %0\n"
-		"  %9 = tex float4 tex method=0 sampler=tex_s (%5)\n"
-		"  %12 = mul float4 %9 %3\n"
-		"  return %12\n"));
+		"  %0 = ptr float2 io 0 0 ; uv\n"
+		"  %1 = ptr float4 io 1 0 ; ps\n"
+		"  %2 = const float 0.5\n"
+		"  %3 = load float2 %0\n"
+		"  %4 = tex float4 tex method=0 sampler=tex_s (%3)\n"
+		"  %5 = mul float4 %4 %2\n"
+		"  store %1 %5\n"
+		"  return\n"));
 	svsl_arena_free(&arena);
 }
 
@@ -136,9 +158,11 @@ static void test_ir_control_flow(void) {
 	TEST_CHECK(find_op(fn, svsl_ir_return) >= 0);
 
 	// multi-return functions inline inside a single-trip loop; returns become breaks
+	// (a runtime argument: with a constant one the early return folds away, and
+	// the cfg pass then flattens the wrapper - see test_ir_cfg)
 	r = run_ir(&arena,
 		"float pick(float x) { if (x > 1) return 2; return x; }\n"
-		"float4 ps() : SV_TARGET { return pick(0.5); }\n");
+		"float4 ps(float x : TEXCOORD0) : SV_TARGET { return pick(x); }\n");
 	TEST_CHECK(r.ok);
 	fn = &r.module.funcs[0];
 	TEST_CHECK(count_op(fn, svsl_ir_loop) == 1);     // the inline wrapper
@@ -227,19 +251,19 @@ static void test_ir_passes(void) {
 	TEST_CHECK(found_max);
 	TEST_CHECK(count_op(fn, svsl_ir_div) == 0); // folded away
 
-	// dead code disappears: an unused expression becomes nops
+	// dead code disappears: unread locals and their values are removed, and the
+	// committed function is dense (no nop placeholders survive optimization)
 	r = run_ir(&arena,
 		"float4 ps() : SV_TARGET {\n"
-		"	float unused = sqrt(25.0);\n" // pure, unreferenced... but stored: var stays
+		"	float unused = sqrt(25.0);\n"
 		"	float2 dead_value = float2(1, 2);\n"
 		"	return 1;\n"
 		"}\n");
 	TEST_CHECK(r.ok);
 	fn = &r.module.funcs[0];
-	// the returned splat construct survives; everything else feeding stores stays
-	// conservative - but a value with no store and no use must be gone:
-	// (the shuffle/extract-free dump keeps this focused on nop-ing behavior)
-	TEST_CHECK(count_op(fn, svsl_ir_nop) >= 0); // structural sanity
+	TEST_CHECK(count_op(fn, svsl_ir_nop)       == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_var)       == 0); // both locals dead-stored away
+	TEST_CHECK(count_op(fn, svsl_ir_intrinsic) == 0); // the pure sqrt went with them
 
 	// out/inout copy-back at the call boundary: a=1,b=0; x=a; x+=1->2; y=x*2->4;
 	// copy back a=2,b=4; return a+b = 6. Store-to-load forwarding threads the
@@ -255,7 +279,7 @@ static void test_ir_passes(void) {
 	TEST_CHECK(r.ok);
 	fn = &r.module.funcs[0];
 	TEST_CHECK(count_op(fn, svsl_ir_var)   == 0); // all param copies forwarded away
-	TEST_CHECK(count_op(fn, svsl_ir_store) == 0);
+	TEST_CHECK(count_body_op(fn, svsl_ir_store) == 0);
 	bool found_6 = false;
 	for (int32_t i = 0; i < fn->insts.count; i++) {
 		const svsl_ir_inst_t *inst = &fn->insts.items[i];
@@ -334,6 +358,8 @@ static void test_ir_rvalue_index(void) {
 // dominance-based forwarding: a single-assignment local established at the top
 // level flows into branch bodies (no reload), but a conditionally-assigned local
 // must NOT be forwarded past the merge - that boundary is what keeps it sound.
+// `[branch]` keeps those branches (if-conversion would otherwise turn them into
+// selects - test_ir_if_convert covers that).
 static void test_ir_cross_cf_forward(void) {
 	svsl_arena_t arena = {0};
 
@@ -341,8 +367,8 @@ static void test_ir_cross_cf_forward(void) {
 		"float ps(float2 uv : TEXCOORD0) : SV_TARGET {\n"
 		"	float k = uv.x * 2;\n"          // single store, depth 0 -> dominates all
 		"	float acc = 0;\n"
-		"	if (uv.y > 0.5) { acc = k + 1; }\n"  // reads k inside the branch ...
-		"	else            { acc = k - 1; }\n"  // ... and the other branch
+		"	[branch] if (uv.y > 0.5) { acc = k + 1; }\n"  // reads k inside the branch ...
+		"	else                     { acc = k - 1; }\n"  // ... and the other branch
 		"	return acc;\n"
 		"}\n");
 	TEST_CHECK(r.ok);
@@ -361,13 +387,13 @@ static void test_ir_cross_cf_forward(void) {
 	ir_run_t r2 = run_ir(&arena,
 		"float ps(float2 uv : TEXCOORD0) : SV_TARGET {\n"
 		"	float k = uv.x;\n"
-		"	if (uv.y > 0.5) { k = 99; }\n"
+		"	[branch] if (uv.y > 0.5) { k = 99; }\n"
 		"	return k;\n"                       // must load k (uv.x or 99), not forward uv.x
 		"}\n");
 	TEST_CHECK(r2.ok);
 	const svsl_ir_func_t *fn2 = &r2.module.funcs[0];
 	TEST_CHECK(count_op(fn2, svsl_ir_var)   == 1); // k survives - not scalar-forwarded
-	TEST_CHECK(count_op(fn2, svsl_ir_store) == 2); // both k= stores kept (DSE can't kill them)
+	TEST_CHECK(count_body_op(fn2, svsl_ir_store) == 2); // both k= stores kept (DSE can't kill them)
 	TEST_CHECK(count_op(fn2, svsl_ir_load)  == 3); // uv.x, uv.y, and the reloaded k after the if
 	svsl_arena_free(&arena);
 }
@@ -532,28 +558,32 @@ static void test_ir_loop_exit_shape(void) {
 		const char  *name;
 		const char  *src;
 		loop_shape_t want; // loops, exits, exits_true_to_merge, nots, sel_merges, bitcasts, unroll, dont_unroll
+		int32_t      min_level; // svsl_opt_ below which the case doesn't apply (an optimization's shape)
 	} cases[] = {
 		{ "for, uint literal bound, [unroll]",
 		  LOOP_SRC("[unroll] for (uint i = 0; i < 4; i++) s += i * t;"),
-		  { 1, 1, 0, 0, 0, 0, 1, 0 } },
+		  { 1, 1, 0, 0, 0, 0, 1, 0 }, svsl_opt_none },
 		{ "while, runtime condition",
 		  LOOP_SRC("while (s < 100) s = s * 2 + 1;"),
-		  { 1, 1, 0, 0, 0, 0, 0, 0 } },
+		  { 1, 1, 0, 0, 0, 0, 0, 0 }, svsl_opt_none },
 		{ "[loop] keeps DontUnroll",
 		  LOOP_SRC("[loop] for (int i = 7; i >= 0; i--) s = s * 3 + t;"),
-		  { 1, 1, 0, 0, 0, 0, 0, 1 } },
+		  { 1, 1, 0, 0, 0, 0, 0, 1 }, svsl_opt_none },
 		{ "user-written top break stays a selection (as in glslang)",
 		  LOOP_SRC("for (;;) { if (s > 20) break; s += 7; }"),
-		  { 1, 0, 0, 0, 1, 0, 0, 0 } },
+		  { 1, 0, 0, 0, 1, 0, 0, 0 }, svsl_opt_none },
 		{ "top if carrying [branch] keeps its selection",
 		  LOOP_SRC("for (;;) { [branch] if (s > 20) break; s += 7; }"),
-		  { 1, 0, 0, 0, 1, 0, 0, 0 } },
-		{ "[flatten] on a loop body's if keeps its hint",
+		  { 1, 0, 0, 0, 1, 0, 0, 0 }, svsl_opt_none },
+		{ "[flatten] on a loop body's if flattens it to a select",
 		  LOOP_SRC("for (uint i = 0; i < 8; i++) { [flatten] if (s > 20) s -= 3; s += 7; }"),
-		  { 1, 1, 0, 0, 1, 0, 0, 0 } },
+		  { 1, 1, 0, 0, 0, 0, 0, 0 }, svsl_opt_default }, // if-conversion (-O1)
+		{ "[flatten] that can't flatten (a buffer store) keeps its hint",
+		  LOOP_SRC("for (uint i = 0; i < 8; i++) { [flatten] if (s > 20) o[i] = s; s += 7; }"),
+		  { 1, 1, 0, 0, 1, 0, 0, 0 }, svsl_opt_none },
 		{ "do-while: the back edge exits, a body break stays a selection",
 		  LOOP_SRC("do { if (s > 30) break; s = s * 2 + 1; } while (s < 50);"),
-		  { 1, 1, 0, 0, 1, 0, 0, 0 } }, // back edge: OpBranchConditional %c %header %merge
+		  { 1, 1, 0, 0, 1, 0, 0, 0 }, svsl_opt_none }, // back edge: OpBranchConditional %c %header %merge
 		{ "condition inlining an early-return call: exit after the wrapper loop",
 		  "RWStructuredBuffer<uint> o : register(u0);\n"
 		  "bool keep_going(uint v, uint lim) { if (v > 1000) return false; return v < lim; }\n"
@@ -562,7 +592,7 @@ static void test_ir_loop_exit_shape(void) {
 		  "	while (keep_going(s, 90)) s = s * 3 + 1;\n"
 		  "	o[id.x] = s;\n"
 		  "}\n",
-		  { 2, 1, 0, 0, 1, 0, 0, 0 } }, // outer loop + the call's wrapper; its `if` keeps a selection
+		  { 2, 1, 0, 0, 1, 0, 0, 0 }, svsl_opt_none }, // outer loop + the call's wrapper; its `if` keeps a selection
 		{ "for condition inlining an early-return call",
 		  "RWStructuredBuffer<uint> o : register(u0);\n"
 		  "uint limit(uint v) { if (v > 5) return 5; return v + 2; }\n"
@@ -571,17 +601,17 @@ static void test_ir_loop_exit_shape(void) {
 		  "	for (uint i = 0; i < limit(id.x); i++) s += i;\n"
 		  "	o[id.x] = s;\n"
 		  "}\n",
-		  { 2, 1, 0, 0, 1, 0, 0, 0 } },
+		  { 2, 1, 0, 0, 1, 0, 0, 0 }, svsl_opt_none },
 		{ "nested loops both exit from their headers",
 		  LOOP_SRC("for (uint p = 0; p < 3; p++) for (uint q = 0; q <= p; q++) s += p * 4 + q;"),
-		  { 2, 2, 0, 0, 0, 0, 0, 0 } },
+		  { 2, 2, 0, 0, 0, 0, 0, 0 }, svsl_opt_none },
 		{ "mid-body break stays a selection",
 		  LOOP_SRC("for (uint n = 0; n < 10; n++) { s += n; if (s > t * 3) break; }"),
-		  { 1, 1, 0, 0, 1, 0, 0, 0 } },
+		  { 1, 1, 0, 0, 1, 0, 0, 0 }, svsl_opt_none },
 	};
 	#undef LOOP_SRC
 	for (int32_t c = 0; c < (int32_t)(sizeof(cases) / sizeof(cases[0])); c++) {
-		for (int32_t level = svsl_opt_none; level <= svsl_opt_default; level++) {
+		for (int32_t level = cases[c].min_level; level <= svsl_opt_default; level++) {
 			svsl_arena_t arena = {0};
 			test_spv_t   spv;
 			test_spv_compile(&arena, cases[c].src, NULL, NULL, (svsl_opt_level_)level, &spv);
@@ -681,19 +711,19 @@ static void test_ir_private_globals(void) {
 	TEST_CHECK(r.ok);
 	const svsl_ir_func_t *fn = &r.module.funcs[0];
 	TEST_CHECK(count_op(fn, svsl_ir_load)  == 0); // 1 * 2 * 2 folds to a constant
-	TEST_CHECK(count_op(fn, svsl_ir_store) == 0); // unread afterwards: dead
-	TEST_CHECK(count_op(fn, svsl_ir_ptr)   == 0); // and the pointer with them
+	TEST_CHECK(count_body_op(fn, svsl_ir_store) == 0); // unread afterwards: dead
+	TEST_CHECK(count_body_op(fn, svsl_ir_ptr)   == 0); // and the pointer with them
 
 	r = run_ir(&arena,
 		"static float c = 1;\n"
-		"float4 ps(float x : TEXCOORD0) : SV_TARGET { if (x > 0) c = 5; return c; }\n");
+		"float4 ps(float x : TEXCOORD0) : SV_TARGET { [branch] if (x > 0) c = 5; return c; }\n");
 	TEST_CHECK(r.ok);
 	fn = &r.module.funcs[0];
 	int32_t end = find_op(fn, svsl_ir_end_if), load = -1;
 	for (int32_t i = end + 1; i < fn->insts.count; i++)
 		if (fn->insts.items[i].op == svsl_ir_load) { load = i; break; }
 	TEST_CHECK(end >= 0 && load > end); // c is re-read after the merge, not assumed 1 or 5
-	TEST_CHECK(count_op(fn, svsl_ir_ptr) == 1); // one canonical pointer for c
+	TEST_CHECK(count_body_op(fn, svsl_ir_ptr) == 1); // one canonical pointer for c
 	svsl_arena_free(&arena);
 }
 
@@ -870,6 +900,536 @@ static void test_ir_private_globals_spirv(void) {
 	svsl_arena_free(&arena);
 }
 
+// a scalar constant of `scalar` type with exactly `bits` (svsl_ir_const encoding)
+static bool has_const(const svsl_ir_func_t *fn, const svsl_program_t *prog, svsl_scalar_ scalar, uint64_t bits) {
+	for (int32_t i = 0; i < fn->insts.count; i++) {
+		const svsl_ir_inst_t *in = &fn->insts.items[i];
+		if (in->op != svsl_ir_const) continue;
+		const svsl_type_t *t = svsl_type_get(&prog->types, in->type);
+		if (t->kind == svsl_type_scalar && t->scalar == scalar &&
+		    ((uint64_t)in->args[0] | ((uint64_t)in->args[1] << 32)) == bits) return true;
+	}
+	return false;
+}
+
+// Item 1 (docs/PLAN_optimizer_llvm.md): lane-wise constant folding of compares,
+// bit ops, shifts, selects, vectors and exact intrinsics - and the cases whose
+// result SPIR-V leaves open, which must stay runtime ops.
+static void test_ir_fold_lanes(void) {
+	svsl_arena_t arena = {0};
+
+	// sk_texenc's bit writer with constant pos/count: the word/shift/mask math and
+	// the whole select ladder fold, leaving only the value's own masking
+	ir_run_t r = run_ir(&arena,
+		"RWStructuredBuffer<uint4> o : register(u0);\n"
+		"void write_bits(inout uint4 block, uint pos, uint count, uint value) {\n"
+		"	uint word  = pos >> 5;\n"
+		"	uint shift = pos & 31u;\n"
+		"	uint mask  = (count >= 32u) ? 0xFFFFFFFFu : ((1u << count) - 1u);\n"
+		"	value &= mask;\n"
+		"	uint lo = value << shift;\n"
+		"	uint hi = (shift + count > 32u) ? value >> (32u - shift) : 0u;\n"
+		"	block |= uint4(word == 0u ? lo : 0u,\n"
+		"	               word == 1u ? lo : (word == 0u ? hi : 0u),\n"
+		"	               word == 2u ? lo : (word == 1u ? hi : 0u),\n"
+		"	               word == 3u ? lo : (word == 2u ? hi : 0u));\n"
+		"}\n"
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	uint4 b = 0;\n"
+		"	write_bits(b, 0, 11, id.x);\n"
+		"	write_bits(b, 40, 7, id.y);\n"
+		"	o[0] = b;\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	const svsl_ir_func_t *fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_select) == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_eq)     == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_ge)     == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_gt)     == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_shr)    == 0);
+	TEST_CHECK(has_const(fn, &r.prog, svsl_scalar_uint32, 0x7FF)); // (1 << 11) - 1
+	TEST_CHECK(has_const(fn, &r.prog, svsl_scalar_uint32, 0x7F));
+
+	// shifts, signed math, conversions and compares: one constant, no runtime op
+	r = run_ir(&arena,
+		"float4 ps() : SV_TARGET {\n"
+		"	uint x = (0xF0u >> 4) + (1u << 31) + uint(-3 * -4) + (7u % 4u);\n"
+		"	bool k = (x != 7u) && !(x == 3u) && (-1 < 0);\n"
+		"	return k ? float(x) : 0.0;\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_ne) == 0 && count_op(fn, svsl_ir_eq) == 0 && count_op(fn, svsl_ir_lt) == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_select) == 0);
+	// float compares fold with emit's semantics: != unordered (NaN -> true), the
+	// rest ordered (NaN -> false)
+	uint64_t nan = 0x7FC00000u, one = 0x3F800000u, out = 2;
+	TEST_CHECK(svsl_ir_eval_binary(svsl_ir_ne, svsl_scalar_float32, nan, nan, &out) && out == 1);
+	TEST_CHECK(svsl_ir_eval_binary(svsl_ir_eq, svsl_scalar_float32, nan, nan, &out) && out == 0);
+	TEST_CHECK(svsl_ir_eval_binary(svsl_ir_lt, svsl_scalar_float32, nan, one, &out) && out == 0);
+	TEST_CHECK(svsl_ir_eval_binary(svsl_ir_ge, svsl_scalar_float32, nan, one, &out) && out == 0);
+	float want = (float)(15u + 0x80000000u + 12u + 3u);
+	uint32_t want_bits;
+	memcpy(&want_bits, &want, 4);
+	TEST_CHECK(has_const(fn, &r.prog, svsl_scalar_float32, want_bits));
+
+	// left alone: a shift by the full width and INT_MIN / -1 (SPIR-V leaves the
+	// result open) - folding would pick an answer the GPU needn't
+	r = run_ir(&arena,
+		"float4 ps(float2 uv : TEXCOORD0) : SV_TARGET {\n"
+		"	int   s = 32;\n"
+		"	uint  a = 5u << s;\n"
+		"	int   m = (-2147483647 - 1) / -1;\n"
+		"	return float4(a, m, 0, 0) + uv.x;\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_shl) == 1);
+	TEST_CHECK(count_op(fn, svsl_ir_div) == 1);
+
+	// a vector result folds to a constant composite: emit writes one
+	// OpConstantComposite, never a runtime OpCompositeConstruct or OpIMul
+	test_spv_t spv;
+	test_spv_compile(&arena,
+		"RWStructuredBuffer<uint4> o : register(u0);\n"
+		"[numthreads(1, 1, 1)] void cs() { o[0] = uint4(1, 2, 3, 4) * 2u + uint4(1, 1, 1, 1); }\n",
+		NULL, NULL, svsl_opt_default, &spv);
+	TEST_CHECK(spv.ok && spv.blob_count == 1 && test_spv_validate(&spv));
+	if (spv.ok && spv.blob_count == 1) {
+		TEST_CHECK(test_spv_count(&spv.blobs[0], SpvOpConstantComposite, -1, -1) >= 1);
+		TEST_CHECK(test_spv_count(&spv.blobs[0], SpvOpCompositeConstruct, -1, -1) == 0);
+		TEST_CHECK(test_spv_count(&spv.blobs[0], SpvOpIMul, -1, -1) == 0);
+	}
+	svsl_arena_free(&arena);
+}
+
+// Item 2 (docs/PLAN_optimizer_llvm.md): structured CFG simplification.
+static void test_ir_cfg(void) {
+	svsl_arena_t arena = {0};
+
+	// a constant argument folds the early return; the inline wrapper loop is then
+	// run-once and flattens: no loop, no break, a constant result
+	ir_run_t r = run_ir(&arena,
+		"float pick(float x) { if (x > 1) return 2; return x; }\n"
+		"float4 ps() : SV_TARGET { return pick(0.5); }\n");
+	TEST_CHECK(r.ok);
+	const svsl_ir_func_t *fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_loop)  == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_break) == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_if)    == 0);
+	TEST_CHECK(has_const(fn, &r.prog, svsl_scalar_float32, 0x3F000000)); // 0.5
+
+	// while (false) runs zero times; while (true) { ...; break; } runs once
+	r = run_ir(&arena,
+		"RWStructuredBuffer<uint> o : register(u0);\n"
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	while (false) { o[0] = 1; }\n"
+		"	while (true)  { o[1] = id.x; break; }\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_loop)  == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_if)    == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_store) == 1); // only o[1] = id.x
+
+	// a branch on a runtime value keeps its markers, and code after a return is gone
+	r = run_ir(&arena,
+		"RWStructuredBuffer<uint> o : register(u0);\n"
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	float f = asfloat(id.x);\n"
+		"	if (f > 0.5) { } else { o[0] = 2; }\n"
+		"	if (id.y == 3) { o[1] = 1; return; o[2] = 9; }\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_if)    == 2);
+	TEST_CHECK(count_op(fn, svsl_ir_store) == 2); // o[0], o[1]; the o[2] after return is gone
+
+	// a for-loop's exit test is never inverted or folded away while it is live
+	r = run_ir(&arena,
+		"RWStructuredBuffer<uint> o : register(u0);\n"
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	for (uint i = 0; i < id.x; i++) o[i] = i;\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_loop) == 1);
+	int32_t exit_if = find_op(fn, svsl_ir_if);
+	TEST_CHECK(exit_if >= 0 && (fn->insts.items[exit_if].flags & svsl_ir_flag_loop_exit));
+	// combine leaves the exit's `!(i < n)` alone (not `i >= n`): emit folds the
+	// negation into the exit branch, the shape Adreno's loop analysis needs
+	TEST_CHECK(exit_if >= 0 && fn->insts.items[fn->insts.items[exit_if].args[0]].op == svsl_ir_log_not);
+	svsl_arena_free(&arena);
+}
+
+// Item 5 (docs/PLAN_optimizer_llvm.md): instruction combining - canonical
+// order, negation and select rewrites, integer reassociation and identities,
+// and composite rewrites.
+static void test_ir_combine(void) {
+	svsl_arena_t arena = {0};
+	ir_run_t r = run_ir(&arena,
+		"RWStructuredBuffer<uint4> o : register(u0);\n"
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	uint i = id.x, j = id.y;\n"
+		"	uint a = i * j + 3;\n"
+		"	uint b = j * i + 3;\n"                 // CSE meets i*j in either order
+		"	bool p = i < j, q = j > i;\n"          // one compare, mirrored
+		"	uint k = ((i + 1) + 2) - 5;\n"         // one sub: i - 2
+		"	uint s = (j << 2) << 3;\n"             // one shift by 5
+		"	uint n = !(i < j) ? 7 : 9;\n"          // i >= j, select arms kept
+		"	uint4 v = id.xyzx;\n"
+		"	v = (v | 0) * 1;\n"                   // identities on vectors
+		"	o[0] = uint4(a - b, (p && q) ? k : s, n, v.w);\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	const svsl_ir_func_t *fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_mul)     == 1); // i*j and j*i: one value (so a and b are too)
+	TEST_CHECK(count_op(fn, svsl_ir_sub)     == 2); // a - b, and k = i - 2
+	TEST_CHECK(count_op(fn, svsl_ir_add)     == 1); // a (= b)
+	TEST_CHECK(count_op(fn, svsl_ir_shl)     == 1);
+	TEST_CHECK(count_op(fn, svsl_ir_lt) + count_op(fn, svsl_ir_gt) == 1);
+	TEST_CHECK(count_op(fn, svsl_ir_ge)      == 1);
+	TEST_CHECK(count_op(fn, svsl_ir_log_not) == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_bit_or)  == 0);
+	TEST_CHECK(has_const(fn, &r.prog, svsl_scalar_uint32, 2));
+	TEST_CHECK(has_const(fn, &r.prog, svsl_scalar_uint32, 5));
+
+	// a float !(a < b) is not a >= b (NaN): the negation stays; a reversed
+	// component construct is one shuffle
+	r = run_ir(&arena,
+		"float4 ps(float4 t : TEXCOORD0) : SV_TARGET {\n"
+		"	float4 v = t * t;\n"                          // a value: components are extracts
+		"	float4 w = float4(v.w, v.z, v.y, v.x);\n"
+		"	return !(v.x < v.y) ? w : v;\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_construct) == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_shuffle)   == 1);
+	TEST_CHECK(count_op(fn, svsl_ir_ge)        == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_log_not)   == 0); // the select swapped its arms instead
+	TEST_CHECK(count_op(fn, svsl_ir_lt)        == 1);
+	svsl_arena_free(&arena);
+}
+
+// loads whose pointer is rooted at a local var (what forwarding failed to remove)
+static int32_t count_var_loads(const svsl_ir_func_t *fn) {
+	int32_t n = 0;
+	for (int32_t i = 0; i < fn->insts.count; i++) {
+		if (fn->insts.items[i].op != svsl_ir_load) continue;
+		uint32_t p = fn->insts.items[i].args[0];
+		while (fn->insts.items[p].op == svsl_ir_chain) p = fn->insts.items[p].args[0];
+		if (fn->insts.items[p].op == svsl_ir_var) n++;
+	}
+	return n;
+}
+
+// A local nothing has stored to yet is undef - except inside a loop that
+// repeats, where its (hoisted) storage still holds the previous trip's value, as
+// glslang and DXC keep it. The run-once wrapper loop of an inlined early return
+// doesn't count: there the unwritten member still reads as undef (and DSE drops
+// the store of it).
+static void test_ir_uninitialized_locals(void) {
+	svsl_arena_t arena = {0};
+	ir_run_t r = run_ir(&arena,
+		"RWStructuredBuffer<float> o : register(u0);\n"
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	float sum = 0;\n"
+		"	for (int i = 0; i < (int)id.x; i++) { float prev; if (i > 0) sum += prev; prev = i; }\n"
+		"	o[0] = sum;\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	TEST_CHECK(count_op(&r.module.funcs[0], svsl_ir_undef) == 0);
+
+	r = run_ir(&arena,
+		"struct S { float a; float b; };\n"
+		"S make(float x) { S s; s.a = x; if (x > 1) return s; s.b = x; return s; }\n"
+		"RWStructuredBuffer<float> o : register(u0);\n"
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) { S s = make(id.x); o[0] = s.b; }\n");
+	TEST_CHECK(r.ok);
+	// the early return copies s.a only: s.b read undef there, and its store went
+	// (then-arm a, fall-through a and b, o[0] - not a copy of the unwritten s.b)
+	TEST_CHECK(count_op(&r.module.funcs[0], svsl_ir_store) == 4);
+	svsl_arena_free(&arena);
+}
+
+// Item 3 (docs/PLAN_optimizer_llvm.md): CSE and forwarding scoped by arm, like
+// EarlyCSE over the dominator tree.
+static void test_ir_scoped(void) {
+	svsl_arena_t arena = {0};
+
+	// a value from before an if is reused in both arms and after the merge; a
+	// value computed in the then arm is not visible in the else arm
+	ir_run_t r = run_ir(&arena,
+		"RWStructuredBuffer<float> o : register(u0);\n"
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	float x = asfloat(id.x), y = asfloat(id.y), z = asfloat(id.z);\n"
+		"	o[0] = x * y;\n"
+		"	if (id.x > 3) { o[1] = x * y; o[2] = y * z; }\n"
+		"	else          { o[3] = x * y; o[4] = y * z; }\n"
+		"	o[5] = y * x;\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	const svsl_ir_func_t *fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_mul) == 3); // x*y once; y*z once per arm
+
+	// forwarding inside a loop body reaches into nested arms; across the back-edge
+	// it must not: acc's value at the top of the body is a merge (0 or acc + i)
+	r = run_ir(&arena,
+		"RWStructuredBuffer<uint> o : register(u0);\n"
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	uint acc = 0;\n"
+		"	for (uint i = 0; i < id.x; i++) {\n"
+		"		uint t = i * 3;\n"
+		"		if (i > 2) o[i] = t;\n"
+		"		o[i + 64] = acc;\n"
+		"		acc += i;\n"
+		"	}\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	fn = &r.module.funcs[0];
+	int32_t vars = count_op(fn, svsl_ir_var);
+	TEST_CHECK(vars == 2);                 // i and acc; t forwarded into the if
+	TEST_CHECK(count_var_loads(fn) >= 2);  // i and acc reloaded each trip
+
+	// an else arm sees memory as before the if: k forwards to id.x there, then
+	// reloads after the merge (either arm's value)
+	r = run_ir(&arena,
+		"RWStructuredBuffer<uint> o : register(u0);\n"
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	uint k = id.x;\n"
+		"	if (id.y > 3) { k = 7; o[0] = k; } else { o[1] = k; }\n"
+		"	o[2] = k;\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	fn = &r.module.funcs[0];
+	TEST_CHECK(count_var_loads(fn) == 1); // only the post-merge read of k
+	svsl_arena_free(&arena);
+}
+
+// Item 4 (docs/PLAN_optimizer_llvm.md): if-conversion of local-only branches.
+static void test_ir_if_convert(void) {
+	svsl_arena_t arena = {0};
+
+	// both arms, one arm, and nested diamonds become selects; no var survives
+	ir_run_t r = run_ir(&arena,
+		"float4 ps(float4 uv : TEXCOORD0) : SV_TARGET {\n"
+		"	float k = uv.x * 2, acc = 0, m = uv.z;\n"
+		"	if (uv.y > 0.5) { acc = k + 1; } else { acc = k - 1; }\n"
+		"	if (uv.w > 0.5) m = 99;\n"
+		"	float n = 0;\n"
+		"	if (uv.x > 0) { if (uv.y > 0) n = 1; else n = 2; }\n"
+		"	return float4(acc, m, n, 0);\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	const svsl_ir_func_t *fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_if)     == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_var)    == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_select) == 4); // acc, m, inner n, outer n
+
+	// kept as branches: an arm that could fault, read out of bounds, or see other
+	// invocations if run unconditionally, or that overlaps a location
+	static const char *keep[] = {
+		"	if (x > 0) a[i] = 1;\n",                       // dynamic index
+		"	if (x > 0) s = WaveActiveSum(s);\n",            // subgroup op
+		"	if (x > 0) s = s / i;\n",                      // integer division by a variable
+		"	if (x > 0) f = ddx(f);\n",                     // derivative
+		"	if (x > 0) f = t.Sample(ss, uv).x;\n",         // implicit-LOD sample
+		"	if (x > 0) o[0] = s;\n",                       // a global store
+		"	if (x > 0) v = float4(1, 2, 3, 4); else v.x = 2;\n", // whole vs member
+		"	[branch] if (x > 0) s = 1;\n",                 // the author's hint
+	};
+	for (size_t c = 0; c < sizeof(keep) / sizeof(keep[0]); c++) {
+		char src[1024];
+		snprintf(src, sizeof(src),
+			"Texture2D t : register(t0); SamplerState ss : register(s0);\n"
+			"RWStructuredBuffer<uint> o : register(u0);\n"
+			"float4 ps(float4 uv : TEXCOORD0, uint i : TEXCOORD1) : SV_TARGET {\n"
+			"	float x = uv.x, f = uv.y; uint s = i; float a[4] = { 0, 0, 0, 0 }; float4 v = uv;\n"
+			"%s"
+			"	return float4(f + a[i & 3] + v.x, s, x, 0);\n"
+			"}\n", keep[c]);
+		r = run_ir(&arena, src);
+		TEST_CHECK(r.ok);
+		if (!r.ok) continue;
+		bool kept = count_op(&r.module.funcs[0], svsl_ir_if) == 1;
+		TEST_CHECK(kept);
+		if (!kept) printf("  if-converted but must not be: %s", keep[c]);
+	}
+	svsl_arena_free(&arena);
+}
+
+// Item 6 (docs/PLAN_optimizer_llvm.md): loads from a constant table through
+// constant indices read its initializer; a dynamic index stays a load.
+static void test_ir_const_tables(void) {
+	svsl_arena_t arena = {0};
+	ir_run_t r = run_ir(&arena,
+		"static const uint   T[4] = { 3u, 5u, 7u, 9u };\n"
+		"static const float3 V[2] = { float3(1, 2, 3), { 4, 5.5, 6 } };\n"
+		"float4 ps(uint i : TEXCOORD0) : SV_TARGET { return float4(T[2], V[1].y, V[0].z, T[i & 3]); }\n");
+	TEST_CHECK(r.ok);
+	const svsl_ir_func_t *fn = &r.module.funcs[0];
+	int32_t table_loads = 0;
+	for (int32_t i = 0; i < fn->insts.count; i++) {
+		const svsl_ir_inst_t *in = &fn->insts.items[i];
+		if (in->op != svsl_ir_load) continue;
+		uint32_t p = in->args[0];
+		while (fn->insts.items[p].op == svsl_ir_chain) p = fn->insts.items[p].args[0];
+		if (fn->insts.items[p].op == svsl_ir_ptr && fn->insts.items[p].args[0] == svsl_ref_const_global) table_loads++;
+	}
+	TEST_CHECK(table_loads == 1); // only T[i & 3]
+	TEST_CHECK(has_const(fn, &r.prog, svsl_scalar_float32, 0x40E00000)); // T[2] = 7, as float
+	TEST_CHECK(has_const(fn, &r.prog, svsl_scalar_float32, 0x40B00000)); // 5.5
+	TEST_CHECK(has_const(fn, &r.prog, svsl_scalar_float32, 0x40400000)); // 3.0
+	svsl_arena_free(&arena);
+}
+
+// Item 7 (docs/PLAN_optimizer_llvm.md): a function-local constant table is a
+// constant global, not a per-invocation variable re-stored on every call.
+static void test_ir_local_const_tables(void) {
+	svsl_arena_t arena = {0};
+	ir_run_t r = run_ir(&arena,
+		"float pick(uint i) { static const float T[3] = { 1.5, 2.5, 3.5 }; return T[i % 3]; }\n"
+		"float pick(float v) { const float T[2] = { 4, 5 }; return T[uint(v) & 1]; }\n"
+		"float4 ps(float4 uv : TEXCOORD0, uint k : TEXCOORD1) : SV_TARGET {\n"
+		"	return float4(pick(k), pick(uv.x), pick(k + 1u), 0);\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	const svsl_ir_func_t *fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_var) == 0); // no per-invocation copy of either table
+	int32_t tables = 0;
+	for (int32_t i = 0; i < r.prog.const_globals.count; i++)
+		if (svsl_str_eq_cstr(r.prog.const_globals.items[i].name, "pick.T") ||
+		    svsl_str_eq_cstr(r.prog.const_globals.items[i].name, "pick.T.2")) tables++;
+	TEST_CHECK(tables == 2); // one per declaration (overloads numbered), not per call
+	svsl_arena_free(&arena);
+}
+
+// Items 8 and 9 (docs/PLAN_optimizer_llvm.md): an [unroll] loop whose counter
+// indexes a large local array unrolls, and the array splits into values; loops
+// that don't serve such an array keep their shape.
+static void test_ir_unroll_sroa(void) {
+	svsl_arena_t arena = {0};
+	#define UNROLL_SRC(decl, loop) \
+		"RWStructuredBuffer<float> o : register(u0);\n" \
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n" \
+		"	" decl "\n" \
+		"	" loop "\n" \
+		"	o[id.x] = a[id.y & 1] + a[0];\n" \
+		"}\n"
+	// fills and reads of a 32-element array through a counter (any step): both
+	// loops unroll, and the reads after them hit constant elements
+	ir_run_t r = run_ir(&arena,
+		"RWStructuredBuffer<float> o : register(u0);\n"
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	float a[32];\n"
+		"	[unroll] for (int i = 31; i >= 0; i -= 1) a[i] = float(id.x) * i;\n"
+		"	float s = 0;\n"
+		"	[unroll] for (uint k = 0; k < 32; k += 2) s += a[k] - a[k + 1];\n"
+		"	o[id.x] = s;\n"
+		"}\n");
+	TEST_CHECK(r.ok);
+	const svsl_ir_func_t *fn = &r.module.funcs[0];
+	TEST_CHECK(count_op(fn, svsl_ir_loop) == 0);
+	TEST_CHECK(count_op(fn, svsl_ir_var)  == 0); // a split into values, counters forwarded away
+
+	// a nested array counts every level (8x8 = 64 elements), and every array-level
+	// index's loop is needed: the inner and outer loops both unroll
+	r = run_ir(&arena,
+		"RWStructuredBuffer<float> o : register(u0);\n"
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	float g[8][8];\n"
+		"	[unroll] for (int y = 0; y < 8; y++) [unroll] for (int x = 0; x < 8; x++) g[y][x] = float(id.x * y + x);\n"
+		"	float s = 0;\n"
+		"	[unroll] for (int d = 0; d < 8; d++) s += g[d][7 - d];\n"
+		"	o[id.x] = s;\n"
+		"}\n");
+	TEST_CHECK(r.ok && count_op(&r.module.funcs[0], svsl_ir_loop) == 0 && count_op(&r.module.funcs[0], svsl_ir_var) == 0);
+
+	// more counted loops than one 64-bit mask: every one is tracked (the 6x6
+	// encoder has 70), so the array they all index still splits
+	{
+		char src[16384];
+		int32_t len = snprintf(src, sizeof(src),
+			"RWStructuredBuffer<uint> o : register(u0);\n"
+			"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+			"	uint a[32];\n"
+			"	[unroll] for (uint i = 0; i < 32; i++) a[i] = id.x + i;\n");
+		for (int32_t l = 0; l < 70; l++)
+			len += snprintf(src + len, sizeof(src) - (size_t)len,
+				"	[unroll] for (uint i%d = 0; i%d < 32; i%d += 8) a[i%d] += %du;\n", l, l, l, l, l);
+		snprintf(src + len, sizeof(src) - (size_t)len, "	o[id.x] = a[0] + a[8] + a[16] + a[24];\n}\n");
+		r = run_ir(&arena, src);
+		TEST_CHECK(r.ok && count_op(&r.module.funcs[0], svsl_ir_loop) == 0 && count_op(&r.module.funcs[0], svsl_ir_var) == 0);
+	}
+
+	// kept rolled: no [unroll], a small array, a data-dependent index anywhere,
+	// a break, and a counter the body writes
+	static const struct { const char *why, *decl, *loop; } keep[] = {
+		{ "no [unroll]",   "float a[32];", "for (uint i = 0; i < 32; i++) a[i] = i;" },
+		{ "[loop]",        "float a[32];", "[loop] for (uint i = 0; i < 32; i++) a[i] = i;" },
+		{ "small array",   "float a[8];",  "[unroll] for (uint i = 0; i < 8; i++) a[i] = i;" },
+		{ "runtime index", "float a[32];", "[unroll] for (uint i = 0; i < 32; i++) a[(i * id.z) & 31] = i;" },
+		{ "break",         "float a[32];", "[unroll] for (uint i = 0; i < 32; i++) { if (i == id.z) break; a[i] = i; }" },
+		{ "counter write", "float a[32];", "[unroll] for (uint i = 0; i < 32; i++) { a[i] = i; i += id.z & 1; }" },
+	};
+	for (size_t c = 0; c < sizeof(keep) / sizeof(keep[0]); c++) {
+		char src[1024];
+		snprintf(src, sizeof(src), UNROLL_SRC("%s", "%s"), keep[c].decl, keep[c].loop);
+		r = run_ir(&arena, src);
+		TEST_CHECK(r.ok);
+		bool rolled = r.ok && count_op(&r.module.funcs[0], svsl_ir_loop) == 1;
+		TEST_CHECK(rolled);
+		if (!rolled) printf("  unrolled but must not be (%s)\n", keep[c].why);
+	}
+	#undef UNROLL_SRC
+	svsl_arena_free(&arena);
+}
+
+// The verifier (ir_verify.h) accepts optimized output and rejects each kind of
+// broken IR - built by hand, since no pass should ever produce one.
+static void test_ir_verify(void) {
+	svsl_arena_t arena = {0};
+	ir_run_t r = run_ir(&arena,
+		"float4 ps(float4 uv : TEXCOORD0) : SV_TARGET { float k = 0; if (uv.x > 0) k = uv.y * 2; return k; }\n");
+	TEST_CHECK(r.ok);
+	svsl_ir_verify_error_t err;
+	TEST_CHECK(svsl_ir_verify(&arena, &r.module.funcs[0], &err));
+
+	svsl_type_id_t f32  = svsl_type_scalar_id(&r.prog.types, svsl_scalar_float32);
+	svsl_type_id_t bool_ = svsl_type_scalar_id(&r.prog.types, svsl_scalar_bool);
+	#define I(o, t, a0, a1) ((svsl_ir_inst_t){ .op = (o), .type = (t), .args = { (a0), (a1), 0, SVSL_IR_NONE } })
+	#define N SVSL_TYPE_NONE
+	static const struct { const char *what; svsl_ir_inst_t code[8]; int32_t count; } bad[] = {
+		{ "escapes", { I(svsl_ir_const, 0, 0, 0), I(svsl_ir_const, 1, 1, 0), I(svsl_ir_if, N, 1, 0),
+		               I(svsl_ir_add, 0, 0, 0), I(svsl_ir_end_if, N, 0, 0), I(svsl_ir_neg, 0, 3, 0),
+		               I(svsl_ir_return, N, SVSL_IR_NONE, 0) }, 7 },
+		{ "earlier",  { I(svsl_ir_const, 0, 0, 0), I(svsl_ir_add, 0, 0, 2), I(svsl_ir_const, 0, 0, 0),
+		               I(svsl_ir_return, N, 1, 0) }, 4 },
+		{ "killed",   { I(svsl_ir_const, 0, 0, 0), I(svsl_ir_nop, N, 0, 0), I(svsl_ir_add, 0, 0, 1),
+		               I(svsl_ir_return, N, 2, 0) }, 4 },
+		{ "outside",  { I(svsl_ir_const, 1, 1, 0), I(svsl_ir_if, N, 0, 0), I(svsl_ir_end_loop, N, SVSL_IR_NONE, 0),
+		               I(svsl_ir_return, N, SVSL_IR_NONE, 0) }, 4 },
+		{ "outside",  { I(svsl_ir_break, N, 0, 0), I(svsl_ir_return, N, SVSL_IR_NONE, 0) }, 2 },
+		{ "unclosed", { I(svsl_ir_const, 1, 1, 0), I(svsl_ir_if, N, 0, 0), I(svsl_ir_return, N, SVSL_IR_NONE, 0) }, 3 },
+	};
+	#undef I
+	#undef N
+	for (size_t c = 0; c < sizeof(bad) / sizeof(bad[0]); c++) {
+		svsl_ir_func_t fn = {0};
+		for (int32_t i = 0; i < bad[c].count; i++) {
+			svsl_ir_inst_t in = bad[c].code[i];
+			if (in.type == 0) in.type = f32;          // 0 = float, 1 = bool in the table above
+			else if (in.type == 1) in.type = bool_;
+			svsl_array_push(&arena, &fn.insts, in);
+		}
+		bool ok = svsl_ir_verify(&arena, &fn, &err);
+		TEST_CHECK(!ok && strstr(err.what, bad[c].what));
+		if (ok || !strstr(err.what, bad[c].what)) printf("  verify case %zu: expected '%s', got '%s'\n", c, bad[c].what, ok ? "ok" : err.what);
+	}
+	svsl_arena_free(&arena);
+}
+
 void test_ir(void) {
 	test_ir_opaque_inline();
 	test_ir_flat_chains();
@@ -890,4 +1450,14 @@ void test_ir(void) {
 	test_ir_int_convert_bits();
 	test_ir_literal_typing();
 	test_ir_private_globals_spirv();
+	test_ir_fold_lanes();
+	test_ir_cfg();
+	test_ir_combine();
+	test_ir_scoped();
+	test_ir_uninitialized_locals();
+	test_ir_if_convert();
+	test_ir_const_tables();
+	test_ir_local_const_tables();
+	test_ir_unroll_sroa();
+	test_ir_verify();
 }

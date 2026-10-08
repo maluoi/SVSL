@@ -194,7 +194,9 @@ static void test_corpus_texenc_regression(void) {
 			i += (int32_t)wc;
 		}
 		int32_t exits = test_spv_loop_exits(b, NULL);
-		TEST_CHECK(unroll_loops >= 60);           // the encoder's [unroll] for-loops
+		// the encoder's [unroll] for-loops; from -O1 the ones whose counter indexes
+		// an array are unrolled by SVSL itself (docs/PLAN_optimizer_llvm.md item 8)
+		TEST_CHECK(level == svsl_opt_none ? unroll_loops >= 60 : unroll_loops >= 1);
 		TEST_CHECK(exits >= unroll_loops);        // each exits from its condition block
 		TEST_CHECK(test_spv_count(b, SpvOpLogicalNot, -1, -1) == 0); // no `!cond` + selection exits
 		TEST_CHECK(test_spv_array_loads(b) == 0); // no whole-array parameter copies

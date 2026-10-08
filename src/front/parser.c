@@ -726,7 +726,9 @@ static void parse_bitfield_spec(parse_t *p, svsl_ast_var_t *var) {
 	const svsl_token_t *nx = peek(p, 1);
 	if (nx->kind == svsl_tok_int_lit) {                 // ': N' - raw bits
 		advance(p); // ':'
-		var->bit_width  = (int16_t)cur(p)->int_value;
+		// saturate rather than wrap: sema's width check then reports the overflow
+		uint64_t w = cur(p)->int_value;
+		var->bit_width  = (int16_t)(w > INT16_MAX ? INT16_MAX : w);
 		var->bit_format = svsl_bitfmt_raw;
 		advance(p); // int
 		return;
@@ -739,11 +741,11 @@ static void parse_bitfield_spec(parse_t *p, svsl_ast_var_t *var) {
 		int32_t w = 0;
 		for (int32_t i = 2; i < t.len; i++) {
 			if (t.ptr[i] < '0' || t.ptr[i] > '9') return; // not un/sn<digits> -> a semantic
-			w = w * 10 + (t.ptr[i] - '0');
+			if (w <= INT16_MAX) w = w * 10 + (t.ptr[i] - '0'); // saturates below: no overflow
 		}
 		advance(p); // ':'
 		advance(p); // ident
-		var->bit_width  = (int16_t)w;
+		var->bit_width  = (int16_t)(w > INT16_MAX ? INT16_MAX : w);
 		var->bit_format = fmt;
 	}
 }

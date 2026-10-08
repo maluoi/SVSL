@@ -43,6 +43,15 @@ static void test_lex_idents_keywords(void) {
 	TEST_CHECK(r.tokens.items[3].keyword == svsl_kw_pack16);
 	TEST_CHECK(r.tokens.items[4].keyword == svsl_kw_none); // min16float is a type alias, not a keyword
 
+	// keywords resolve through a hash index (debug builds check every row finds
+	// itself); near misses must not
+	r = run_lex(&arena, "break writeonly spirv spirv_asm spirv_as in inout");
+	TEST_CHECK(r.tokens.items[0].keyword == svsl_kw_break);
+	TEST_CHECK(r.tokens.items[1].keyword == svsl_kw_writeonly);
+	TEST_CHECK(r.tokens.items[2].keyword == svsl_kw_spirv && r.tokens.items[3].keyword == svsl_kw_spirv);
+	TEST_CHECK(r.tokens.items[4].keyword == svsl_kw_none);
+	TEST_CHECK(r.tokens.items[5].keyword == svsl_kw_in && r.tokens.items[6].keyword == svsl_kw_inout);
+
 	svsl_arena_free(&arena);
 }
 

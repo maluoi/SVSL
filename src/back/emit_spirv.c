@@ -8,7 +8,6 @@
 #include "spirv_builder.h"
 #include "../ir/usage.h"
 #include "../ir/ir_operands.h"
-#include "../sema/const_eval.h"
 #include "../tables/formats.h"
 #include "../tables/intrinsics.h"
 #include "../tables/semantics.h"
@@ -51,22 +50,11 @@ typedef struct emit_t {
 	uint32_t *workgroup_ids;
 	uint32_t *const_global_ids;
 	uint32_t *private_ids;      // one Private OpVariable per private (non-const static) global
-	uint32_t *param_shadow;     // entry params -> function-local shadow vars
-	// scalar-replaced struct params: read-only inputs accessed only by constant
-	// member chains skip the shadow var + whole-struct construct entirely; each
-	// member chain resolves straight to the member's stage-input variable.
-	uint8_t  *param_sroa;       // per entry param: 1 = scalar-replaced
-	uint32_t *param_member_var; // [param * SVSL_EMIT_MAX_MEMBERS + member] -> input var (0 if unused)
+	uint32_t *io_vars;          // per entry io slot: its Input/Output variable, made on first use
 	uint32_t *builtin_input;    // subgroup builtins etc., created on demand
 	uint32_t *spec_const_ids;   // one OpSpecConstant per spec-constant index
 	uint32_t *sampler_vars;     // standalone sampler variables for cross-paired sampling
-	uint32_t *output_vars;      // flattened return outputs (sized to the return type)
-	int32_t   output_count;
-	int32_t  *vs_input_locations; // per prog->vertex_inputs entry; vertex stage only
-	// scalar-replaced return struct: a local var whose members are stored then
-	// returned whole is elided - member stores go straight to the stage-output
-	// variables (output_vars), so no local struct is built and torn apart again.
-	uint32_t  output_sroa_var;  // IR index of the SROA'd output var, or SVSL_IR_NONE
+	int32_t  *io_locations;     // per entry io slot: its decorated location, -1 = none (record_io_locations)
 
 	svsl_array_t(uint32_t) interface;   // entry-point interface ids (Input/Output)
 	svsl_array_t(uint32_t) relaxed_ids; // RelaxedPrecision decorated once per id
@@ -446,86 +434,33 @@ static SpvStorageClass tile_or_uniform_class(emit_t *e, const svsl_resource_t *r
 	return SpvStorageClassTileAttachmentQCOM;
 }
 
-static uint32_t spv_const_scalar(emit_t *e, svsl_scalar_ scalar, double f) {
-	svsl_spv_t *spv = &e->spv;
-	uint32_t    st  = spv_scalar_type(e, scalar);
-	int64_t     i   = (int64_t)f;
-	if (scalar == svsl_scalar_bool)
-		return svsl_spv_const(spv, st, (uint64_t)(i != 0), false, true);
-	if (scalar == svsl_scalar_float32 || scalar == svsl_scalar_half ||
-	    scalar == svsl_scalar_float16) {
-		float fv = (float)f;
-		uint32_t bits;
-		memcpy(&bits, &fv, 4);
-		return svsl_spv_const(spv, st, bits, false, false);
-	}
-	if (scalar == svsl_scalar_float64) {
-		uint64_t bits;
-		memcpy(&bits, &f, 8);
-		return svsl_spv_const(spv, st, bits, true, false);
-	}
-	return svsl_spv_const(spv, st, (uint64_t)i, svsl_scalar_size(scalar) == 8, false);
+// one scalar leaf of a constant global's value (const_eval.h encoding = IR const bits)
+static uint32_t spv_const_leaf(emit_t *e, svsl_scalar_ scalar, uint64_t bits) {
+	return svsl_spv_const(&e->spv, spv_scalar_type(e, scalar), bits, svsl_scalar_size(scalar) == 8,
+	                      scalar == svsl_scalar_bool);
 }
 
-// constant value from an AST initializer (const-global private variables)
-static uint32_t spv_const_expr(emit_t *e, const svsl_ast_expr_t *expr, svsl_type_id_t type) {
+// a constant global's value as a SPIR-V constant of `type`, consuming its leaves
+static uint32_t spv_const_value(emit_t *e, svsl_type_id_t type, const uint64_t **ref_leaf) {
 	const svsl_type_t *t = svsl_type_get(&e->prog->types, type);
-	svsl_spv_t        *spv = &e->spv;
+	if (t->kind == svsl_type_scalar) return spv_const_leaf(e, t->scalar, *(*ref_leaf)++);
 
-	if (t->kind == svsl_type_scalar) {
-		double f;
-		if (!svsl_const_eval_num(e->prog, expr, &f)) return 0;
-		return spv_const_scalar(e, t->scalar, f);
-	}
-	if (t->kind == svsl_type_vector) { // componentwise, including constant math
-		double vals[4];
-		if (!svsl_const_eval_vec(e->prog, expr, t->count, vals)) return 0;
-		uint32_t parts[4];
-		for (int32_t i = 0; i < t->count; i++)
-			if (!(parts[i] = spv_const_scalar(e, t->scalar, vals[i]))) return 0;
-		uint32_t id = svsl_spv_id(spv);
-		uint32_t words[6] = { spv_type_for(e, type), id, parts[0], parts[1], parts[2], parts[3] };
-		svsl_spv_inst(spv, &spv->types, SpvOpConstantComposite, words, 2 + (uint32_t)t->count);
-		return id;
-	}
-
-	// composites from init lists / ctor forms
-	const svsl_ast_expr_t **items = NULL;
-	int32_t                 count = 0;
-	if (expr->kind == svsl_expr_init_list) { items = (const svsl_ast_expr_t **)expr->init_list.items; count = expr->init_list.count; }
-	else if (expr->kind == svsl_expr_ctor) { items = (const svsl_ast_expr_t **)expr->ctor.args; count = expr->ctor.arg_count; }
-	else return 0;
-
+	uint32_t  count = (uint32_t)(t->kind == svsl_type_vector ? t->count : t->kind == svsl_type_matrix ? t->rows : t->array_count);
 	uint32_t *parts = svsl_arena_alloc(e->arena, (size_t)count * sizeof(uint32_t));
-	int32_t  want = 0;
-	if (t->kind == svsl_type_array && count == t->array_count) {
-		want = count;
-		for (int32_t i = 0; i < want; i++)
-			if (!(parts[i] = spv_const_expr(e, items[i], t->elem))) return 0;
-	} else if (t->kind == svsl_type_matrix && count == t->rows * t->cols) {
-		want = t->rows; // rows of vec(cols)
-		svsl_type_id_t st = svsl_type_scalar_id((svsl_types_t *)&e->prog->types, t->scalar);
-		uint32_t rt = svsl_spv_type(&e->spv, SpvOpTypeVector,
-		                            (uint32_t[]){ spv_scalar_type(e, t->scalar), t->cols }, 2);
-		for (int32_t r = 0; r < t->rows; r++) {
+	if (t->kind == svsl_type_vector) {
+		for (uint32_t i = 0; i < count; i++) parts[i] = spv_const_leaf(e, t->scalar, *(*ref_leaf)++);
+	} else if (t->kind == svsl_type_matrix) { // rows of vec(cols): SPIR-V matrix vectors are HLSL rows
+		uint32_t row_type = svsl_spv_type(&e->spv, SpvOpTypeVector,
+		                                  (uint32_t[]){ spv_scalar_type(e, t->scalar), (uint32_t)t->cols }, 2);
+		for (uint32_t r = 0; r < count; r++) {
 			uint32_t comps[4];
-			for (int32_t c = 0; c < t->cols; c++)
-				if (!(comps[c] = spv_const_expr(e, items[r * t->cols + c], st))) return 0;
-			uint32_t id = svsl_spv_id(&e->spv);
-			uint32_t words[7] = { rt, id };
-			for (int32_t c = 0; c < t->cols; c++) words[2 + c] = comps[c];
-			svsl_spv_inst(&e->spv, &e->spv.types, SpvOpConstantComposite, words, 2 + (uint32_t)t->cols);
-			parts[r] = id;
+			for (int32_t c = 0; c < t->cols; c++) comps[c] = spv_const_leaf(e, t->scalar, *(*ref_leaf)++);
+			parts[r] = svsl_spv_const_composite(&e->spv, SpvOpConstantComposite, row_type, comps, (uint32_t)t->cols);
 		}
-	} else return 0;
-
-	uint32_t id = svsl_spv_id(spv);
-	uint32_t *words = svsl_arena_alloc(e->arena, (size_t)(want + 2) * sizeof(uint32_t));
-	words[0] = spv_type_for(e, type);
-	words[1] = id;
-	for (int32_t i = 0; i < want; i++) words[2 + i] = parts[i];
-	svsl_spv_inst(spv, &spv->types, SpvOpConstantComposite, words, 2 + (uint32_t)want);
-	return id;
+	} else { // array
+		for (uint32_t i = 0; i < count; i++) parts[i] = spv_const_value(e, t->elem, ref_leaf);
+	}
+	return svsl_spv_const_composite(&e->spv, SpvOpConstantComposite, spv_type_for(e, type), parts, count);
 }
 
 static void create_globals(emit_t *e) {
@@ -679,15 +614,20 @@ static void create_globals(emit_t *e) {
 		e->workgroup_ids[i] = var;
 	}
 
-	// private globals: zero-initialized Private variables (initializers are
-	// stores in each entry's prologue - see ir_build's lower_private_globals).
-	// Only the ones this entry still references after optimization are declared.
+	// private and constant globals: only the ones this entry still references
+	// after optimization are declared (a constant table every load of which
+	// folded away, or one belonging to a function this entry never calls, isn't)
 	uint8_t *private_used = svsl_arena_alloc(e->arena, (size_t)(prog->private_globals.count > 0 ? prog->private_globals.count : 1));
+	uint8_t *const_used   = svsl_arena_alloc(e->arena, (size_t)(prog->const_globals.count > 0 ? prog->const_globals.count : 1));
 	for (int32_t i = 0; i < e->fn->insts.count; i++) {
 		const svsl_ir_inst_t *in = &e->fn->insts.items[i];
-		if (in->op == svsl_ir_ptr && (svsl_ref_)in->args[0] == svsl_ref_private_global)
-			private_used[in->args[1]] = 1;
+		if (in->op != svsl_ir_ptr) continue;
+		if ((svsl_ref_)in->args[0] == svsl_ref_private_global) private_used[in->args[1]] = 1;
+		if ((svsl_ref_)in->args[0] == svsl_ref_const_global)   const_used[in->args[1]]   = 1;
 	}
+
+	// private globals: zero-initialized Private variables (initializers are
+	// stores in each entry's prologue - see ir_build's lower_private_globals)
 	for (int32_t i = 0; i < prog->private_globals.count; i++) {
 		if (!private_used[i]) continue;
 		const svsl_global_t *g    = &prog->private_globals.items[i];
@@ -703,9 +643,9 @@ static void create_globals(emit_t *e) {
 	// const globals with constant initializers -> Private variables
 	for (int32_t i = 0; i < prog->const_globals.count; i++) {
 		const svsl_global_t *g = &prog->const_globals.items[i];
-		if (g->type == SVSL_TYPE_NONE || !g->var || !g->var->init) continue;
-		uint32_t init = spv_const_expr(e, g->var->init, g->type);
-		if (!init) continue; // only referenced consts matter; error surfaces on use
+		if (!const_used[i] || !g->value) continue; // a non-constant one errors at its use
+		const uint64_t *leaf = g->value;
+		uint32_t        init = spv_const_value(e, g->type, &leaf);
 		uint32_t ptr = spv_ptr_type(e, SpvStorageClassPrivate, spv_type_for(e, g->type));
 		uint32_t var = svsl_spv_id(spv);
 		svsl_spv_inst4(spv, &spv->types, SpvOpVariable, ptr, var, SpvStorageClassPrivate, init);
@@ -734,38 +674,20 @@ static uint32_t make_io_var(emit_t *e, svsl_type_id_t type, bool output, svsl_st
 	return var;
 }
 
-// How many interface locations a stage-IO member of this type consumes. A
-// scalar/vector (<=4 32-bit components) is one; a matrix is one per column vector
-// (its emitted OpTypeMatrix has `rows` of them); an array multiplies by its
-// length; a nested struct sums its members. One-per-member would overlap an
-// array/matrix with the following member's location.
-static int32_t location_span(const svsl_types_t *types, svsl_type_id_t id) {
-	const svsl_type_t *t = svsl_type_get(types, id);
-	switch (t->kind) {
-	case svsl_type_matrix:
-		return t->rows;
-	case svsl_type_array:
-		return (t->array_count > 0 ? t->array_count : 1) * location_span(types, t->elem);
-	case svsl_type_struct: {
-		const svsl_struct_info_t *si = &types->structs.items[t->struct_index];
-		int32_t sum = 0;
-		for (int32_t m = 0; m < si->members.count; m++)
-			sum += location_span(types, si->members.items[m].type);
-		return sum;
-	}
-	default:
-		return 1; // scalar / vector
-	}
-}
-
-static void io_decorate(emit_t *e, uint32_t var, svsl_str_t semantic, svsl_sem_io_ io,
-                        int32_t *ref_location, svsl_type_id_t type, uint8_t interp) {
-	const svsl_type_t *vt = svsl_type_get(&e->prog->types, type);
+// Decorates an interface variable for its slot: the builtin it is, or its
+// location (sema numbered every slot) and interpolation.
+static void io_decorate(emit_t *e, uint32_t var, const svsl_io_slot_t *slot) {
+	svsl_stage_        stage = e->fn->entry->stage;
+	svsl_sem_io_       io    = slot->output ? (stage == svsl_stage_vertex ? svsl_sem_vs_out : svsl_sem_ps_out)
+	                                        : (stage == svsl_stage_vertex ? svsl_sem_vs_in :
+	                                           stage == svsl_stage_pixel  ? svsl_sem_ps_in : svsl_sem_cs_in);
+	const svsl_type_t *vt    = svsl_type_get(&e->prog->types, slot->type);
 	bool integer_type = (vt->kind == svsl_type_scalar || vt->kind == svsl_type_vector) &&
 	                    (vt->scalar >= svsl_scalar_int8 && vt->scalar <= svsl_scalar_uint64);
+	uint8_t interp = slot->interp;
 
 	svsl_semantic_info_t info;
-	if (svsl_semantic_lookup(semantic, io, &info) && info.is_builtin) {
+	if (slot->location < 0 && svsl_semantic_lookup(slot->semantic, io, &info) && info.is_builtin) {
 		svsl_spv_inst3(&e->spv, &e->spv.decor, SpvOpDecorate, var, SpvDecorationBuiltIn, info.builtin);
 		if (info.builtin == SpvBuiltInViewIndex) svsl_spv_cap(&e->spv, SpvCapabilityMultiView);
 		if (info.builtin == SpvBuiltInLayer) {
@@ -786,13 +708,7 @@ static void io_decorate(emit_t *e, uint32_t var, svsl_str_t semantic, svsl_sem_i
 			svsl_spv_inst2(&e->spv, &e->spv.decor, SpvOpDecorate, var, SpvDecorationInvariant);
 		return;
 	}
-	int32_t location = *ref_location;
-	if (io == svsl_sem_ps_out) { // SV_TargetN picks its own location
-		svsl_semantic_info_t ti;
-		if (svsl_semantic_lookup(semantic, io, &ti)) location = ti.target_index;
-	}
-	svsl_spv_inst3(&e->spv, &e->spv.decor, SpvOpDecorate, var, SpvDecorationLocation, (uint32_t)location);
-	*ref_location += location_span(&e->prog->types, type);
+	svsl_spv_inst3(&e->spv, &e->spv.decor, SpvOpDecorate, var, SpvDecorationLocation, (uint32_t)slot->location);
 
 	// Vulkan requires integer fragment inputs to be flat
 	if (io == svsl_sem_ps_in && (integer_type || (interp & svsl_interp_flat)))
@@ -805,25 +721,29 @@ static void io_decorate(emit_t *e, uint32_t var, svsl_str_t semantic, svsl_sem_i
 		svsl_spv_inst2(&e->spv, &e->spv.decor, SpvOpDecorate, var, SpvDecorationInvariant);
 }
 
-// Records the location assigned to the next prog->vertex_inputs entry (-1 = its
-// OpVariable was stripped). The prologue's walk must mirror collect_vertex_inputs
-// (sema.c) - same order, same generated-semantic exclusions - so each entry is
-// name-checked and a divergence fails the compile instead of writing metadata
-// that lies about the SPIR-V interface.
-static void record_vs_input(emit_t *e, int32_t *ref_index, svsl_str_t name,
-                            svsl_loc_t loc, int32_t location) {
-	if (!e->vs_input_locations) return;
-	int32_t i = (*ref_index)++;
-	if (i >= e->prog->vertex_inputs.count ||
-	    !svsl_str_eq(e->prog->vertex_inputs.items[i].name, name)) {
-		eerr(e, loc, "vertex input metadata diverged from the emitted interface");
-		return;
+// The Input/Output variable for io slot `slot`, declared on first use: only the
+// slots the optimized body still reads or writes reach the interface.
+static uint32_t io_var(emit_t *e, int32_t slot) {
+	if (e->io_vars[slot]) return e->io_vars[slot];
+	const svsl_io_slot_t *s = &e->fn->entry->io.items[slot];
+	uint32_t var = make_io_var(e, s->type, s->output, s->name);
+	io_decorate(e, var, s);
+	e->io_vars[slot] = var;
+	return var;
+}
+
+// Each io slot's decorated location, or -1: a builtin, or a slot the optimized
+// body never touches, so its variable was never declared (glslang strips unread
+// inputs too; the location stays consumed). The SKS writer's vertex-input
+// records come from this, so they mirror the module exactly.
+static void record_io_locations(emit_t *e) {
+	const svsl_entry_t *entry = e->fn->entry;
+	for (int32_t i = 0; i < entry->io.count; i++) {
+		const svsl_io_slot_t *slot = &entry->io.items[i];
+		e->io_locations[i] = e->io_vars[i] ? slot->location : -1;
+		if (svsl_io_is_attribute(entry, slot) && slot->location > 255)
+			eerr(e, slot->loc, "vertex input location exceeds the container's limit of 255");
 	}
-	if (location > 255) {
-		eerr(e, loc, "vertex input location exceeds the container's limit of 255");
-		return;
-	}
-	e->vs_input_locations[i] = location;
 }
 
 // --- function body -----------------------------------------------------------------
@@ -1056,185 +976,22 @@ static uint32_t shrink_to(emit_t *e, uint32_t value, uint32_t have_comps, svsl_t
 	return value;
 }
 
-// --- entry-input scalar replacement (SROA) ----------------------------------------
-// A read-only struct stage parameter accessed only through constant member chains
-// need not be reassembled into a Function shadow variable: each member chain can
-// resolve straight to that member's stage-input variable, and only referenced
-// members are declared. Matches skshaderc, which loads the used member directly.
-
-#define SVSL_EMIT_MAX_MEMBERS 32
-
-// struct-typed entry-parameter op? returns param index or -1
-static int32_t sroa_param_index(const emit_t *e, uint32_t id) {
-	const svsl_ir_inst_t *in = &e->fn->insts.items[id];
-	if (in->op != svsl_ir_param) return -1;
-	const svsl_type_t *t = svsl_type_get(&e->prog->types, in->type);
-	return t->kind == svsl_type_struct ? (int32_t)in->args[0] : -1;
-}
-
-// member chain off a struct param, with a constant first (member) index? fills
-// param + member. Accepts trailing sub-indices (e.g. input.world_pos.y): those
-// become an access chain into the member's stage-input variable at emit.
-static bool sroa_member_chain(const emit_t *e, uint32_t id, int32_t *out_param, int32_t *out_member) {
-	const svsl_ir_inst_t *in = &e->fn->insts.items[id];
-	if (in->op != svsl_ir_chain || in->aux_count < 1) return false;
-	int32_t p = sroa_param_index(e, in->args[0]);
-	if (p < 0) return false;
-	const svsl_ir_inst_t *idx = &e->fn->insts.items[e->fn->aux.items[in->aux]];
-	if (idx->op != svsl_ir_const) return false;
-	*out_param  = p;
-	*out_member = (int32_t)idx->args[0];
-	return true;
-}
-
-static bool sroa_sem_is_builtin(svsl_str_t semantic, svsl_sem_io_ io) {
-	svsl_semantic_info_t info;
-	return svsl_semantic_lookup(semantic, io, &info) && info.is_builtin;
-}
-
-// Marks each struct param SROA-able unless it is used in any way other than as
-// the base of a constant member chain that is only loaded. Also records which
-// members are referenced (param_member_var used as a 0/1 marker until the
-// prologue replaces it with the real input variable id).
-static void analyze_param_sroa(emit_t *e) {
-	const svsl_ir_func_t   *fn   = e->fn;
-	int32_t                 pc   = fn->entry->func->param_count;
-	const svsl_func_info_t *info = svsl_program_func_info(e->prog, fn->entry->func);
-
-	for (int32_t p = 0; p < pc; p++) {
-		bool ok = false;
-		if (info) {
-			const svsl_type_t *pt = svsl_type_get(&e->prog->types, info->param_types[p]);
-			if (pt->kind == svsl_type_struct)
-				ok = e->prog->types.structs.items[pt->struct_index].members.count <= SVSL_EMIT_MAX_MEMBERS;
-		}
-		e->param_sroa[p] = ok ? 1 : 0;
-	}
-
-	for (int32_t i = 0; i < fn->insts.count; i++) {
-		const svsl_ir_inst_t *inst = &fn->insts.items[i];
-		uint32_t              mask = svsl_ir_value_arg_mask(inst);
-		for (int32_t a = 0; a < 4; a++) {
-			if (!(mask & (1u << a)) || inst->args[a] >= (uint32_t)fn->insts.count) continue;
-			uint32_t o = inst->args[a];
-			int32_t  cp, cm;
-			int32_t  pidx = sroa_param_index(e, o);
-			if (pidx >= 0) { // direct use of the param op - only a member-chain base is ok
-				if (!((svsl_ir_op_)inst->op == svsl_ir_chain && a == 0 &&
-				      sroa_member_chain(e, (uint32_t)i, &cp, &cm)))
-					e->param_sroa[pidx] = 0;
-			}
-			if (sroa_member_chain(e, o, &cp, &cm)) { // use of a member chain - only load's pointer
-				if ((svsl_ir_op_)inst->op == svsl_ir_load && a == 0)
-					e->param_member_var[cp * SVSL_EMIT_MAX_MEMBERS + cm] = 1; // referenced
-				else
-					e->param_sroa[cp] = 0;
-			}
-		}
-		if (svsl_ir_aux_holds_values(inst)) // any param/member-chain in aux is a disallowed use
-			for (uint32_t k = 0; k < inst->aux_count; k++) {
-				uint32_t o = fn->aux.items[inst->aux + k];
-				if (o >= (uint32_t)fn->insts.count) continue;
-				int32_t pidx = sroa_param_index(e, o), cp, cm;
-				if (pidx >= 0)                            e->param_sroa[pidx] = 0;
-				if (sroa_member_chain(e, o, &cp, &cm))    e->param_sroa[cp]   = 0;
-			}
-	}
-}
-
-// constant single-index member chain off a specific base var? fills member
-static bool sroa_out_member_chain(const svsl_ir_func_t *fn, uint32_t id, uint32_t base, int32_t *out_member) {
-	if (id >= (uint32_t)fn->insts.count) return false;
-	const svsl_ir_inst_t *in = &fn->insts.items[id];
-	if (in->op != svsl_ir_chain || in->args[0] != base || in->aux_count != 1) return false;
-	const svsl_ir_inst_t *idx = &fn->insts.items[fn->aux.items[in->aux]];
-	if (idx->op != svsl_ir_const) return false;
-	*out_member = (int32_t)idx->args[0];
-	return true;
-}
-
-// Finds a return-struct local var that can be scalar-replaced: the var is loaded
-// whole into every return, written only through constant member chains, and never
-// otherwise referenced (no whole-struct store, no member read-back, no aliasing
-// into aux). Such a var is pure output plumbing - its members go straight to the
-// stage-output variables, so the intermediate struct is never materialized. This
-// is the mirror of analyze_param_sroa for the return path.
-static void analyze_output_sroa(emit_t *e, svsl_type_id_t ret_type) {
-	e->output_sroa_var = SVSL_IR_NONE;
-	const svsl_ir_func_t *fn = e->fn;
-	const svsl_type_t    *rt = svsl_type_get(&e->prog->types, ret_type);
-	if (rt->kind != svsl_type_struct ||
-	    e->prog->types.structs.items[rt->struct_index].members.count > SVSL_EMIT_MAX_MEMBERS)
-		return;
-
-	// candidate = the var loaded whole into every value-returning return
-	uint32_t cand = SVSL_IR_NONE;
-	for (int32_t i = 0; i < fn->insts.count; i++) {
-		const svsl_ir_inst_t *in = &fn->insts.items[i];
-		if (in->op != svsl_ir_return || in->args[0] == SVSL_IR_NONE) continue;
-		const svsl_ir_inst_t *rv = &fn->insts.items[in->args[0]];
-		if (rv->op != svsl_ir_load) return;                  // returns a computed value -> no SROA
-		uint32_t v = rv->args[0];
-		if (fn->insts.items[v].op != svsl_ir_var || fn->insts.items[v].type != ret_type) return;
-		if      (cand == SVSL_IR_NONE) cand = v;
-		else if (cand != v)            return;               // returns load different vars
-	}
-	if (cand == SVSL_IR_NONE) return;
-
-	// every reference to the var (and to its member chains / whole loads) must fit
-	// the pure-output-plumbing shape, or we keep the local struct.
-	int32_t dummy;
-	for (int32_t i = 0; i < fn->insts.count; i++) {
-		const svsl_ir_inst_t *in   = &fn->insts.items[i];
-		uint32_t              mask  = svsl_ir_value_arg_mask(in);
-		for (int32_t a = 0; a < 4; a++) {
-			if (!(mask & (1u << a)) || in->args[a] >= (uint32_t)fn->insts.count) continue;
-			uint32_t o = in->args[a];
-			if (o == cand) { // direct use: only a const member-chain base or a whole-load pointer
-				bool ok = (a == 0) && (((svsl_ir_op_)in->op == svsl_ir_chain &&
-				                        sroa_out_member_chain(fn, (uint32_t)i, cand, &dummy)) ||
-				                       (svsl_ir_op_)in->op == svsl_ir_load);
-				if (!ok) return;
-			}
-			if (sroa_out_member_chain(fn, o, cand, &dummy)) // member chain: only a store pointer
-				if (!((svsl_ir_op_)in->op == svsl_ir_store && a == 0)) return;
-			if (fn->insts.items[o].op == svsl_ir_load && fn->insts.items[o].args[0] == cand)
-				if ((svsl_ir_op_)in->op != svsl_ir_return) return; // whole load feeds only return
-		}
-		if (svsl_ir_aux_holds_values(in)) // any use of the var / its chains in aux -> veto
-			for (uint32_t k = 0; k < in->aux_count; k++) {
-				uint32_t o = fn->aux.items[in->aux + k];
-				if (o == cand || sroa_out_member_chain(fn, o, cand, &dummy)) return;
-			}
-	}
-	e->output_sroa_var = cand;
-}
-
 // Emit-level liveness: mark which IR values an *emitted* operand actually reads,
-// mirroring emit_inst's chain path. Values feeding only address computations
-// that emit re-inlines (a buffer/resource-member `ptr` folded into its chain) or
-// resolves away (an SROA'd member index - the chain becomes the interface
-// variable, so its constant index is never emitted) end up referenced in the IR
-// but orphaned in the output. `referenced` lets the body loop skip emitting such
-// dead constants/pointers. Constants/pointers/undefs are value leaves (they read
-// nothing), so a single pass with no fixpoint is exact.
+// mirroring emit_inst's chain path. A buffer/resource-member `ptr` that emit
+// folds into its chain ends up referenced in the IR but orphaned in the output.
+// `referenced` lets the body loop skip emitting such dead constants/pointers.
+// Constants/pointers/undefs are value leaves (they read nothing), so a single
+// pass with no fixpoint is exact.
 static void analyze_emit_liveness(emit_t *e, uint8_t *referenced) {
 	const svsl_ir_func_t *fn = e->fn;
 	for (int32_t i = 0; i < fn->insts.count; i++) {
 		const svsl_ir_inst_t *inst = &fn->insts.items[i];
 		svsl_ir_op_           op   = (svsl_ir_op_)inst->op;
-		if (op == svsl_ir_nop || op == svsl_ir_var || op == svsl_ir_param) continue;
-		if (op == svsl_ir_load && inst->args[0] == e->output_sroa_var) continue; // whole-load elided
+		if (op == svsl_ir_nop || op == svsl_ir_var) continue;
 
 		if (op == svsl_ir_chain) {
 			const svsl_ir_inst_t *base = &fn->insts.items[inst->args[0]];
-			int32_t sp, sm;
-			if (sroa_member_chain(e, (uint32_t)i, &sp, &sm) && e->param_sroa[sp]) {
-				for (uint32_t k = 1; k < inst->aux_count; k++)   // single-index: none; multi: trailing
-					referenced[fn->aux.items[inst->aux + k]] = 1;
-			} else if (inst->args[0] == e->output_sroa_var) {
-				// resolves to the stage-output variable: references nothing
-			} else if (base->op == svsl_ir_ptr &&
+			if (base->op == svsl_ir_ptr &&
 			           (base->args[0] == svsl_ref_buffer_member || base->args[0] == svsl_ref_resource)) {
 				for (uint32_t k = 0; k < inst->aux_count; k++)   // ptr folded in: only the indices
 					referenced[fn->aux.items[inst->aux + k]] = 1;
@@ -1328,7 +1085,6 @@ static void emit_body(emit_t *e, uint32_t fn_id, uint32_t void_type, uint32_t fn
 	const svsl_ir_func_t *fn  = e->fn;
 	svsl_spv_t           *spv = &e->spv;
 	svsl_spv_stream_t    *fs  = &spv->funcs;
-	const svsl_entry_t   *entry = fn->entry;
 
 	// nesting can't exceed the instruction count; size the CF stack and the
 	// if/else-matching stack to that bound (no fixed cap to overflow)
@@ -1350,14 +1106,8 @@ static void emit_body(emit_t *e, uint32_t fn_id, uint32_t void_type, uint32_t fn
 	}
 	analyze_loop_exits(e); // needs if_has_else
 
-	const svsl_func_info_t *entry_info = svsl_program_func_info(e->prog, entry->func);
-	svsl_type_id_t          ret_type   = entry_info ? entry_info->return_type : SVSL_TYPE_NONE;
-
-	analyze_param_sroa(e);              // which struct params skip the shadow-var materialization
-	analyze_output_sroa(e, ret_type);   // whether the return struct skips its local var entirely
-
 	uint8_t *referenced = svsl_arena_alloc(e->arena, (size_t)(fn->insts.count > 0 ? fn->insts.count : 1));
-	analyze_emit_liveness(e, referenced); // constants/ptrs orphaned by chain re-inlining / SROA
+	analyze_emit_liveness(e, referenced); // constants/ptrs orphaned by chain re-inlining
 
 	svsl_spv_inst4(spv, fs, SpvOpFunction, void_type, fn_id, SpvFunctionControlMaskNone, fn_type);
 	begin_block(e, svsl_spv_id(spv));
@@ -1365,143 +1115,27 @@ static void emit_body(emit_t *e, uint32_t fn_id, uint32_t void_type, uint32_t fn
 	// all function-local variables first (SPIR-V requires them at block start)
 	for (int32_t i = 0; i < fn->insts.count; i++) {
 		const svsl_ir_inst_t *inst = &fn->insts.items[i];
-		if (inst->op == svsl_ir_var) {
-			if ((uint32_t)i == e->output_sroa_var) continue; // scalar-replaced return struct
-			uint32_t ptr = spv_ptr_type(e, SpvStorageClassFunction, spv_type_for(e, inst->type));
-			uint32_t var = svsl_spv_id(spv);
-			svsl_spv_inst3(spv, fs, SpvOpVariable, ptr, var, SpvStorageClassFunction);
-			if (inst->name.len)
-				svsl_spv_inst_str(spv, &spv->debug, SpvOpName, (uint32_t[]){ var }, 1, inst->name);
-			e->value_ids[i]   = var;
-			e->value_class[i] = SpvStorageClassFunction;
-		} else if (inst->op == svsl_ir_param) {
-			uint32_t param = inst->args[0];
-			if (e->param_sroa[param]) continue; // members resolve to input vars directly
-			if (!e->param_shadow[param]) {
-				uint32_t ptr = spv_ptr_type(e, SpvStorageClassFunction, spv_type_for(e, inst->type));
-				uint32_t var = svsl_spv_id(spv);
-				svsl_spv_inst3(spv, fs, SpvOpVariable, ptr, var, SpvStorageClassFunction);
-				if (inst->name.len)
-					svsl_spv_inst_str(spv, &spv->debug, SpvOpName, (uint32_t[]){ var }, 1, inst->name);
-				e->param_shadow[param] = var;
-			}
-			e->value_ids[i]   = e->param_shadow[param];
-			e->value_class[i] = SpvStorageClassFunction;
-		}
+		if (inst->op != svsl_ir_var) continue;
+		uint32_t ptr = spv_ptr_type(e, SpvStorageClassFunction, spv_type_for(e, inst->type));
+		uint32_t var = svsl_spv_id(spv);
+		svsl_spv_inst3(spv, fs, SpvOpVariable, ptr, var, SpvStorageClassFunction);
+		if (inst->name.len)
+			svsl_spv_inst_str(spv, &spv->debug, SpvOpName, (uint32_t[]){ var }, 1, inst->name);
+		e->value_ids[i]   = var;
+		e->value_class[i] = SpvStorageClassFunction;
 	}
 
-	// prologue: flatten stage inputs into the param shadow variables
-	{
-		int32_t      location    = 0;
-		int32_t      vs_input_at = 0; // running index into prog->vertex_inputs
-		svsl_sem_io_ io = entry->stage == svsl_stage_vertex ? svsl_sem_vs_in :
-		                  entry->stage == svsl_stage_pixel  ? svsl_sem_ps_in : svsl_sem_cs_in;
-		for (int32_t p = 0; p < entry->func->param_count; p++) {
-			svsl_type_id_t     ptype = entry_info ? entry_info->param_types[p] : SVSL_TYPE_NONE;
-			const svsl_type_t *pt    = svsl_type_get(&e->prog->types, ptype);
-
-			uint32_t value;
-			if (pt->kind == svsl_type_struct && e->param_sroa[p]) {
-				// scalar-replaced: declare only referenced members, mapping each to
-				// its input variable. Location must still advance for every member so
-				// the used ones (and later params) keep the locations the other stage
-				// expects; only non-builtin members consume a location.
-				const svsl_struct_info_t *si = &e->prog->types.structs.items[pt->struct_index];
-				for (int32_t m = 0; m < si->members.count && m < SVSL_EMIT_MAX_MEMBERS; m++) {
-					const svsl_member_t *member = &si->members.items[m];
-					if (member->explicit_location >= 0) location = member->explicit_location;
-					bool counted = !sroa_sem_is_builtin(member->semantic, io);
-					if (e->param_member_var[p * SVSL_EMIT_MAX_MEMBERS + m]) { // referenced
-						if (counted)
-							record_vs_input(e, &vs_input_at, member->name, entry->func->loc, location);
-						uint32_t var = make_io_var(e, member->type, false, member->name);
-						io_decorate(e, var, member->semantic, io, &location, member->type, member->interp);
-						e->param_member_var[p * SVSL_EMIT_MAX_MEMBERS + m] = var;
-					} else if (counted) {
-						record_vs_input(e, &vs_input_at, member->name, entry->func->loc, -1);
-						location += location_span(&e->prog->types, member->type); // slot still consumed
-					}
-				}
-				continue; // no shadow var, no construct, no store
-			}
-			if (pt->kind == svsl_type_struct) {
-				const svsl_struct_info_t *si = &e->prog->types.structs.items[pt->struct_index];
-				uint32_t *parts = svsl_arena_alloc(e->arena, (size_t)si->members.count * sizeof(uint32_t));
-				for (int32_t m = 0; m < si->members.count; m++) {
-					const svsl_member_t *member = &si->members.items[m];
-					uint32_t var = make_io_var(e, member->type, false, member->name);
-					if (member->explicit_location >= 0) location = member->explicit_location;
-					if (!sroa_sem_is_builtin(member->semantic, io))
-						record_vs_input(e, &vs_input_at, member->name, entry->func->loc, location);
-					io_decorate(e, var, member->semantic, io, &location, member->type, member->interp);
-					parts[m] = emit_value_inst(e, fs, SpvOpLoad, spv_type_for(e, member->type),
-					                           (uint32_t[]){ var }, 1);
-				}
-				value = emit_value_inst(e, fs, SpvOpCompositeConstruct, spv_type_for(e, ptype),
-				                        parts, (uint32_t)si->members.count);
-			} else {
-				bool counted = !sroa_sem_is_builtin(entry->func->params[p]->semantic, io);
-				// glslang strips vertex inputs nothing reads (their location is
-				// still consumed); match it so this module, its metadata, and the
-				// reference compiler agree on the input interface
-				if (counted && entry->stage == svsl_stage_vertex && !e->param_shadow[p]) {
-					record_vs_input(e, &vs_input_at, entry->func->params[p]->name,
-					                entry->func->loc, -1);
-					location += location_span(&e->prog->types, ptype);
-					continue;
-				}
-				uint32_t var = make_io_var(e, ptype, false, entry->func->params[p]->name);
-				if (counted)
-					record_vs_input(e, &vs_input_at, entry->func->params[p]->name,
-					                entry->func->loc, location);
-				io_decorate(e, var, entry->func->params[p]->semantic, io, &location,
-				            ptype, entry->func->params[p]->interp);
-				value = emit_value_inst(e, fs, SpvOpLoad, spv_type_for(e, ptype), (uint32_t[]){ var }, 1);
-			}
-			if (e->param_shadow[p]) // unreferenced params have no shadow variable
-				svsl_spv_inst2(spv, fs, SpvOpStore, e->param_shadow[p], value);
-		}
-		// every vertex_inputs entry must have been visited, or the walk above no
-		// longer mirrors collect_vertex_inputs
-		if (e->vs_input_locations && vs_input_at != e->prog->vertex_inputs.count)
-			eerr(e, entry->func->loc, "vertex input metadata diverged from the emitted interface");
-	}
-
-	// outputs: flattened from the entry's return type
-	const svsl_type_t *rt = svsl_type_get(&e->prog->types, ret_type);
-	{
-		int32_t      location = 0;
-		svsl_sem_io_ io = entry->stage == svsl_stage_vertex ? svsl_sem_vs_out : svsl_sem_ps_out;
-		int32_t      max_out = rt->kind == svsl_type_struct ?
-			e->prog->types.structs.items[rt->struct_index].members.count : 1;
-		e->output_vars = svsl_arena_alloc(e->arena, (size_t)(max_out > 0 ? max_out : 1) * sizeof(uint32_t));
-		if (rt->kind == svsl_type_struct) {
-			const svsl_struct_info_t *si = &e->prog->types.structs.items[rt->struct_index];
-			for (int32_t m = 0; m < si->members.count; m++) {
-				const svsl_member_t *member = &si->members.items[m];
-				uint32_t var = make_io_var(e, member->type, true, member->name);
-				if (member->explicit_location >= 0) location = member->explicit_location;
-				io_decorate(e, var, member->semantic, io, &location, member->type, member->interp);
-				e->output_vars[e->output_count++] = var;
-			}
-		} else if (rt->kind != svsl_type_void) {
-			uint32_t var = make_io_var(e, ret_type, true, entry->func->name);
-			io_decorate(e, var, entry->func->return_semantic, io, &location, ret_type, 0);
-			e->output_vars[e->output_count++] = var;
-		}
-	}
-
-	// body
+	// body (stage inputs and outputs are io-slot pointers: io_var declares them)
 	for (int32_t i = 0; i < fn->insts.count; i++) {
 		const svsl_ir_inst_t *inst = &fn->insts.items[i];
 		svsl_ir_op_           op   = (svsl_ir_op_)inst->op;
-		if (op == svsl_ir_nop || op == svsl_ir_var || op == svsl_ir_param) continue;
-		if (op == svsl_ir_load && inst->args[0] == e->output_sroa_var) continue; // whole output load elided
+		if (op == svsl_ir_nop || op == svsl_ir_var) continue;
 		if ((op == svsl_ir_const || op == svsl_ir_ptr || op == svsl_ir_undef) && !referenced[i])
-			continue; // a constant/pointer left orphaned by chain re-inlining or SROA
+			continue; // a constant/pointer left orphaned by chain re-inlining
 		if (e->loop_exit[i] == loop_exit_skip) continue; // folded into a loop exit branch
-		emit_inst(e, i, inst, rt, ret_type);
+		emit_inst(e, i, inst);
 	}
+	record_io_locations(e);
 
 	if (!e->terminated) svsl_spv_inst(spv, fs, SpvOpReturn, NULL, 0);
 	svsl_spv_inst(spv, fs, SpvOpFunctionEnd, NULL, 0);
@@ -1533,18 +1167,11 @@ bool svsl_spirv_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 	e.workgroup_ids     = svsl_arena_alloc(arena, (size_t)(prog->workgroup_vars.count > 0 ? prog->workgroup_vars.count : 1) * 4);
 	e.const_global_ids  = svsl_arena_alloc(arena, (size_t)(prog->const_globals.count > 0 ? prog->const_globals.count : 1) * 4);
 	e.private_ids       = svsl_arena_alloc(arena, (size_t)(prog->private_globals.count > 0 ? prog->private_globals.count : 1) * 4);
-	int32_t pcount      = fn->entry->func->param_count > 0 ? fn->entry->func->param_count : 1;
-	e.param_shadow      = svsl_arena_alloc(arena, (size_t)pcount * 4);
-	e.param_sroa        = svsl_arena_alloc(arena, (size_t)pcount);
-	e.param_member_var  = svsl_arena_alloc(arena, (size_t)pcount * SVSL_EMIT_MAX_MEMBERS * 4);
+	e.io_vars           = svsl_arena_alloc(arena, (size_t)(fn->entry->io.count > 0 ? fn->entry->io.count : 1) * 4);
 	e.builtin_input     = svsl_arena_alloc(arena, 16 * 4);
 	e.spec_const_ids    = svsl_arena_alloc(arena, (size_t)(prog->spec_consts.count > 0 ? prog->spec_consts.count : 1) * 4);
 	e.sampler_vars      = svsl_arena_alloc(arena, (size_t)(prog->resources.count > 0 ? prog->resources.count : 1) * 4);
-	if (fn->entry->stage == svsl_stage_vertex) {
-		e.vs_input_locations = svsl_arena_alloc(arena, (size_t)(prog->vertex_inputs.count > 0 ? prog->vertex_inputs.count : 1) * 4);
-		for (int32_t i = 0; i < prog->vertex_inputs.count; i++)
-			e.vs_input_locations[i] = -1;
-	}
+	e.io_locations      = svsl_arena_alloc(arena, (size_t)(fn->entry->io.count > 0 ? fn->entry->io.count : 1) * 4);
 
 	svsl_spv_cap(&e.spv, SpvCapabilityShader);
 	e.spv.glsl450 = svsl_spv_id(&e.spv);
@@ -1645,7 +1272,7 @@ bool svsl_spirv_emit(svsl_arena_t *arena, const svsl_program_t *prog,
 			               SpvExecutionModeEarlyFragmentTests);
 
 	out_blob->words              = svsl_spv_finalize(&e.spv, &out_blob->word_count);
-	out_blob->vs_input_locations = e.vs_input_locations;
-	out_blob->qcom_res_use       = e.qcom_res_use;
+	out_blob->io_locations = e.io_locations;
+	out_blob->qcom_res_use = e.qcom_res_use;
 	return !e.failed;
 }

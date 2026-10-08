@@ -1,4 +1,5 @@
 #include "lexer.h"
+#include "chars.h"
 
 #include "../tables/keywords.h"
 #include "../util/array.h"
@@ -15,62 +16,40 @@ typedef struct lex_t {
 	int32_t                 line_start; // src offset of the current line's first char
 	svsl_token_list_t      *tokens;
 	svsl_diag_list_t       *diags;
+	svsl_keyword_index_t    keywords;
 } lex_t;
 
-// Longest-match-first punctuator table.
-static const struct { const char *text; svsl_tok_ tok; } punct_table[] = {
-	{ "<<=", svsl_tok_shl_assign     },
-	{ ">>=", svsl_tok_shr_assign     },
-	{ "<<",  svsl_tok_shl            },
-	{ ">>",  svsl_tok_shr            },
-	{ "<=",  svsl_tok_le             },
-	{ ">=",  svsl_tok_ge             },
-	{ "==",  svsl_tok_eq             },
-	{ "!=",  svsl_tok_neq            },
-	{ "&&",  svsl_tok_andand         },
-	{ "||",  svsl_tok_oror           },
-	{ "++",  svsl_tok_plusplus       },
-	{ "--",  svsl_tok_minusminus     },
-	{ "+=",  svsl_tok_plus_assign    },
-	{ "-=",  svsl_tok_minus_assign   },
-	{ "*=",  svsl_tok_star_assign    },
-	{ "/=",  svsl_tok_slash_assign   },
-	{ "%=",  svsl_tok_percent_assign },
-	{ "&=",  svsl_tok_and_assign     },
-	{ "|=",  svsl_tok_or_assign      },
-	{ "^=",  svsl_tok_xor_assign     },
-	{ "::",  svsl_tok_coloncolon     },
-	{ "(",   svsl_tok_lparen         },
-	{ ")",   svsl_tok_rparen         },
-	{ "[",   svsl_tok_lbracket       },
-	{ "]",   svsl_tok_rbracket       },
-	{ "{",   svsl_tok_lbrace         },
-	{ "}",   svsl_tok_rbrace         },
-	{ ",",   svsl_tok_comma          },
-	{ ";",   svsl_tok_semicolon      },
-	{ "$",   svsl_tok_dollar         },
-	{ ".",   svsl_tok_dot            },
-	{ "?",   svsl_tok_question       },
-	{ ":",   svsl_tok_colon          },
-	{ "+",   svsl_tok_plus           },
-	{ "-",   svsl_tok_minus          },
-	{ "*",   svsl_tok_star           },
-	{ "/",   svsl_tok_slash          },
-	{ "%",   svsl_tok_percent        },
-	{ "=",   svsl_tok_assign         },
-	{ "<",   svsl_tok_lt             },
-	{ ">",   svsl_tok_gt             },
-	{ "!",   svsl_tok_not            },
-	{ "&",   svsl_tok_amp            },
-	{ "|",   svsl_tok_pipe           },
-	{ "^",   svsl_tok_caret          },
-	{ "~",   svsl_tok_tilde          },
+// Punctuators by first character, longest first (len derived from the literal)
+#define P(text, tok) { text, (int32_t)sizeof(text) - 1, tok }
+static const struct { const char *text; int32_t len; svsl_tok_ tok; } punct_table[128][4] = {
+	['<'] = { P("<<=", svsl_tok_shl_assign), P("<<", svsl_tok_shl), P("<=", svsl_tok_le), P("<", svsl_tok_lt) },
+	['>'] = { P(">>=", svsl_tok_shr_assign), P(">>", svsl_tok_shr), P(">=", svsl_tok_ge), P(">", svsl_tok_gt) },
+	['='] = { P("==", svsl_tok_eq), P("=", svsl_tok_assign) },
+	['!'] = { P("!=", svsl_tok_neq), P("!", svsl_tok_not) },
+	['&'] = { P("&&", svsl_tok_andand), P("&=", svsl_tok_and_assign), P("&", svsl_tok_amp) },
+	['|'] = { P("||", svsl_tok_oror), P("|=", svsl_tok_or_assign), P("|", svsl_tok_pipe) },
+	['+'] = { P("++", svsl_tok_plusplus), P("+=", svsl_tok_plus_assign), P("+", svsl_tok_plus) },
+	['-'] = { P("--", svsl_tok_minusminus), P("-=", svsl_tok_minus_assign), P("-", svsl_tok_minus) },
+	['*'] = { P("*=", svsl_tok_star_assign), P("*", svsl_tok_star) },
+	['/'] = { P("/=", svsl_tok_slash_assign), P("/", svsl_tok_slash) },
+	['%'] = { P("%=", svsl_tok_percent_assign), P("%", svsl_tok_percent) },
+	['^'] = { P("^=", svsl_tok_xor_assign), P("^", svsl_tok_caret) },
+	[':'] = { P("::", svsl_tok_coloncolon), P(":", svsl_tok_colon) },
+	['('] = { P("(", svsl_tok_lparen) },
+	[')'] = { P(")", svsl_tok_rparen) },
+	['['] = { P("[", svsl_tok_lbracket) },
+	[']'] = { P("]", svsl_tok_rbracket) },
+	['{'] = { P("{", svsl_tok_lbrace) },
+	['}'] = { P("}", svsl_tok_rbrace) },
+	[','] = { P(",", svsl_tok_comma) },
+	[';'] = { P(";", svsl_tok_semicolon) },
+	['$'] = { P("$", svsl_tok_dollar) },
+	['.'] = { P(".", svsl_tok_dot) },
+	['?'] = { P("?", svsl_tok_question) },
+	['~'] = { P("~", svsl_tok_tilde) },
 };
+#undef P
 
-static bool is_ident_start(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
-static bool is_ident_char (char c) { return is_ident_start(c) || (c >= '0' && c <= '9'); }
-static bool is_digit      (char c) { return c >= '0' && c <= '9'; }
-static bool is_hex_digit  (char c) { return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
 
 static svsl_loc_t lex_loc(const lex_t *lex, int32_t pos) {
 	svsl_loc_t loc = { .file = NULL, .line = 0, .col = pos - lex->line_start + 1 };
@@ -103,32 +82,32 @@ static void lex_number(lex_t *lex) {
 	if (src.ptr[i] == '0' && i + 1 < src.len && (src.ptr[i + 1] == 'x' || src.ptr[i + 1] == 'X')) {
 		is_hex = true;
 		i += 2;
-		while (i < src.len && is_hex_digit(src.ptr[i])) i++;
+		while (i < src.len && svsl_is_hex_digit(src.ptr[i])) i++;
 	} else if (src.ptr[i] == '0' && i + 1 < src.len && (src.ptr[i + 1] == 'b' || src.ptr[i + 1] == 'B')) {
 		is_bin = true;
 		i += 2;
 		while (i < src.len && (src.ptr[i] == '0' || src.ptr[i] == '1')) i++;
 	} else {
-		while (i < src.len && is_digit(src.ptr[i])) i++;
+		while (i < src.len && svsl_is_digit(src.ptr[i])) i++;
 		if (i < src.len && src.ptr[i] == '.') {
 			is_float = true;
 			i++;
-			while (i < src.len && is_digit(src.ptr[i])) i++;
+			while (i < src.len && svsl_is_digit(src.ptr[i])) i++;
 		}
 		if (i < src.len && (src.ptr[i] == 'e' || src.ptr[i] == 'E')) {
 			int32_t exp = i + 1;
 			if (exp < src.len && (src.ptr[exp] == '+' || src.ptr[exp] == '-')) exp++;
-			if (exp < src.len && is_digit(src.ptr[exp])) {
+			if (exp < src.len && svsl_is_digit(src.ptr[exp])) {
 				is_float = true;
 				i = exp;
-				while (i < src.len && is_digit(src.ptr[i])) i++;
+				while (i < src.len && svsl_is_digit(src.ptr[i])) i++;
 			}
 		}
 	}
 	int32_t digits_end = i;
 
 	// suffix: trailing identifier characters
-	while (i < src.len && is_ident_char(src.ptr[i])) i++;
+	while (i < src.len && svsl_is_ident_char(src.ptr[i])) i++;
 	svsl_str_t suffix_text = svsl_str_slice(src, digits_end, i);
 	svsl_str_t token_text  = svsl_str_slice(src, start, i);
 
@@ -197,6 +176,9 @@ bool svsl_lex(svsl_arena_t *arena, const svsl_pp_result_t *pp,
 		.tokens = out_tokens,
 		.diags  = ref_diags };
 
+	svsl_keyword_index_build(&lex.keywords);
+	svsl_array_reserve(arena, out_tokens, out_tokens->count + lex.src.len / 4 + 16); // ~1 token per 4 bytes of source
+
 	int32_t errors_before = ref_diags->error_count;
 	while (lex.pos < lex.src.len) {
 		char c = lex.src.ptr[lex.pos];
@@ -211,18 +193,18 @@ bool svsl_lex(svsl_arena_t *arena, const svsl_pp_result_t *pp,
 			lex.pos++;
 			continue;
 		}
-		if (is_ident_start(c)) {
+		if (svsl_is_ident_start(c)) {
 			int32_t start = lex.pos;
-			while (lex.pos < lex.src.len && is_ident_char(lex.src.ptr[lex.pos])) lex.pos++;
+			while (lex.pos < lex.src.len && svsl_is_ident_char(lex.src.ptr[lex.pos])) lex.pos++;
 			svsl_str_t text = svsl_str_slice(lex.src, start, lex.pos);
 			lex_push(&lex, (svsl_token_t){
 				.kind    = svsl_tok_ident,
-				.keyword = (int16_t)svsl_keyword_lookup(text),
+				.keyword = (int16_t)svsl_keyword_find(&lex.keywords, text),
 				.text    = text,
 				.loc     = lex_loc(&lex, start) });
 			continue;
 		}
-		if (is_digit(c) || (c == '.' && lex.pos + 1 < lex.src.len && is_digit(lex.src.ptr[lex.pos + 1]))) {
+		if (svsl_is_digit(c) || (c == '.' && lex.pos + 1 < lex.src.len && svsl_is_digit(lex.src.ptr[lex.pos + 1]))) {
 			lex_number(&lex);
 			continue;
 		}
@@ -247,16 +229,19 @@ bool svsl_lex(svsl_arena_t *arena, const svsl_pp_result_t *pp,
 		}
 
 		bool matched = false;
-		for (int32_t k = 0; k < (int32_t)(sizeof(punct_table) / sizeof(punct_table[0])); k++) {
-			int32_t len = (int32_t)strlen(punct_table[k].text);
-			if (lex.pos + len <= lex.src.len && strncmp(lex.src.ptr + lex.pos, punct_table[k].text, (size_t)len) == 0) {
+		for (int32_t k = 0; k < 4 && (uint8_t)c < 128 && !matched; k++) {
+			const char *text = punct_table[(uint8_t)c][k].text;
+			int32_t     len  = punct_table[(uint8_t)c][k].len;
+			if (len == 0) break;
+			bool hit = lex.pos + len <= lex.src.len;
+			for (int32_t j = 1; j < len && hit; j++) hit = lex.src.ptr[lex.pos + j] == text[j];
+			if (hit) {
 				lex_push(&lex, (svsl_token_t){
-					.kind = punct_table[k].tok,
+					.kind = punct_table[(uint8_t)c][k].tok,
 					.text = svsl_str_slice(lex.src, lex.pos, lex.pos + len),
 					.loc  = lex_loc(&lex, lex.pos) });
 				lex.pos += len;
 				matched = true;
-				break;
 			}
 		}
 		if (!matched) {

@@ -1,4 +1,5 @@
 #include "check.h"
+#include "const_eval.h"
 
 #include "../../vendor/spirv.h"
 #include "../tables/formats.h"
@@ -13,6 +14,8 @@ typedef struct check_local_t {
 	svsl_str_t     name;
 	svsl_type_id_t type;
 	int32_t        depth;
+	int32_t        global; // a constant table hoisted to const_globals: its index + 1 (0 = a real local)
+	bool           is_const;
 } check_local_t;
 
 typedef struct check_t {
@@ -194,8 +197,16 @@ static bool expr_is_lvalue(check_t *c, const svsl_ast_expr_t *e) {
 // writes lets aggregate arguments pass by reference instead of by copy (ir_build's
 // lower_user_call). Every write site goes through here, so the flag is complete.
 static bool check_write_target(check_t *c, const svsl_ast_expr_t *e) {
-	if (!expr_is_lvalue(c, e)) return false;
+	// a const local, a `static const`, or a local constant table hoisted to one:
+	// reported here, by name, rather than as the caller's "not an lvalue"
 	const svsl_ast_expr_t *root = svsl_ast_lvalue_root(e);
+	if (root->kind == svsl_expr_ident &&
+	    (root->sema_ref.kind == svsl_ref_const_global ||
+	     (root->sema_ref.kind == svsl_ref_local && c->locals.items[root->sema_ref.a].is_const))) {
+		cerr(c, e->loc, "'%.*s' is const and cannot be written", root->ident);
+		return true;
+	}
+	if (!expr_is_lvalue(c, e)) return false;
 	if (root->kind == svsl_expr_ident && root->sema_ref.kind == svsl_ref_param && c->func_index >= 0)
 		c->prog->functions.items[c->func_index].param_written[root->sema_ref.a] = 1;
 	return true;
@@ -229,7 +240,9 @@ static svsl_type_id_t resolve_ident(check_t *c, svsl_ast_expr_t *e) {
 
 	for (int32_t i = c->locals.count - 1; i >= 0; i--) {
 		if (svsl_str_eq(c->locals.items[i].name, name)) {
-			e->sema_ref = (svsl_sema_ref_t){ .kind = svsl_ref_local, .a = i };
+			e->sema_ref = c->locals.items[i].global
+			            ? (svsl_sema_ref_t){ .kind = svsl_ref_const_global, .a = c->locals.items[i].global - 1 }
+			            : (svsl_sema_ref_t){ .kind = svsl_ref_local, .a = i };
 			return c->locals.items[i].type;
 		}
 	}
@@ -1380,6 +1393,35 @@ static void check_init(check_t *c, svsl_ast_expr_t *init, svsl_type_id_t type) {
 	init->sema_type = type;
 }
 
+// A local constant table - `const` or `static const` array with a constant
+// initializer - is the same immutable data as a module-scope one, so it becomes
+// a constant global (scoped to the local's name), not a per-invocation variable
+// re-stored on every call and indexed out of scratch memory. Returns the
+// const_globals index + 1, or 0 to keep an ordinary local.
+static int32_t hoist_const_table(check_t *c, const svsl_ast_var_t *var, svsl_type_id_t type) {
+	if (!(var->flags & svsl_var_flag_const) || !var->init || !c->func) return 0;
+	if (svsl_type_get(&c->prog->types, type)->kind != svsl_type_array) return 0; // scalars forward anyway
+	const uint64_t *value = svsl_const_eval(c->arena, c->prog, var->init, type);
+	if (!value) return 0;
+	// never a user identifier: `function.local`, numbered when an overload or a
+	// sibling block already used the name (WGSL declares each one by name)
+	svsl_str_t fn   = c->func->name;
+	char      *text = svsl_arena_alloc(c->arena, (size_t)(fn.len + var->name.len + 16));
+	int32_t    len  = snprintf(text, (size_t)(fn.len + var->name.len + 16), "%.*s.%.*s",
+	                           fn.len, fn.ptr, var->name.len, var->name.ptr);
+	for (int32_t n = 2;; n++) {
+		bool taken = false;
+		for (int32_t i = 0; i < c->prog->const_globals.count && !taken; i++)
+			taken = svsl_str_eq(c->prog->const_globals.items[i].name, (svsl_str_t){ text, len });
+		if (!taken) break;
+		len = snprintf(text, (size_t)(fn.len + var->name.len + 16), "%.*s.%.*s.%d",
+		               fn.len, fn.ptr, var->name.len, var->name.ptr, n);
+	}
+	svsl_array_push(c->arena, &c->prog->const_globals, (svsl_global_t){
+		.name = { text, len }, .type = type, .var = var, .value = value });
+	return c->prog->const_globals.count;
+}
+
 static void check_var_decl(check_t *c, svsl_ast_stmt_t *s) {
 	for (int32_t i = 0; i < s->var_decl.count; i++) {
 		svsl_ast_var_t *var  = s->var_decl.vars[i];
@@ -1392,8 +1434,10 @@ static void check_var_decl(check_t *c, svsl_ast_stmt_t *s) {
 			continue;
 		}
 		if (var->init) check_init(c, var->init, type);
+		var->sema_global = hoist_const_table(c, var, type);
 		svsl_array_push(c->arena, &c->locals, (check_local_t){
-			.name = var->name, .type = type, .depth = c->depth });
+			.name = var->name, .type = type, .depth = c->depth, .global = var->sema_global,
+			.is_const = (var->flags & svsl_var_flag_const) != 0 });
 	}
 }
 
@@ -1490,6 +1534,17 @@ static bool find_cycle(check_t *c, int32_t func, uint8_t *state) {
 
 void svsl_check_functions(svsl_arena_t *arena, svsl_program_t *prog, svsl_diag_list_t *ref_diags) {
 	check_t c = { .arena = arena, .prog = prog, .diags = ref_diags, .func_index = -1, .init_private = -1 };
+
+	// constant-global initializers, each evaluated once into the value every
+	// consumer reads, in index order: the integer constants sema registered
+	// first, then the rest in declaration order. A constant naming a later one
+	// sees no value yet and isn't a constant itself, so there are no cycles.
+	for (int32_t i = 0; i < prog->const_globals.count; i++) {
+		svsl_global_t *g = &prog->const_globals.items[i];
+		if (!g->var || !g->var->init || g->type == SVSL_TYPE_NONE) continue;
+		check_init(&c, g->var->init, g->type);
+		g->value = svsl_const_eval(arena, prog, g->var->init, g->type);
+	}
 
 	// private-global initializers, in module scope (no locals or params); they
 	// run at the top of each entry point, in declaration order

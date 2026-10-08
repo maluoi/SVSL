@@ -42,6 +42,19 @@ static const svsl_buffer_t *find_buffer(const svsl_program_t *p, const char *nam
 		if (svsl_str_eq_cstr(p->buffers.items[i].name, name)) return &p->buffers.items[i];
 	return NULL;
 }
+// the vertex entry's mesh attributes (svsl_io_is_attribute), in interface order;
+// returns how many, filling up to `max`
+static int32_t vertex_attributes(const svsl_program_t *p, const svsl_io_slot_t **out, int32_t max) {
+	int32_t n = 0;
+	for (int32_t e = 0; e < p->entries.count; e++)
+		for (int32_t i = 0; i < p->entries.items[e].io.count; i++) {
+			const svsl_io_slot_t *slot = &p->entries.items[e].io.items[i];
+			if (!svsl_io_is_attribute(&p->entries.items[e], slot)) continue;
+			if (n < max) out[n] = slot;
+			n++;
+		}
+	return n;
+}
 static const svsl_resource_t *find_resource(const svsl_program_t *p, const char *name) {
 	for (int32_t i = 0; i < p->resources.count; i++)
 		if (svsl_str_eq_cstr(p->resources.items[i].name, name)) return &p->resources.items[i];
@@ -133,9 +146,10 @@ static void test_sema_reference(void) {
 
 	// entries + vertex inputs (builtin sk_ids_t members excluded)
 	TEST_CHECK(r.prog.entries.count == 2);
-	TEST_CHECK(r.prog.vertex_inputs.count == 4);
-	TEST_CHECK(svsl_str_eq_cstr(r.prog.vertex_inputs.items[0].semantic, "SV_Position"));
-	TEST_CHECK(svsl_str_eq_cstr(r.prog.vertex_inputs.items[1].semantic, "NORMAL0"));
+	const svsl_io_slot_t *attrs[8];
+	TEST_CHECK(vertex_attributes(&r.prog, attrs, 8) == 4);
+	TEST_CHECK(svsl_str_eq_cstr(attrs[0]->semantic, "SV_Position"));
+	TEST_CHECK(svsl_str_eq_cstr(attrs[1]->semantic, "NORMAL0"));
 
 	svsl_arena_free(&arena);
 }
@@ -369,7 +383,8 @@ static void test_sema_errors(void) {
 		"O vs(float4 p : SV_Position, uint id : SV_VertexID) { O o; o.pos = p * id; return o; }\n"
 		"float4 ps(O i) : SV_Target { return 1; }\n");
 	TEST_CHECK(r.ok);
-	TEST_CHECK(r.prog.vertex_inputs.count == 1); // id is generated, not an attribute
+	const svsl_io_slot_t *attr;
+	TEST_CHECK(vertex_attributes(&r.prog, &attr, 1) == 1); // id is generated, not an attribute
 
 	// containment cycles used to recurse forever in layout
 	r = run_sema_ex(&arena, "struct A { A a; };\nfloat4 ps() : SV_Target { A x; return 1; }\n", true);
@@ -970,7 +985,16 @@ static void test_check_static_globals(void) {
 	r = run_sema_ex(&arena,
 		"static const float k = 1;\n"
 		"float4 ps() : SV_TARGET { k = 2; return k; }\n", true);
-	TEST_CHECK(has_error(&r, "cannot assign")); // `static const` stays read-only
+	TEST_CHECK(has_error(&r, "'k' is const and cannot be written")); // `static const` stays read-only
+
+	// a const local, and a local constant table (hoisted to a constant global),
+	// are named the same way - not "cannot assign to this expression"
+	r = run_sema_ex(&arena,
+		"float4 ps() : SV_TARGET { const float c = 1; c = 2; return c; }\n", true);
+	TEST_CHECK(has_error(&r, "'c' is const and cannot be written"));
+	r = run_sema_ex(&arena,
+		"float4 ps() : SV_TARGET { const float t[2] = { 1, 2 }; t[0] = 3; return t[1]; }\n", true);
+	TEST_CHECK(has_error(&r, "'t' is const and cannot be written"));
 
 	r = run_sema_ex(&arena,
 		"static int N = 4;\n"
@@ -1026,10 +1050,123 @@ static void test_check_static_globals(void) {
 	svsl_arena_free(&arena);
 }
 
+// Fuzzer findings (2026-10-08): malformed input that crashed sema instead of
+// erroring. An unknown storage-image format used to survive on the interned
+// type and trip formats.c's assert when an image atomic re-read it; a semantic
+// index past int32 overflowed the index parse (UB).
+static void test_check_fuzz_regressions(void) {
+	svsl_arena_t arena = {0};
+	sema_run_t r = run_sema_ex(&arena,
+		"Image2D<uint, xxr32ui> img;\n"
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+		"	uint old; InterlockedAdd(img[id.xy], 1, old);\n"
+		"}\n", true);
+	TEST_CHECK(!r.ok && has_error(&r, "unrecognized image format 'xxr32ui'"));
+
+	r = run_sema_ex(&arena,
+		"float4 vs(float4 p : SV_Position4294967296) : SV_POSITION { return p; }\n"
+		"float4 ps() : SV_TARGET { return 1; }\n", true);
+	TEST_CHECK(!r.ok && has_error(&r, "unknown system-value semantic"));
+
+	// ...and on every other stage input/output: SV_ typos, or an index past int32,
+	// used to become silent user varyings at the next location
+	static const char *unknown_sv[] = {
+		"float4 vs(float4 p : POSITION) : SV_POSITION { return p; }\n"
+		"float4 ps(float4 c : SV_Bogus) : SV_TARGET { return c; }\n",
+		"float4 vs(float4 p : POSITION) : SV_POSITION { return p; }\n"
+		"float4 ps(float4 c : COLOR0) : SV_Target99999999999 { return c; }\n",
+		"struct o_t { float4 p : SV_POSITION; float4 c : SV_Colour; };\n"
+		"o_t vs(float4 p : POSITION) { o_t o; o.p = p; o.c = p; return o; }\n"
+		"float4 ps(float4 c : COLOR0) : SV_TARGET { return c; }\n",
+		"[numthreads(1, 1, 1)] void cs(uint3 id : SV_DispatchThreadIdx) { }\n",
+	};
+	for (size_t i = 0; i < sizeof(unknown_sv) / sizeof(unknown_sv[0]); i++) {
+		r = run_sema_ex(&arena, unknown_sv[i], true);
+		TEST_CHECK(!r.ok && has_error(&r, "unknown system-value semantic"));
+	}
+	// a known system value in another position is a plain varying (no error)
+	r = run_sema(&arena,
+		"struct v_t { float4 p : SV_POSITION; uint id : SV_VertexID; };\n"
+		"v_t vs(float4 p : POSITION, uint id : SV_VertexID) { v_t o; o.p = p; o.id = id; return o; }\n"
+		"float4 ps(uint id : SV_VertexID) : SV_TARGET { return id; }\n");
+	TEST_CHECK(r.ok);
+
+	// a bit-field width past int16 saturates (and errors) instead of wrapping:
+	// 65537 used to truncate to a silently valid width of 1
+	r = run_sema_ex(&arena,
+		"struct P { float a : un65537; uint b : 65537; float c : un142949672960; };\n"
+		"StructuredBuffer<P> buf : register(t0);\n"
+		"float4 ps() : SV_TARGET { return buf[0].a; }\n", true);
+	TEST_CHECK(!r.ok && has_error(&r, "out of range [1,24]") && has_error(&r, "exceeds its 32-bit type"));
+	svsl_arena_free(&arena);
+}
+
+// `const` locals are read-only (baseline silently allowed writes): assignment,
+// compound assignment, and out arguments are errors, scalar or table alike.
+static void test_check_const_locals(void) {
+	svsl_arena_t arena = {0};
+	static const char *writes[] = {
+		"float4 ps() : SV_TARGET { const float x = 2; x = 3; return x; }\n",
+		"float4 ps() : SV_TARGET { const float x = 2; x += 3; return x; }\n",
+		"float4 ps() : SV_TARGET { const float t[2] = { 1, 2 }; t[0] = 3; return t[0]; }\n",
+		"float4 ps() : SV_TARGET { static const float t[2] = { 1, 2 }; t[1]++; return t[1]; }\n",
+		"void f(out float y) { y = 1; }\nfloat4 ps() : SV_TARGET { const float x = 2; f(x); return x; }\n",
+	};
+	for (size_t i = 0; i < sizeof(writes) / sizeof(writes[0]); i++) {
+		sema_run_t r = run_sema_ex(&arena, writes[i], true);
+		TEST_CHECK(!r.ok);
+		if (r.ok) printf("  const write accepted: %s", writes[i]);
+	}
+	sema_run_t r = run_sema(&arena, "float4 ps() : SV_TARGET { const float t[2] = { 1, 2 }; float u = t[1]; u += 1; return u; }\n");
+	TEST_CHECK(r.ok);
+	svsl_arena_free(&arena);
+}
+
+static const uint64_t *const_value(const svsl_program_t *p, const char *name) {
+	for (int32_t i = 0; i < p->const_globals.count; i++)
+		if (svsl_str_eq_cstr(p->const_globals.items[i].name, name)) return p->const_globals.items[i].value;
+	return NULL;
+}
+
+// Constant initializers evaluate once, in IR lowering's typed semantics, into
+// the leaves every backend reads (sema/const_eval.h). The baseline evaluated
+// untyped in double: HLSL's integer `1 / 2` came out 0.5 in SPIR-V (0 in WGSL),
+// and float16 tables were written with float32 bits.
+static void test_check_const_values(void) {
+	svsl_arena_t arena = {0};
+	sema_run_t r = run_sema(&arena,
+		"static const float    HALF  = 1 / 2;\n"
+		"static const float    QUART = 1.0 / 4;\n"
+		"static const int      NEG   = -7 / 2;\n"
+		"static const uint     MASK  = (1u << 31) | 1u;\n"
+		"static const float2   V     = float2(1, 2) * 2 + 0.5;\n"
+		"static const float2x2 M     = float2x2(1, 2, 3, 4);\n"
+		"static const float16  H[2]  = { 1.5, -2 };\n"
+		"static const float    T[3]  = { QUART, HALF, NEG };\n"
+		"static const float    LATE  = AFTER;\n"
+		"static const float    AFTER = 1.5;\n"
+		"float4 ps() : SV_TARGET { return HALF; }\n");
+	TEST_CHECK(r.ok);
+	const uint64_t *v;
+	TEST_CHECK((v = const_value(&r.prog, "HALF"))  && v[0] == 0);
+	TEST_CHECK((v = const_value(&r.prog, "QUART")) && v[0] == 0x3E800000);
+	TEST_CHECK((v = const_value(&r.prog, "NEG"))   && v[0] == (uint64_t)-3); // sign-extended
+	TEST_CHECK((v = const_value(&r.prog, "MASK"))  && v[0] == 0x80000001u);
+	TEST_CHECK((v = const_value(&r.prog, "V"))     && v[0] == 0x40200000 && v[1] == 0x40900000); // 2.5, 4.5
+	TEST_CHECK((v = const_value(&r.prog, "M"))     && v[0] == 0x3F800000 && v[3] == 0x40800000); // row-major
+	TEST_CHECK((v = const_value(&r.prog, "H"))     && v[0] == 0x3E00 && v[1] == 0xC000);         // binary16
+	TEST_CHECK((v = const_value(&r.prog, "T"))     && v[0] == 0x3E800000 && v[1] == 0 && v[2] == 0xC0400000);
+	TEST_CHECK(const_value(&r.prog, "LATE") == NULL); // names a constant declared after it
+	svsl_arena_free(&arena);
+}
+
 void test_sema(void) {
+	test_check_const_values();
 	test_check_expressions();
 	test_check_errors_and_warnings();
 	test_check_static_globals();
+	test_check_fuzz_regressions();
+	test_check_const_locals();
 	test_check_spirv_asm();
 	test_check_bitfield();
 	test_check_bitfield_struct();

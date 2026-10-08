@@ -18,6 +18,78 @@ they need targeted tests or adversarial input.
 
 These change emitted results or crash the compiler. Ordered by impact.
 
+### 🔴✓ -2. WGSL containers record `image_format = 0` while the WGSL they carry declares a real format
+`src/out/sks_write.c:652`
+
+Fallout from the format-default flip. `svsl_image_format_for` returns `Unknown` for an
+undeclared format, but `emit_wgsl.c` deliberately keeps inferring (`svsl_image_format_inferred`)
+because WebGPU has no formatless storage texture — so the SKS resource record and the WGSL
+text disagreed. Reproduced: `svslc -sks -t w` on `RWTexture2D<float4> dst : register(u0);`
+emits `var dst : texture_storage_2d<rgba32float, write>` with a format byte of 0 (it was 1,
+`Rgba32f`, before the flip). sk_renderer's `wgpu/skr_pipeline.c:239` feeds that byte to
+`_skr_spv_image_format`, which logs *"Storage image format 0 unmapped, assuming rgba8"* and
+builds the bind group layout with `RGBA8Unorm` — a format mismatch against the shader module,
+so WebGPU pipeline creation fails. `docs/PLAN_unknown_storage_format.md:171` assumed the
+record needed no change; that was wrong for the WGSL target.
+
+☑ **Fixed.** The record now follows the container's own language: `with_wgsl` selects
+`svsl_image_format_inferred`, everything else `svsl_image_format_for`. An explicitly declared
+format reads the same either way. Covered by `test_wgsl_storage_format_record`, which pins
+both targets against the emitted WGSL text.
+
+### 🔴✓ -1. A memory-order argument on a storage-image atomic is read as an out-parameter
+`src/ir/ir_build.c:705`
+
+The image-atomic branch added with finding 0 decided the out-parameter form on
+`arg_count == 3` alone, unlike the pointer path below it, which gates on `intr->opt_native`.
+Sema accepts a trailing memory-order name on the native spelling (`check.c:759`), so
+`atomic_add(counter[id.xy], 1u, acq_rel)` arrived here with `args[2]` being the identifier
+`acq_rel` and handed it to `store_target`. Reproduced: `error: cannot store through this
+expression`, pointing at an argument the author never meant as a destination. The equivalent
+buffer form compiles fine. Worse if it had stored: `args[3]` was set to `atomic_op` without
+`| (order << 8)`, so the ordering would have been dropped and relaxed semantics emitted.
+
+☑ **Fixed.** The branch now mirrors the pointer path — `intr->opt_native` picks out-parameter
+vs. order name, and the order packs into `args[3]`'s high byte. Emit already handled
+`ImageMemoryMask` for the ordered image case. `tests/test_formats.c` pins the emitted
+semantics constant (`AcquireRelease | ImageMemory`) and its absence on the relaxed spelling.
+
+### 🔴✓ 0. `InterlockedAdd(img[coord], v)` — the HLSL free-function form on a storage image — segfaults
+`src/ir/ir_build.c:98` (via `convert_value` at :151, `finish` at :342, `lower_expr` at :1382)
+
+The method spelling `img.InterlockedAdd(coord, v)` (what the corpus uses, and what
+`check_image_atomics.hlsl` exercises) is fine. The HLSL global-function spelling with a
+subscript lvalue crashes the compiler:
+
+```hlsl
+[[vk::image_format("r32ui")]] RWTexture2D<uint> counter : register(u0);
+[numthreads(8,8,1)]
+void cs(uint3 id : SV_DispatchThreadID) { InterlockedAdd(counter[id.xy], 1); }
+```
+
+`lower_expr` reaches `finish` with `value == 0` (no IR value) and `value_type` dereferences
+it. Pre-existing — reproduced against a build predating the storage-format work — and
+independent of the image's format: the explicit-`r32ui` and undeclared versions crash
+identically. Found while testing the format-default flip.
+
+**Fix:** either lower the free-function form to the same image-atomic path as the method
+form, or reject it in sema with a located diagnostic pointing at the method spelling. Either
+way it must not reach `lower_expr` with a null value. Needs a check shader once it works.
+
+☑ **Fixed.** Two parts. The crash itself was an error path returning `0` instead of
+`SVSL_IR_NONE` (`ir_build.c`, the atomic branch of `lower_call`) — `0` is a plausible-looking
+IR id, so `finish()`'s `value == SVSL_IR_NONE` early-out missed it and `value_type` indexed
+an empty instruction array. Beyond that, the form is now *supported* rather than diagnosed:
+`lower_call` routes a subscript-on-image destination to `svsl_ir_image_atomic`, the same path
+`img.InterlockedAdd(c, v)` takes. The two spellings share one atomic op-code space
+(`intrinsics.c` notes it), so they lower byte-identically — verified with `spirv-dis` diff.
+Sema (`check.c`) gained the two rules that path needs, shared with the method form via
+`atomic_image_dest` / `check_atomic_image_format`: the image needs an explicitly declared
+32-bit format, and compare-exchange has no image form (the IR carries image/coord/value with
+no comparator slot). Covered by `tests/test_formats.c` (opcode counts for both spellings, the
+out-argument form, both rejections, and a buffer/groupshared regression check) and by
+`check_image_atomics.hlsl`, which now exercises both spellings under `spirv-val`.
+
 ### 🔴✓ 1. Early `return` nested in a loop/switch inside an inlined helper is silently dropped
 `src/ir/ir_build.c:1500` + `src/back/emit_intrinsics.inc:609`
 
@@ -216,6 +288,24 @@ sema global-resource path and the check.c local-decl guard call it — the two l
 drift, and local `TileImage` is now rejected. The CLI consumes the `-i`/`-D` operand before the
 cap check and prints an "ignoring …" note past the cap, so an over-cap flag no longer eats the
 next argv as an input file.
+
+### 🔴✓ 12b. Two more narrow gaps, found reviewing the storage-format change
+- The image-atomic format guard only rejected `Unknown`, though its own message and
+  `LANGUAGE_SPEC.md` promise a 32-bit format (`check.c:392`). Vulkan's rule
+  (`VUID-StandaloneSpirv-OpImageTexelPointer-04658`) is narrower than "not Unknown": the
+  format must be `R32f`/`R32i`/`R32ui` (the 64-bit halves need `Int64ImageEXT`, which
+  `formats.c` deliberately omits). Reproduced: `Image2D<uint, r8ui>` with `InterlockedAdd`
+  compiled cleanly and then failed `spirv-val`, on both spellings.
+- `#undef` cleared only the last definition of a name (`pp.c:720`). `#define` pushes rather
+  than replaces — lookup scans in reverse so the newest wins — so `#define N 1` / `#define N 2`
+  / `#undef N` left `N` defined as `1`. Pre-existing, but the target predefines made it
+  reachable from the CLI: `svslc -D TARGET_SPIRV=7` plus a source-level `#undef TARGET_SPIRV`
+  left the predefine alive, contradicting `docs/DECISIONS.md`'s "`#undef` works".
+
+☑ **Fixed (both).** `check_atomic_image_format` now tests membership in the R32 set and names
+the three formats in its message. `#undef` clears every live entry with the name. Covered by
+`tests/test_formats.c` (`r8ui`/`r16ui` rejection, `r32f` acceptance) and `tests/test_pp.c`
+(redefine/undef).
 
 ---
 

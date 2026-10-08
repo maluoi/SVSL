@@ -142,7 +142,7 @@ static run_t compile_corpus(const shader_t *shaders, int32_t count, svsl_opt_lev
 		if (diags.error_count == 0) {
 			for (int32_t i = 0; i < ir.func_count && i < 16; i++) {
 				svsl_wgsl_blob_t blob = {0};
-				svsl_wgsl_emit(&arena, &program, &ir.funcs[i], blobs[i].vs_input_locations,
+				svsl_wgsl_emit(&arena, &program, &ir.funcs[i], blobs[i].io_locations,
 				               &blob, &diags);
 				if (measure_metrics && blob.text) r.wgsl_bytes += blob.length;
 			}

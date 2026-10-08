@@ -26,7 +26,7 @@ cmake --build build
 
 Targets: `svsl` (static lib), `svslc` (CLI), `svsl_tests` (unit/corpus tests), `svsl_view`
 (visual test app; only built when `SVSL_BUILD_VIEW=ON`, pulls sk_app/sk_renderer/imgui via
-FetchContent).
+FetchContent), `svsl_isa` (GPU measurement tool; `SVSL_BUILD_ISA=ON`, links libvulkan).
 
 ## Running Tests
 
@@ -47,12 +47,42 @@ shader is silently skipped until it gets a config entry, and the guide covers co
 placement, verification tiers, and golden-value derivation. Dev guides for agents live
 in `docs/dev/`.
 
+## Measuring on a GPU
+
+Pixel-identical isn't fast: drivers re-optimize SPIR-V, so judge a codegen change by what
+the driver produces. `svsl_isa` (`app/isa.c`, `-DSVSL_BUILD_ISA=ON`) builds `.spv` stages
+(`svslc -spv`) into real pipelines:
+
+```bash
+svsl_isa [-v] a.comp.spv b.frag.spv        # driver stats: insts, registers, spills/scratch, code size
+svsl_isa time -reps 5 a.spv b.spv          # cold pipeline-creation time (driver caches defeated)
+svsl_isa run a.comp.spv -groups 43 43 1 -image photo.raw -u32 1=2048   # timed dispatch + output hash
+```
+
+Desktop RADV and Android Adreno both work; Adreno (Quest 3, XR's common GPU) is the one
+that is sensitive to SPIR-V shape, so check codegen changes there. Android build, then run
+over adb (cap every device run with `timeout 60`):
+
+```bash
+cmake -B build-isa-android -G Ninja -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+      -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DCMAKE_BUILD_TYPE=Release \
+      -DSVSL_BUILD_ISA=ON -DSVSL_BUILD_CLI=OFF -DSVSL_BUILD_TESTS=OFF -DSVSL_INSTALL=OFF
+cmake --build build-isa-android --target svsl_isa
+adb push build-isa-android/svsl_isa /data/local/tmp/
+```
+
+`tests/perf/unroll_sweep.py` measures the unroll policy on synthetic encoder-shaped shaders
+across compilers (research builds override `src/ir/passes/unroll.c`'s thresholds). The
+sk_texenc encoders - the array-heavy shaders that drove the optimizer work - have their own
+encode/PSNR tools in sk_renderer (`example/tools/compress/`).
+
 ## Dependency Policy
 
 **The core library and CLI link nothing but libc.** SPIR-V opcodes/enums come from a vendored
 single-file `vendor/spirv.h` (from SPIRV-Headers) — never hand-write SPIR-V constants.
 Validation shells out to `spirv-val` if present; it is never linked. Only `svsl_view` may use
-FetchContent dependencies (sk_app, sk_renderer, imgui), and it is off by default.
+FetchContent dependencies (sk_app, sk_renderer, imgui), and it is off by default. `svsl_isa`
+links the system libvulkan, also off by default.
 
 ## Code Style
 

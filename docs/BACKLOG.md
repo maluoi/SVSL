@@ -21,6 +21,22 @@ bugs and cleanups from the code review are tracked in `docs/CODE_REVIEW.md`.
   override, and the sibling `~/SK/sk_renderer/build` is configured with
   `FETCHCONTENT_SOURCE_DIR_SVSL=~/SK/SVSL` so its embedded libsvsl tracks this
   working tree (clear the cache var to return to the pin).
+- **The sk_renderer `-t sw` removal is ahead of its libsvsl pin.** `sksc_svsl.cpp` now
+  rejects `-t sw`, but that build's `FETCHCONTENT_SOURCE_DIR_SVSL` is cleared, so its
+  embedded libsvsl is still the pinned pre-flip revision — which would happily accept
+  `-t sw` and, more to the point, still infers a texel format for undeclared storage
+  images. Nothing in either build depends on `-t sw` any more (the `SKR_USE_WEBGPU` arm
+  is `-t w`), so this is only a hand-run-CLI difference until the pin moves. Verify the
+  storage-image format record against the emitted WGSL after the bump — that agreement is
+  what `test_wgsl_storage_format_record` pins on this side.
+- **Split SKS feature bit 13 (formatless) into read and write.** Now that an undeclared
+  storage image format means `Unknown` (docs/DECISIONS.md), nearly every compute shader
+  sets bit 13, and the bit is joint — so a write-only shader (the mipgen case) makes the
+  runtime demand `shaderStorageImageReadWithoutFormat` too, the half with weaker old-mobile
+  coverage. SVSL already tracks the two capabilities separately; the blocker is
+  sk_renderer, where `sksc_file.h` has one `sksc_feature_bit_formatless` and the runtime
+  one joint `has_storage_without_format` flag (`vk/_sk_renderer.h`). Splitting needs both
+  repos to move together: a new bit (24 is free), a second runtime flag, and a pin bump.
 - **Apply v11 at runtime in skr**: read `meta.tile_apron` into
   `VkRenderPassTileShadingCreateInfoQCOM` when creating a tile-shading render pass
   (needs the skr tile pass model), and create shape-bit-6 samplers with
@@ -65,9 +81,16 @@ bugs and cleanups from the code review are tracked in `docs/CODE_REVIEW.md`.
 - **Barycentrics** (`SPV_KHR_fragment_shader_barycentric`: `SV_Barycentrics`,
   `GetAttributeAtVertex`).
 - **`EvaluateAttribute*` / `InterpolateAt*`** (`InterpolationFunction` capability).
-- **Codegen niceties**: `OpVectorTimesScalar` instead of splat+multiply, dynamic vector
-  indexing via `OpVectorExtractDynamic`, statement hints → SPIR-V loop/selection control masks
-  if a case ever shows they matter.
+- **Optimizer: compile cost.** The corpus IR phase is ~20 ms against 15 ms before
+  docs/PLAN_optimizer_llvm.md (emit got 1.6 ms cheaper; total compile +5%). No hotspot is
+  left: the edit commit, CSE, combine, DSE and cfg are 2–5% of a corpus compile each. The
+  structural fix would be pass-level dirty tracking (skip constructs unchanged since a
+  pass last saw them). Unrolled encoders take 2–3x longer to compile (ASTC 6x6 19 → 34 ms).
+- **Optimizer: unroll tuning on other GPUs.** The unroll policy (≥ 32-element arrays,
+  all-or-nothing per array, 32k-instruction nests, a register budget of 64 scalars inside
+  a rolled loop and 256 straight-line) was measured on Adreno 740 with sk_texenc and a
+  synthetic encoder sweep (docs/PLAN_optimizer_llvm.md Phase 3). Mali and desktop drivers
+  may want other budgets; the synthetic generator is the tool for checking.
 
 ## Documentation
 

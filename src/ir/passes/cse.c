@@ -1,61 +1,56 @@
-// Local common-subexpression elimination (value numbering). Within a
-// straight-line run, a pure value op whose (op, type, operands) exactly matches
-// an earlier one reuses that earlier result. The forward-only-reference
-// invariant means the earlier definition always dominates, and resetting the
-// table at every control-flow boundary keeps reuse within a single region - so
-// no dominance analysis is needed. Value-preserving: the reused value is
-// bit-identical because the operand SSA ids are identical. See
-// docs/OPTIMIZATION_PLAN.md section 4 (#4, #10).
+// Common-subexpression elimination (value numbering, scoped like LLVM's
+// EarlyCSE). A pure value op whose (op, type, operands) matches an earlier one
+// reuses that earlier result - wherever the earlier one dominates. In this
+// structured IR the dominator tree is region nesting, so each table entry is
+// stamped with the arm it was made in (svsl_ir_scope_t): values from enclosing
+// arms are visible inside nested ones and after they close, while a sibling arm
+// (else, continue section, next case) never sees them. No dominance analysis,
+// no deletion: a stale slot is simply overwritten. Value-preserving: the reused
+// value is bit-identical because the operand ids are identical. See
+// docs/OPTIMIZATION_PLAN.md section 4 (#4, #10) and docs/PLAN_optimizer_llvm.md item 3.
 //
-// Only side-effect-free, memory-independent ops participate. Loads and samples
-// are memory-dependent (handled by forwarding); intrinsics are skipped until
-// the table carries a purity flag (barriers/subgroup ops must never be merged).
+// Only side-effect-free, memory-independent ops participate (svsl_ir_is_pure).
+// Loads and samples are memory-dependent (handled by forwarding); barriers are
+// effects and never merge.
 
-#include "../ir.h"
+#include "passes.h"
+#include "../ir_cf.h"
 #include "../ir_operands.h"
 
-static bool cse_pure(svsl_ir_op_ op) {
-	switch (op) {
-	case svsl_ir_const:
-	case svsl_ir_construct: case svsl_ir_extract: case svsl_ir_insert: case svsl_ir_shuffle:
-	case svsl_ir_extract_dynamic:
-	case svsl_ir_add: case svsl_ir_sub: case svsl_ir_mul: case svsl_ir_div: case svsl_ir_rem:
-	case svsl_ir_neg: case svsl_ir_bit_not: case svsl_ir_log_not:
-	case svsl_ir_bit_and: case svsl_ir_bit_or: case svsl_ir_bit_xor:
-	case svsl_ir_shl: case svsl_ir_shr:
-	case svsl_ir_eq: case svsl_ir_ne: case svsl_ir_lt: case svsl_ir_le:
-	case svsl_ir_gt: case svsl_ir_ge:
-	case svsl_ir_log_and: case svsl_ir_log_or:
-	case svsl_ir_select: case svsl_ir_convert: case svsl_ir_mat_mul:
-	case svsl_ir_bitfield_extract: case svsl_ir_bitfield_insert:
-	case svsl_ir_ptr:       // global-address producer (buffer member, resource, ...)
-	case svsl_ir_chain:     // pure address computation - safe to share
-	case svsl_ir_intrinsic: // only value-producing (non-void) ones; guarded below
-		return true;
-	default:
-		return false; // load/store/tex/image/atomic/var/param/spec/undef/markers
-	}
+// The instruction's key: op and first two args, with the operands of a
+// commutative op or compare in a fixed order (a compare mirrors its relation
+// when they swap), so `a+b` meets `b+a` and `x<y` meets `y>x` (EarlyCSE).
+typedef struct cse_key_t { uint8_t op; uint32_t a0, a1; } cse_key_t;
+
+static cse_key_t cse_key(const svsl_ir_inst_t *in) {
+	cse_key_t k = { in->op, in->args[0], in->args[1] };
+	if ((svsl_ir_op_traits((svsl_ir_op_)in->op) & (svsl_ir_trait_commutative | svsl_ir_trait_compare)) &&
+	    k.a0 > k.a1)
+		k = (cse_key_t){ (uint8_t)svsl_ir_mirror_compare((svsl_ir_op_)in->op), in->args[1], in->args[0] };
+	return k;
 }
 
 static uint32_t cse_hash(const svsl_ir_func_t *fn, uint32_t id) {
 	const svsl_ir_inst_t *in = &fn->insts.items[id];
+	cse_key_t             k  = cse_key(in);
 	uint32_t h = 2166136261u;
 #define MIX(v) do { h = (h ^ (uint32_t)(v)) * 16777619u; } while (0)
-	MIX(in->op);
+	MIX(k.op);
 	MIX(in->flags); // a precise op must not merge with a contractable one
 	MIX(in->type);
-	for (int32_t a = 0; a < 4; a++) MIX(in->args[a]);
+	MIX(k.a0); MIX(k.a1); MIX(in->args[2]); MIX(in->args[3]);
 	if (svsl_ir_aux_holds_values(in))
-		for (uint32_t k = 0; k < in->aux_count; k++) MIX(fn->aux.items[in->aux + k]);
+		for (uint32_t i = 0; i < in->aux_count; i++) MIX(fn->aux.items[in->aux + i]);
 #undef MIX
 	return h;
 }
 
 static bool cse_equal(const svsl_ir_func_t *fn, uint32_t a, uint32_t b) {
 	const svsl_ir_inst_t *x = &fn->insts.items[a], *y = &fn->insts.items[b];
-	if (x->op != y->op || x->type != y->type || x->flags != y->flags) return false;
-	for (int32_t i = 0; i < 4; i++)
-		if (x->args[i] != y->args[i]) return false;
+	cse_key_t             kx = cse_key(x), ky = cse_key(y);
+	if (kx.op != ky.op || kx.a0 != ky.a0 || kx.a1 != ky.a1) return false;
+	if (x->type != y->type || x->flags != y->flags) return false;
+	if (x->args[2] != y->args[2] || x->args[3] != y->args[3]) return false;
 	if (svsl_ir_aux_holds_values(x)) {
 		if (x->aux_count != y->aux_count) return false;
 		for (uint32_t k = 0; k < x->aux_count; k++)
@@ -64,58 +59,49 @@ static bool cse_equal(const svsl_ir_func_t *fn, uint32_t a, uint32_t b) {
 	return true;
 }
 
-bool svsl_ir_cse(svsl_arena_t *arena, svsl_ir_func_t *fn, const svsl_types_t *types) {
-	int32_t count = fn->insts.count;
-	if (count == 0) return false;
+void svsl_ir_cse(svsl_ir_edit_t *ed, svsl_program_t *prog, svsl_opt_level_ level) {
+	(void)level;
+	svsl_ir_func_t *fn    = ed->fn;
+	int32_t         count = fn->insts.count;
+	if (count == 0) return;
 
 	uint32_t cap = 16;
 	while (cap < (uint32_t)count * 2) cap <<= 1;
 	uint32_t  mask   = cap - 1;
-	uint32_t *bucket = svsl_arena_alloc(arena, (size_t)cap * sizeof(uint32_t));
-	uint32_t *stamp  = svsl_arena_alloc(arena, (size_t)cap * sizeof(uint32_t)); // zeroed -> empty
-	uint32_t *remap  = svsl_arena_alloc(arena, (size_t)count * sizeof(uint32_t));
-	for (int32_t i = 0; i < count; i++) remap[i] = (uint32_t)i;
-
-	uint32_t gen     = 1;
-	bool     changed = false;
+	uint32_t *bucket = svsl_arena_alloc(ed->scratch, (size_t)cap * sizeof(uint32_t)); // id + 1; 0 = empty
+	uint32_t *serial = svsl_arena_alloc(ed->scratch, (size_t)cap * sizeof(uint32_t)); // the entry's arm
+	int32_t  *depth  = svsl_arena_alloc(ed->scratch, (size_t)cap * sizeof(int32_t));
+	svsl_ir_scope_t scope;
+	svsl_ir_scope_begin(&scope, ed->scratch, fn);
+	ed->resolved = true; // every instruction's operands resolve below, in order
 
 	for (int32_t i = 0; i < count; i++) {
-		svsl_ir_op_ op = (svsl_ir_op_)fn->insts.items[i].op;
+		// hash on canonical operands: an earlier duplicate's users now name the survivor
+		if (ed->replaced) svsl_ir_edit_resolve_operands(ed, (uint32_t)i);
 
-		// every instruction (side-effecting ones too) must have its operands
-		// redirected to surviving canonical ids before we nop the duplicates
-		svsl_ir_remap_operands(fn, (uint32_t)i, remap, (uint32_t)count);
+		const svsl_ir_inst_t *inst = &fn->insts.items[i];
+		svsl_ir_scope_step(&scope, (svsl_ir_op_)inst->op);
+		if (!svsl_ir_is_pure(inst, &prog->types)) continue; // barriers are never merged
 
-		if (svsl_ir_ends_run(op)) { gen++; continue; }   // new region -> forget prior values
-		if (!cse_pure(op)) continue;
-		// barriers (void intrinsics) must never be merged - they are side effects
-		if (op == svsl_ir_intrinsic &&
-		    !svsl_ir_intrinsic_is_pure(&fn->insts.items[i], types)) continue;
-
-		uint32_t h = cse_hash(fn, (uint32_t)i) & mask;
+		uint32_t h     = cse_hash(fn, (uint32_t)i) & mask;
+		uint32_t reuse = SVSL_IR_NONE; // first stale slot on the probe path
 		for (uint32_t p = 0;; p = (p + 1) & mask) {
 			uint32_t s = (h + p) & mask;
-			if (stamp[s] != gen) {                       // empty slot -> first of its kind
-				stamp[s]  = gen;
-				bucket[s] = (uint32_t)i;
+			if (!bucket[s]) {                                   // end of the chain: first of its kind
+				if (reuse == SVSL_IR_NONE) reuse = s;
+				bucket[reuse] = (uint32_t)i + 1;
+				serial[reuse] = scope.serial[scope.depth];
+				depth[reuse]  = scope.depth;
 				break;
 			}
-			if (cse_equal(fn, bucket[s], (uint32_t)i)) {  // redundant -> reuse earlier value
-				remap[i] = bucket[s];
-				changed  = true;
+			if (!svsl_ir_scope_live(&scope, depth[s], serial[s])) { // out of scope: reusable
+				if (reuse == SVSL_IR_NONE) reuse = s;
+				continue;
+			}
+			if (cse_equal(fn, bucket[s] - 1, (uint32_t)i)) {    // dominating duplicate -> reuse it
+				svsl_ir_edit_replace(ed, (uint32_t)i, bucket[s] - 1);
 				break;
 			}
 		}
 	}
-
-	if (!changed) return false;
-	for (int32_t i = 0; i < count; i++) {
-		if (remap[i] != (uint32_t)i) {
-			svsl_ir_inst_t *inst = &fn->insts.items[i];
-			inst->op        = svsl_ir_nop;
-			inst->type      = SVSL_TYPE_NONE;
-			inst->aux_count = 0;
-		}
-	}
-	return true;
 }

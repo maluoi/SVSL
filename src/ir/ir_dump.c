@@ -33,7 +33,7 @@ static void put(dump_t *d, const char *fmt, ...) {
 
 static const char *op_names[] = {
 	"nop", "const", "spec_const", "undef",
-	"var", "param", "ptr", "chain", "load", "store",
+	"var", "ptr", "chain", "load", "store",
 	"construct", "extract", "insert", "shuffle", "extract_dyn",
 	"add", "sub", "mul", "div", "rem",
 	"neg", "bit_not", "log_not",
@@ -105,14 +105,11 @@ static void dump_inst(dump_t *d, uint32_t id) {
 	case svsl_ir_spec_const:
 		put(d, " #%u", inst->args[0]);
 		break;
-	case svsl_ir_param:
-		put(d, " #%u", inst->args[0]);
-		break;
 	case svsl_ir_ptr: {
 		static const char *kinds[] = { "?", "local", "param", "buffer", "resource",
 		                               "spec", "const_global", "workgroup", "func",
 		                               "intrinsic", "method", "builtin", "swizzle", "mat_elem",
-		                               "bitfield", "enum_const", "private" }; // svsl_ref_ order
+		                               "bitfield", "enum_const", "private", "io" }; // svsl_ref_ order
 		uint32_t    nkinds  = (uint32_t)(sizeof(kinds) / sizeof(kinds[0]));
 		put(d, " %s %u %u", kinds[inst->args[0] < nkinds ? inst->args[0] : 0],
 		    inst->args[1], inst->args[2]);
@@ -160,9 +157,6 @@ static void dump_inst(dump_t *d, uint32_t id) {
 	case svsl_ir_spirv_asm: // aux carries the $value operand ids
 		for (uint32_t k = 0; k < inst->aux_count; k++)
 			put(d, " %%%u", d->fn->aux.items[inst->aux + k]);
-		break;
-	case svsl_ir_return:
-		if (inst->args[0] != SVSL_IR_NONE) put(d, " %%%u", inst->args[0]);
 		break;
 	case svsl_ir_case:
 		put(d, " %u%s", inst->args[0], inst->args[1] ? " default" : "");

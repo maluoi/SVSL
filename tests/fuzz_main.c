@@ -8,7 +8,10 @@
 //   svsl_fuzz [-seed N] [-runs N] [-dump ITER] [-file path]
 //
 // Every case is reproducible: `-seed N -dump ITER` regenerates the exact input
-// of iteration ITER (mutation only, no compiling) and writes fuzz_case.hlsl.
+// of iteration ITER (mutation only, no compiling) and writes fuzz_case.hlsl. A
+// crash prints its ITER; under the sanitizers run with
+// UBSAN_OPTIONS=abort_on_error=1 ASAN_OPTIONS=abort_on_error=1 so their reports
+// end in an abort the fuzzer can name too.
 // `-file path` compiles one saved case directly.
 
 #include "front/lexer.h"
@@ -258,6 +261,14 @@ static void on_alarm(int sig) {
 	_exit(2);
 }
 
+// assert() and UBSan (-fno-sanitize-recover) abort: name the case before dying
+static void on_abort(int sig) {
+	fprintf(stderr, "\nfuzz: CRASH (signal %d) at iteration %lld - reproduce with -dump %lld\n",
+	        sig, (long long)current_iter, (long long)current_iter);
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
 int main(int argc, char **argv) {
 	uint64_t seed     = 1;
 	int64_t  runs     = 100000;
@@ -282,6 +293,8 @@ int main(int argc, char **argv) {
 		if (!src) { fprintf(stderr, "cannot read '%s'\n", file); return 1; }
 		compile_one(src);
 		printf("fuzz: '%s' compiled without crashing\n", file);
+		free(src);
+		if (include_owned) free((void *)include_src);
 		return 0;
 	}
 
@@ -295,6 +308,8 @@ int main(int argc, char **argv) {
 	char *buf = malloc(MAX_INPUT + 1);
 
 	signal(SIGALRM, on_alarm);
+	signal(SIGABRT, on_abort);
+	signal(SIGSEGV, on_abort);
 
 	for (int64_t iter = 0; iter < runs || dump_at >= 0; iter++) {
 		current_iter = iter;
@@ -307,6 +322,8 @@ int main(int argc, char **argv) {
 			fclose(f);
 			printf("fuzz: iteration %lld written to fuzz_case.hlsl (%d bytes)\n",
 			       (long long)iter, len);
+			free(buf);
+			if (include_owned) free((void *)include_src);
 			return 0;
 		}
 

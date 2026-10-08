@@ -36,6 +36,10 @@ typedef struct build_t {
 	int32_t           depth;
 	u32_list_t        local_stack;      // mirrors the checker's scope stack
 	uint32_t         *private_ptrs;     // one canonical pointer per private global (entry prologue)
+	uint32_t         *param_ptrs;       // one local per entry parameter, at the function head
+	uint32_t         *param_fill;       // per entry parameter: [first, last] instruction filling its local
+	uint8_t          *param_local;      // per entry parameter: its local is needed (written, or used whole)
+	uint32_t         *io_ptrs;          // one pointer per stage-interface slot, at the function head
 	bool              failed;
 } build_t;
 
@@ -220,6 +224,7 @@ static uint32_t convert_value(build_t *b, uint32_t value, svsl_type_id_t to, svs
 
 static uint32_t lower_expr(build_t *b, const svsl_ast_expr_t *e);
 static void     lower_stmt(build_t *b, const svsl_ast_stmt_t *s);
+static void     store_outputs(build_t *b, uint32_t value, svsl_loc_t loc);
 
 // resolves an expression naming a resource (texture/sampler/etc.) to its index,
 // looking through inlined opaque parameters
@@ -280,6 +285,22 @@ static uint32_t emit_chain(build_t *b, uint32_t base, const uint32_t *indices, u
 
 // pointer-producing lowering; returns SVSL_IR_NONE when the expression has no
 // storage (call results, arithmetic, ...).
+// An entry parameter the body never writes is read straight from its input
+// slots: `input.pos` is the pos slot's pointer. Its local (filled from every
+// slot at the head) is only needed for a write or a whole-value use - unneeded
+// fills are dropped once the body is lowered, so unread inputs never reach the
+// interface, at any optimization level.
+static uint32_t entry_input(build_t *b, int32_t param, int32_t member) {
+	const svsl_entry_t *entry = b->fn->entry;
+	if (!b->entry_info || !b->entry_info->param_written[param])
+		for (int32_t i = 0; i < entry->io.count; i++)
+			if (!entry->io.items[i].output && entry->io.items[i].param == param && entry->io.items[i].member == member)
+				return b->io_ptrs[i];
+	if (member >= 0) return SVSL_IR_NONE; // a member of a written param: through the local
+	b->param_local[param] = 1;
+	return b->param_ptrs[param];
+}
+
 static uint32_t lower_lvalue(build_t *b, const svsl_ast_expr_t *e) {
 	switch (e->kind) {
 	case svsl_expr_ident:
@@ -293,15 +314,7 @@ static uint32_t lower_lvalue(build_t *b, const svsl_ast_expr_t *e) {
 				uint32_t v = b->ctx->param_vars[e->sema_ref.a];
 				return (v & RES_MARK) ? SVSL_IR_NONE : v;
 			}
-			for (int32_t i = 0; i < b->fn->insts.count; i++)
-				if (b->fn->insts.items[i].op == svsl_ir_param &&
-				    b->fn->insts.items[i].args[0] == (uint32_t)e->sema_ref.a)
-					return (uint32_t)i;
-			return emit(b, (svsl_ir_inst_t){ .op = svsl_ir_param,
-			                                 .type = b->entry_info ? b->entry_info->param_types[e->sema_ref.a]
-			                                                       : e->sema_type,
-			                                 .args = { (uint32_t)e->sema_ref.a, 0, 0, SVSL_IR_NONE },
-			                                 .loc = e->loc, .name = e->ident });
+			return entry_input(b, e->sema_ref.a, -1);
 		case svsl_ref_resource: {
 			const svsl_resource_t *res = &b->prog->resources.items[e->sema_ref.a];
 			const svsl_type_t     *rt  = svsl_type_get(&b->prog->types, res->type);
@@ -337,7 +350,13 @@ static uint32_t lower_lvalue(build_t *b, const svsl_ast_expr_t *e) {
 			return SVSL_IR_NONE; // packed field: no pointer, handled by read/store paths
 		if (e->sema_ref.kind == svsl_ref_swizzle && e->sema_ref.b > 1)
 			return SVSL_IR_NONE; // multi-component swizzle: handled by assignment
-		uint32_t base = lower_lvalue(b, e->member.object);
+		const svsl_ast_expr_t *obj = e->member.object;
+		if (!b->ctx && obj->kind == svsl_expr_ident && obj->sema_ref.kind == svsl_ref_param &&
+		    e->sema_ref.kind != svsl_ref_swizzle && e->sema_ref.kind != svsl_ref_matrix_elem) {
+			uint32_t slot = entry_input(b, obj->sema_ref.a, e->sema_ref.a);
+			if (slot != SVSL_IR_NONE) return slot;
+		}
+		uint32_t base = lower_lvalue(b, obj);
 		if (base == SVSL_IR_NONE) return SVSL_IR_NONE;
 		svsl_type_id_t base_type = b->fn->insts.items[base].type;
 
@@ -1629,6 +1648,10 @@ static void lower_stmt(build_t *b, const svsl_ast_stmt_t *s) {
 	case svsl_stmt_var_decl:
 		for (int32_t i = 0; i < s->var_decl.count; i++) {
 			const svsl_ast_var_t *var = s->var_decl.vars[i];
+			if (var->sema_global) { // a constant table: references go to its const global
+				svsl_array_push(b->arena, &b->local_stack, SVSL_IR_NONE); // keeps local indices aligned
+				continue;
+			}
 			// the declared type: recover from the init annotation or default 0
 			svsl_type_id_t type = var->init ? var->init->sema_type : SVSL_TYPE_NONE;
 			if (type == SVSL_TYPE_NONE) {
@@ -1748,7 +1771,8 @@ static void lower_stmt(build_t *b, const svsl_ast_stmt_t *s) {
 				emit_op(b, svsl_ir_break, SVSL_TYPE_NONE, 0, 0, 0, s->loc);
 			}
 		} else {
-			emit_op(b, svsl_ir_return, SVSL_TYPE_NONE, value, 0, 0, s->loc);
+			store_outputs(b, value, s->loc);
+			emit_op(b, svsl_ir_return, SVSL_TYPE_NONE, SVSL_IR_NONE, 0, 0, s->loc);
 		}
 		break;
 	}
@@ -1781,6 +1805,71 @@ static void lower_private_globals(build_t *b) {
 	}
 }
 
+// Stage interface: one pointer per slot of the entry's io table, up front at
+// depth 0 so it dominates every use (outputs are stored at each return, which
+// may sit in any arm). Each parameter is an ordinary local, filled from its
+// input slots here - forwarding and SROA then dissolve it into the input loads
+// themselves, and whatever goes unread falls to DSE and DCE.
+static void lower_entry_io(build_t *b) {
+	const svsl_entry_t *entry = b->fn->entry;
+	b->io_ptrs = svsl_arena_alloc(b->arena, (size_t)(entry->io.count > 0 ? entry->io.count : 1) * sizeof(uint32_t));
+	for (int32_t i = 0; i < entry->io.count; i++) {
+		const svsl_io_slot_t *slot = &entry->io.items[i];
+		b->io_ptrs[i] = emit(b, (svsl_ir_inst_t){ .op = svsl_ir_ptr, .type = slot->type,
+		                                          .args = { svsl_ref_stage_io, (uint32_t)i, 0, SVSL_IR_NONE },
+		                                          .loc = slot->loc, .name = slot->name });
+	}
+	int32_t count = entry->func->param_count;
+	b->param_ptrs  = svsl_arena_alloc(b->arena, (size_t)(count > 0 ? count : 1) * sizeof(uint32_t));
+	b->param_fill  = svsl_arena_alloc(b->arena, (size_t)(count > 0 ? count : 1) * 2 * sizeof(uint32_t));
+	b->param_local = svsl_arena_alloc(b->arena, (size_t)(count > 0 ? count : 1));
+	for (int32_t p = 0; p < count; p++) {
+		const svsl_ast_var_t *param = entry->func->params[p];
+		b->param_ptrs[p] = emit_op(b, svsl_ir_var, b->entry_info ? b->entry_info->param_types[p] : SVSL_TYPE_NONE,
+		                           0, 0, 0, param->loc);
+		b->fn->insts.items[b->param_ptrs[p]].name = param->name;
+	}
+	for (int32_t p = 0; p < count; p++) b->param_fill[p * 2] = SVSL_IR_NONE;
+	for (int32_t i = 0; i < entry->io.count; i++) {
+		const svsl_io_slot_t *slot = &entry->io.items[i];
+		if (slot->output) continue;
+		if (b->param_fill[slot->param * 2] == SVSL_IR_NONE) b->param_fill[slot->param * 2] = (uint32_t)b->fn->insts.count;
+		uint32_t target = b->param_ptrs[slot->param];
+		if (slot->member >= 0) {
+			uint32_t index = emit_const_int(b, svsl_scalar_int32, slot->member, slot->loc);
+			target = emit_chain(b, target, &index, 1, slot->type, slot->loc);
+		}
+		uint32_t value = emit_op(b, svsl_ir_load, slot->type, b->io_ptrs[i], 0, 0, slot->loc);
+		b->param_fill[slot->param * 2 + 1] = emit_op(b, svsl_ir_store, SVSL_TYPE_NONE, target, value, 0, slot->loc);
+	}
+}
+
+// drops the locals (and their fills) of the entry parameters read only through
+// their input slots (entry_input); constants the fills made fall to DCE
+static void drop_unneeded_params(build_t *b) {
+	for (int32_t p = 0; p < b->fn->entry->func->param_count; p++) {
+		if (b->param_local[p]) continue;
+		b->fn->insts.items[b->param_ptrs[p]].op = svsl_ir_nop;
+		if (b->param_fill[p * 2] == SVSL_IR_NONE) continue;
+		for (uint32_t k = b->param_fill[p * 2]; k <= b->param_fill[p * 2 + 1]; k++) {
+			svsl_ir_inst_t *in = &b->fn->insts.items[k];
+			if (in->op == svsl_ir_chain || in->op == svsl_ir_load || in->op == svsl_ir_store) in->op = svsl_ir_nop;
+		}
+	}
+}
+
+// An entry's `return v`: v (or each member of it) into its output slots.
+static void store_outputs(build_t *b, uint32_t value, svsl_loc_t loc) {
+	const svsl_entry_t *entry = b->fn->entry;
+	for (int32_t i = 0; i < entry->io.count && value != SVSL_IR_NONE; i++) {
+		const svsl_io_slot_t *slot = &entry->io.items[i];
+		if (!slot->output) continue;
+		uint32_t part = slot->member < 0 ? value
+		              : emit_op(b, svsl_ir_extract, slot->type, value, (uint32_t)slot->member, 0, loc);
+		emit_op(b, svsl_ir_store, SVSL_TYPE_NONE, b->io_ptrs[i], part, 0, loc);
+	}
+}
+
 bool svsl_ir_build(svsl_arena_t *arena, svsl_program_t *prog, svsl_opt_level_ opt_level,
                    svsl_ir_module_t *out_module, svsl_diag_list_t *ref_diags) {
 	int32_t errors_before = ref_diags->error_count;
@@ -1797,8 +1886,10 @@ bool svsl_ir_build(svsl_arena_t *arena, svsl_program_t *prog, svsl_opt_level_ op
 		for (int32_t f = 0; f < prog->functions.count; f++)
 			if (prog->functions.items[f].func == prog->entries.items[i].func)
 				b.entry_info = &prog->functions.items[f];
+		lower_entry_io(&b);
 		lower_private_globals(&b);
 		lower_stmt(&b, prog->entries.items[i].func->body);
+		drop_unneeded_params(&b);
 
 		// ensure a trailing return (void entries often have no explicit one)
 		if (fn->insts.count == 0 ||
@@ -1806,7 +1897,9 @@ bool svsl_ir_build(svsl_arena_t *arena, svsl_program_t *prog, svsl_opt_level_ op
 			emit_op(&b, svsl_ir_return, SVSL_TYPE_NONE, SVSL_IR_NONE, 0, 0,
 			        prog->entries.items[i].func->loc);
 
-		svsl_ir_optimize(arena, fn, prog, opt_level);
+		// half-lowered IR (an error above) isn't worth optimizing, and could
+		// trip the optimizer's invariant checks with a misleading second error
+		if (!b.failed) svsl_ir_optimize(arena, fn, prog, opt_level, ref_diags);
 	}
 	return ref_diags->error_count == errors_before;
 }

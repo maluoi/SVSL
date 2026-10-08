@@ -1,195 +1,154 @@
-// Constant folding: arithmetic on constant operands collapses in place.
-// Instructions keep their indices (users are untouched); DCE sweeps the
-// now-unused constants afterwards.
+// Constant folding (LLVM's ConstantFolding/InstSimplify on constants): an op
+// whose operands are all constant becomes a constant, lane by lane, through
+// the exact evaluators in ir_const.c (which documents what is and isn't
+// folded). A scalar result rewrites the instruction in place; a vector result
+// becomes a construct of head constants, which emit writes as one
+// OpConstantComposite. A `select` on a constant condition picks its side even
+// when the sides are not constant, and a load from a constant table through
+// constant indices reads the table's initializer. See docs/PLAN_optimizer_llvm.md
+// items 1 and 6.
 
-#include "../ir.h"
+#include "passes.h"
+#include "../ir_const.h"
+#include "../ir_operands.h"
 
-#include <string.h>
-
-typedef union bits64_t {
-	uint64_t u;
-	int64_t  i;
-	double   d;
-} bits64_t;
-
-static bool const_bits(const svsl_ir_func_t *fn, uint32_t id, uint64_t *out) {
-	const svsl_ir_inst_t *inst = &fn->insts.items[id];
-	if (inst->op != svsl_ir_const) return false;
-	*out = (uint64_t)inst->args[0] | ((uint64_t)inst->args[1] << 32);
+// The lanes of operand `id`, broadcast to `n` when it is a scalar.
+static bool operand_lanes(const svsl_ir_edit_t *ed, uint32_t id, int32_t n, svsl_ir_lanes_t *out) {
+	if (!svsl_ir_const_lanes(ed, id, out)) return false;
+	if (out->count == 1)
+		for (int32_t k = 1; k < n; k++) out->bits[k] = out->bits[0];
+	else if (out->count != n) return false;
+	out->count = n;
 	return true;
 }
 
-static bool scalar_is_float_kind(const svsl_types_t *types, svsl_type_id_t id) {
-	const svsl_type_t *t = svsl_type_get(types, id);
-	if (t->kind != svsl_type_scalar) return false;
-	return t->scalar == svsl_scalar_half || t->scalar == svsl_scalar_float16 ||
-	       t->scalar == svsl_scalar_float32 || t->scalar == svsl_scalar_float64;
+static bool value_lanes(const svsl_ir_edit_t *ed, const svsl_types_t *types, uint32_t id,
+                        svsl_scalar_ *out_s, int32_t *out_n) {
+	return svsl_ir_lane_type(types, svsl_ir_edit_inst(ed, id)->type, out_s, out_n);
 }
 
-static int32_t int_bit_width(svsl_scalar_ s) {
-	switch (s) {
-	case svsl_scalar_int8:  case svsl_scalar_uint8:  return 8;
-	case svsl_scalar_int16: case svsl_scalar_uint16: return 16;
-	case svsl_scalar_int64: case svsl_scalar_uint64: return 64;
-	default:                                         return 32; // int32/uint32
+// A load from a constant global through constant indices reads the table's
+// initializer (svsl_ir_const_global_lanes); false when it isn't one.
+static bool const_table_load(const svsl_ir_edit_t *ed, const svsl_program_t *prog, const svsl_ir_inst_t *in,
+                             svsl_ir_lanes_t *out) {
+	uint32_t path[16];
+	int32_t  n = 0;
+	uint32_t p = svsl_ir_edit_resolve(ed, in->args[0]);
+	// collect chain indices innermost-last, then reverse into root-first order
+	while (p != SVSL_IR_NONE && svsl_ir_edit_inst(ed, p)->op == svsl_ir_chain) {
+		const svsl_ir_inst_t *ch = svsl_ir_edit_inst(ed, p);
+		for (int32_t k = (int32_t)ch->aux_count - 1; k >= 0; k--) {
+			svsl_ir_lanes_t idx;
+			if (n >= 16 || !svsl_ir_const_lanes(ed, ed->fn->aux.items[ch->aux + (uint32_t)k], &idx) ||
+			    idx.count != 1) return false;
+			path[n++] = (uint32_t)idx.bits[0];
+		}
+		p = svsl_ir_edit_resolve(ed, ch->args[0]);
 	}
-}
-static bool int_is_signed(svsl_scalar_ s) {
-	return s == svsl_scalar_int8  || s == svsl_scalar_int16 ||
-	       s == svsl_scalar_int32 || s == svsl_scalar_int64;
-}
-// the low `w` bits set (w in 1..64)
-static uint64_t width_mask(int32_t w) {
-	return w >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1);
-}
-// interpret the low `w` bits of `bits` as a two's-complement signed value
-static int64_t sign_ext(uint64_t bits, int32_t w) {
-	if (w >= 64) return (int64_t)bits;
-	uint64_t m = (uint64_t)1 << (w - 1);
-	uint64_t v = bits & width_mask(w);
-	return (int64_t)((v ^ m) - m);
+	if (p == SVSL_IR_NONE) return false;
+	const svsl_ir_inst_t *root = svsl_ir_edit_inst(ed, p);
+	if (root->op != svsl_ir_ptr || (svsl_ref_)root->args[0] != svsl_ref_const_global) return false;
+	for (int32_t a = 0, b = n - 1; a < b; a++, b--) { uint32_t t = path[a]; path[a] = path[b]; path[b] = t; }
+	return svsl_ir_const_global_lanes(prog, root->args[1], path, n, in->type, out);
 }
 
-static bool scalar_is_int(svsl_scalar_ s) {
-	return s >= svsl_scalar_int8 && s <= svsl_scalar_uint64;
+// Every fold (and the constant-condition select) needs a constant first operand.
+static bool first_operand_constant(const svsl_ir_edit_t *ed, const svsl_ir_inst_t *in) {
+	uint32_t a = (svsl_ir_value_arg_mask(in) & 1) ? in->args[0] : SVSL_IR_NONE;
+	if (a == SVSL_IR_NONE || (a = svsl_ir_edit_resolve(ed, a)) == SVSL_IR_NONE) return false;
+	svsl_ir_op_ op = (svsl_ir_op_)svsl_ir_edit_inst(ed, a)->op;
+	return op == svsl_ir_const || op == svsl_ir_construct;
 }
 
-bool svsl_ir_int_convert_bits(uint64_t bits, svsl_scalar_ from, svsl_scalar_ to, uint64_t *out_bits) {
-	if (!scalar_is_int(from) || !scalar_is_int(to)) return false;
-	int32_t  fw = int_bit_width(from), tw = int_bit_width(to);
-	uint64_t v  = int_is_signed(from) ? (uint64_t)sign_ext(bits, fw) : bits & width_mask(fw);
-	*out_bits   = int_is_signed(to)   ? (uint64_t)sign_ext(v, tw)    : v & width_mask(tw);
+// Folds `in` (result scalar rs, n lanes) into `out`; false when any lane can't.
+static bool fold_inst(const svsl_ir_edit_t *ed, const svsl_types_t *types, const svsl_ir_inst_t *in,
+                      svsl_scalar_ rs, int32_t n, svsl_ir_lanes_t *out) {
+	svsl_ir_op_     op = (svsl_ir_op_)in->op;
+	svsl_ir_lanes_t a, b, c;
+	svsl_scalar_    as, bs;
+	int32_t         an, bn;
+	out->count = n;
+
+	if (!(svsl_ir_value_arg_mask(in) & 1) || !value_lanes(ed, types, in->args[0], &as, &an)) return false;
+	switch (op) {
+	case svsl_ir_neg: case svsl_ir_bit_not: case svsl_ir_log_not:
+		if (!operand_lanes(ed, in->args[0], n, &a)) return false;
+		for (int32_t l = 0; l < n; l++)
+			if (!svsl_ir_eval_unary(op, as, a.bits[l], &out->bits[l])) return false;
+		return true;
+	case svsl_ir_convert:
+		if (!operand_lanes(ed, in->args[0], n, &a)) return false;
+		for (int32_t l = 0; l < n; l++)
+			if (!svsl_ir_eval_convert(as, rs, a.bits[l], &out->bits[l])) return false;
+		return true;
+	case svsl_ir_shl: case svsl_ir_shr:
+		if (!value_lanes(ed, types, in->args[1], &bs, &bn)) return false;
+		if (!operand_lanes(ed, in->args[0], n, &a) || !operand_lanes(ed, in->args[1], n, &b)) return false;
+		for (int32_t l = 0; l < n; l++)
+			if (!svsl_ir_eval_shift(op, as, bs, a.bits[l], b.bits[l], &out->bits[l])) return false;
+		return true;
+	case svsl_ir_select:
+		if (!operand_lanes(ed, in->args[0], n, &c) || !operand_lanes(ed, in->args[1], n, &a) ||
+		    !operand_lanes(ed, in->args[2], n, &b)) return false;
+		for (int32_t l = 0; l < n; l++) out->bits[l] = (c.bits[l] & 1) ? a.bits[l] : b.bits[l];
+		return true;
+	default:
+		break;
+	}
+	// binary: add sub mul div rem, bit ops, compares, log and/or. Operands share
+	// a kind; a scalar operand broadcasts, as in vector*scalar.
+	if (svsl_ir_value_arg_mask(in) != 0x3 || op == svsl_ir_mat_mul || op == svsl_ir_extract_dynamic)
+		return false;
+	if (!value_lanes(ed, types, in->args[1], &bs, &bn) || bs != as) return false;
+	if (!operand_lanes(ed, in->args[0], n, &a) || !operand_lanes(ed, in->args[1], n, &b)) return false;
+	for (int32_t l = 0; l < n; l++)
+		if (!svsl_ir_eval_binary(op, as, a.bits[l], b.bits[l], &out->bits[l])) return false;
 	return true;
 }
 
-static void replace_with_const(svsl_ir_inst_t *inst, uint64_t bits, bool *ref_changed) {
-	*ref_changed    = true;
-	inst->op        = svsl_ir_const;
-	inst->args[0]   = (uint32_t)bits;
-	inst->args[1]   = (uint32_t)(bits >> 32);
-	inst->args[2]   = 0;
-	inst->args[3]   = SVSL_IR_NONE;
-	inst->aux_count = 0;
-}
+void svsl_ir_fold(svsl_ir_edit_t *ed, svsl_program_t *prog, svsl_opt_level_ level) {
+	(void)level;
+	svsl_ir_func_t *fn    = ed->fn;
+	svsl_types_t   *types = &prog->types;
+	int32_t         count = fn->insts.count;
 
-bool svsl_ir_fold(svsl_ir_func_t *fn, const svsl_types_t *types) {
-	bool changed = false;
-	for (int32_t i = 0; i < fn->insts.count; i++) {
-		svsl_ir_inst_t *inst = &fn->insts.items[i];
-		if (inst->type == SVSL_TYPE_NONE) continue;
-		const svsl_type_t *t = svsl_type_get(types, inst->type);
-		if (t->kind != svsl_type_scalar) continue; // scalar folding only (vectors via components)
+	for (int32_t i = 0; i < count; i++) {
+		svsl_ir_inst_t *in = &fn->insts.items[i];
+		svsl_ir_op_     op = (svsl_ir_op_)in->op;
+		if (op == svsl_ir_const || op == svsl_ir_construct || op == svsl_ir_nop) continue;
+		if (op == svsl_ir_load) { // a constant table never changes: read its initializer
+			svsl_ir_lanes_t r;
+			if (const_table_load(ed, prog, in, &r))
+				svsl_ir_edit_replace(ed, (uint32_t)i, svsl_ir_make_const(ed, types, (uint32_t)i, in->type, &r));
+			continue;
+		}
+		if (!svsl_ir_is_pure(in, types) || op == svsl_ir_ptr || op == svsl_ir_chain) continue;
+		if (!first_operand_constant(ed, in)) continue; // cheap reject before any type work
 
-		uint64_t a, v;
-		bool     is_float = scalar_is_float_kind(types, inst->type);
-		// float16 constants hold 16-bit patterns; folding them with the float32
-		// interpretation below would corrupt them, so they stay runtime ops
-		bool foldable_float = is_float && t->scalar != svsl_scalar_float64 &&
-		                                  t->scalar != svsl_scalar_float16;
+		// a constant condition picks its side, constant or not
+		if (op == svsl_ir_select) {
+			svsl_ir_lanes_t c;
+			if (svsl_ir_const_lanes(ed, in->args[0], &c)) {
+				bool all = true, none = true;
+				for (int32_t l = 0; l < c.count; l++) { all &= (c.bits[l] & 1) != 0; none &= !(c.bits[l] & 1); }
+				if (all || none) { svsl_ir_edit_replace(ed, (uint32_t)i, all ? in->args[1] : in->args[2]); continue; }
+			}
+		}
 
-		switch ((svsl_ir_op_)inst->op) {
-		case svsl_ir_add: case svsl_ir_sub: case svsl_ir_mul:
-		case svsl_ir_div: case svsl_ir_rem: {
-			if (!const_bits(fn, inst->args[0], &a) || !const_bits(fn, inst->args[1], &v)) break;
-			if (foldable_float) {
-				float fa, fb;
-				uint32_t ua = (uint32_t)a, ub = (uint32_t)v;
-				memcpy(&fa, &ua, 4);
-				memcpy(&fb, &ub, 4);
-				float r = inst->op == svsl_ir_add ? fa + fb :
-				          inst->op == svsl_ir_sub ? fa - fb :
-				          inst->op == svsl_ir_mul ? fa * fb :
-				          inst->op == svsl_ir_div ? (fb != 0 ? fa / fb : 0) : 0;
-				if ((inst->op == svsl_ir_div || inst->op == svsl_ir_rem) && fb == 0) break;
-				if (inst->op == svsl_ir_rem) break; // frem folding not worth the ULP risk
-				uint32_t bits;
-				memcpy(&bits, &r, 4);
-				replace_with_const(inst, bits, &changed);
-			} else if (!is_float) {
-				// fold at the scalar's true width and signedness: add/sub/mul agree in the
-				// low bits either way, but div/rem and any 64-bit type need the real type
-				int32_t  w    = int_bit_width(t->scalar);
-				uint64_t mask = width_mask(w);
-				uint64_t r;
-				if (int_is_signed(t->scalar)) {
-					int64_t ia = sign_ext(a, w), ib = sign_ext(v, w);
-					if ((inst->op == svsl_ir_div || inst->op == svsl_ir_rem) && ib == 0) break;
-					bool ovf = ia == INT64_MIN && ib == -1; // INT_MIN/-1 overflows
-					r = inst->op == svsl_ir_add ? (uint64_t)ia + (uint64_t)ib :
-					    inst->op == svsl_ir_sub ? (uint64_t)ia - (uint64_t)ib :
-					    inst->op == svsl_ir_mul ? (uint64_t)ia * (uint64_t)ib :
-					    inst->op == svsl_ir_div ? (uint64_t)(ovf ? INT64_MIN : ia / ib)
-					                            : (uint64_t)(ovf ? 0         : ia % ib);
-				} else {
-					uint64_t ua = a & mask, ub = v & mask;
-					if ((inst->op == svsl_ir_div || inst->op == svsl_ir_rem) && ub == 0) break;
-					r = inst->op == svsl_ir_add ? ua + ub :
-					    inst->op == svsl_ir_sub ? ua - ub :
-					    inst->op == svsl_ir_mul ? ua * ub :
-					    inst->op == svsl_ir_div ? ua / ub : ua % ub;
-				}
-				replace_with_const(inst, r & mask, &changed);
-			}
-			break;
-		}
-		case svsl_ir_neg: {
-			if (!const_bits(fn, inst->args[0], &a)) break;
-			if (foldable_float) {
-				uint32_t ua = (uint32_t)a;
-				float    fa;
-				memcpy(&fa, &ua, 4);
-				fa = -fa;
-				uint32_t bits;
-				memcpy(&bits, &fa, 4);
-				replace_with_const(inst, bits, &changed);
-			} else if (!is_float) {
-				// unsigned negate (signed -MIN overflows), at the scalar's true width
-				int32_t  w    = int_bit_width(t->scalar);
-				uint64_t mask = width_mask(w);
-				replace_with_const(inst, ((uint64_t)0 - (a & mask)) & mask, &changed);
-			}
-			break;
-		}
-		case svsl_ir_convert: { // int literal -> float constant is the common case
-			if (!const_bits(fn, inst->args[0], &a)) break;
-			const svsl_type_t *from = svsl_type_get(types, fn->insts.items[inst->args[0]].type);
-			if (from->kind != svsl_type_scalar) break;
-			if (svsl_ir_int_convert_bits(a, from->scalar, t->scalar, &v)) { // int <-> int
-				replace_with_const(inst, v, &changed);
-				break;
-			}
-			bool from_float = from->scalar == svsl_scalar_half || from->scalar == svsl_scalar_float32 ||
-			                  from->scalar == svsl_scalar_float16 || from->scalar == svsl_scalar_float64;
-			if (!from_float && foldable_float &&
-			    from->scalar != svsl_scalar_int64 && from->scalar != svsl_scalar_uint64) {
-				float r = from->scalar == svsl_scalar_uint32 ? (float)(uint32_t)a
-				                                             : (float)(int32_t)(uint32_t)a;
-				uint32_t bits;
-				memcpy(&bits, &r, 4);
-				replace_with_const(inst, bits, &changed);
-			} else if (from_float && !is_float &&
-			           from->scalar != svsl_scalar_float64 &&
-			           from->scalar != svsl_scalar_float16 &&
-			           (t->scalar == svsl_scalar_int32 || t->scalar == svsl_scalar_uint32)) {
-				uint32_t ua = (uint32_t)a;
-				float    fa;
-				memcpy(&fa, &ua, 4);
-				// out-of-range float->int is UB in C and undefined in SPIR-V; clamp, NaN -> 0
-				uint32_t bits;
-				if (t->scalar == svsl_scalar_int32)
-					bits = fa != fa            ? 0 :
-					       fa <= -2147483648.f ? 0x80000000u :
-					       fa >=  2147483648.f ? 0x7FFFFFFFu : (uint32_t)(int32_t)fa;
-				else
-					bits = fa != fa || fa <= 0.f ? 0 :
-					       fa >= 4294967296.f    ? 0xFFFFFFFFu : (uint32_t)fa;
-				replace_with_const(inst, bits, &changed);
-			}
-			break;
-		}
-		default:
-			break;
+		svsl_scalar_    rs;
+		int32_t         n;
+		svsl_ir_lanes_t r;
+		if (!svsl_ir_lane_type(types, in->type, &rs, &n)) continue;
+		if (!fold_inst(ed, types, in, rs, n, &r)) continue;
+
+		if (n == 1) {
+			*in = (svsl_ir_inst_t){ .op = svsl_ir_const, .type = in->type,
+			                        .args = { (uint32_t)r.bits[0], (uint32_t)(r.bits[0] >> 32), 0, SVSL_IR_NONE },
+			                        .loc = in->loc, .name = in->name };
+			svsl_ir_edit_touch(ed);
+		} else {
+			// a vector constant: a construct of head scalars (emit: OpConstantComposite)
+			svsl_ir_edit_replace(ed, (uint32_t)i, svsl_ir_make_const(ed, types, (uint32_t)i, in->type, &r));
 		}
 	}
-	return changed;
 }

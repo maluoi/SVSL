@@ -23,22 +23,31 @@ static svsl_arena_block_t *arena_block_new(size_t min_capacity) {
 	return block;
 }
 
-void *svsl_arena_alloc(svsl_arena_t *arena, size_t size) {
+void *svsl_arena_alloc_raw(svsl_arena_t *arena, size_t size) {
 	size = (size + ARENA_ALIGN - 1) & ~(size_t)(ARENA_ALIGN - 1);
 	if (size == 0) size = ARENA_ALIGN;
 
+	// blocks after `last` are empty ones a reset kept: use the first that fits
 	svsl_arena_block_t *block = arena->last;
-	if (!block || block->used + size > block->capacity) {
+	while (block && block->used + size > block->capacity) block = block->next;
+	if (!block) {
 		block = arena_block_new(size);
 		if (!block) return NULL;
-		if (arena->last) arena->last->next = block;
-		else             arena->first      = block;
-		arena->last = block;
+		svsl_arena_block_t *tail = arena->last;
+		while (tail && tail->next) tail = tail->next;
+		if (tail) tail->next  = block;
+		else      arena->first = block;
 	}
+	arena->last = block;
 
 	void *result = (char *)block + ARENA_HEADER_SIZE + block->used;
 	block->used += size;
-	memset(result, 0, size);
+	return result;
+}
+
+void *svsl_arena_alloc(svsl_arena_t *arena, size_t size) {
+	void *result = svsl_arena_alloc_raw(arena, size);
+	if (result) memset(result, 0, (size + ARENA_ALIGN - 1) & ~(size_t)(ARENA_ALIGN - 1));
 	return result;
 }
 
@@ -48,6 +57,11 @@ char *svsl_arena_strndup(svsl_arena_t *arena, const char *str, size_t len) {
 	if (len) memcpy(result, str, len); // str may be NULL when len is 0
 	result[len] = '\0';
 	return result;
+}
+
+void svsl_arena_reset(svsl_arena_t *arena) {
+	for (svsl_arena_block_t *block = arena->first; block; block = block->next) block->used = 0;
+	arena->last = arena->first;
 }
 
 void svsl_arena_free(svsl_arena_t *arena) {
